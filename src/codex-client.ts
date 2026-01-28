@@ -422,9 +422,27 @@ export class CodexClient extends EventEmitter {
         break;
 
       case 'turn/completed':
-      case 'codex/event/task_complete':
-        this.emit('turn:completed', params as { threadId: string; turnId: string; status: TurnStatus });
+      case 'codex/event/task_complete': {
+        // Normalize status: Codex may send 'success', 'done', 'completed', or omit status entirely
+        const rawStatus = (params as { status?: string }).status;
+        let normalizedStatus: TurnStatus = 'completed'; // Default to completed for task_complete
+
+        if (rawStatus === 'completed' || rawStatus === 'success' || rawStatus === 'done') {
+          normalizedStatus = 'completed';
+        } else if (rawStatus === 'interrupted' || rawStatus === 'cancelled' || rawStatus === 'aborted') {
+          normalizedStatus = 'interrupted';
+        } else if (rawStatus === 'failed' || rawStatus === 'error') {
+          normalizedStatus = 'failed';
+        }
+        // Note: 'running' status in a task_complete event doesn't make sense, ignore it
+
+        this.emit('turn:completed', {
+          threadId: (params as { threadId?: string }).threadId ?? '',
+          turnId: (params as { turnId?: string }).turnId ?? '',
+          status: normalizedStatus,
+        });
         break;
+      }
 
       // Item lifecycle
       case 'item/started':

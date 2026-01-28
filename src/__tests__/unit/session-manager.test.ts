@@ -67,17 +67,23 @@ describe('Session Manager', () => {
     it('returns empty store on parse error', () => {
       mockFs.existsSync.mockReturnValue(true);
       mockFs.readFileSync.mockReturnValue('invalid json');
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       const store = loadSessions();
       expect(store).toEqual({ channels: {} });
+      expect(consoleSpy).toHaveBeenCalled();
+      consoleSpy.mockRestore();
     });
 
     it('returns empty store on invalid structure', () => {
       mockFs.existsSync.mockReturnValue(true);
       mockFs.readFileSync.mockReturnValue(JSON.stringify({ invalid: true }));
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       const store = loadSessions();
       expect(store).toEqual({ channels: {} });
+      expect(consoleSpy).toHaveBeenCalled();
+      consoleSpy.mockRestore();
     });
   });
 

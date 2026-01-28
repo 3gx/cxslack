@@ -132,17 +132,20 @@ export async function stopBot(): Promise<void> {
 function setupEventHandlers(): void {
   // Handle app mentions (@codex)
   app.event('app_mention', async ({ event, say, client }) => {
+    const channelId: string = event.channel;
+    const threadTs: string | undefined = event.thread_ts;
+    const messageTs: string = event.ts;
+    // Always reply in a thread: use existing thread or create new one under user's message
+    const replyThreadTs = threadTs ?? messageTs;
+
     try {
-      const channelId: string = event.channel;
-      const threadTs: string | undefined = event.thread_ts;
       const userId: string = event.user || '';
-      const messageTs: string = event.ts;
       const botUserId = (await client.auth.test()).user_id as string;
       const text: string = extractBotMention(event.text, botUserId);
 
       if (!text) {
         await say({
-          thread_ts: threadTs,
+          thread_ts: replyThreadTs,
           text: 'Hello! How can I help you? Try asking me a question or use `/help` for commands.',
         });
         return;
@@ -152,7 +155,7 @@ function setupEventHandlers(): void {
     } catch (error) {
       console.error('Error handling app_mention:', error);
       await say({
-        thread_ts: event.thread_ts,
+        thread_ts: replyThreadTs,
         text: toUserMessage(error),
       });
     }
@@ -183,19 +186,22 @@ function setupEventHandlers(): void {
 
     const channelId = msg.channel;
     const threadTs = msg.thread_ts;
+    const messageTs = msg.ts;
     const userId = msg.user || '';
     const text = msg.text || '';
+    // For DMs, always reply in thread to keep conversation organized
+    const replyThreadTs = threadTs ?? messageTs;
 
     if (!text.trim() || !userId) {
       return;
     }
 
     try {
-      await handleUserMessage(channelId, threadTs, userId, text, msg.ts);
+      await handleUserMessage(channelId, threadTs, userId, text, messageTs);
     } catch (error) {
       console.error('Error handling message:', error);
       await say({
-        thread_ts: threadTs,
+        thread_ts: replyThreadTs,
         text: toUserMessage(error),
       });
     }
@@ -254,22 +260,26 @@ async function handleUserMessage(
   text: string,
   messageTs: string
 ): Promise<void> {
-  const conversationKey = makeConversationKey(channelId, threadTs);
+  // CRITICAL: All bot responses go into threads, never pollute the main channel.
+  // If user mentions bot in main channel, use their message as thread anchor.
+  // If user is already in a thread, continue in that thread.
+  const postingThreadTs = threadTs ?? messageTs;
+  const conversationKey = makeConversationKey(channelId, postingThreadTs);
 
   // Check if this is a command
   const commandContext: CommandContext = {
     channelId,
-    threadTs,
+    threadTs: postingThreadTs, // Use posting thread for session lookup
     userId,
     text,
   };
 
   const commandResult = await handleCommand(commandContext, codex);
   if (commandResult) {
-    // Send command response
+    // Send command response in thread
     await app.client.chat.postMessage({
       channel: channelId,
-      thread_ts: threadTs,
+      thread_ts: postingThreadTs,
       blocks: commandResult.blocks,
       text: commandResult.text,
     });
@@ -277,20 +287,19 @@ async function handleUserMessage(
   }
 
   // Regular message - send to Codex
-  const workingDir = getEffectiveWorkingDir(channelId, threadTs);
-  const approvalPolicy = getEffectiveApprovalPolicy(channelId, threadTs);
-  let threadId = getEffectiveThreadId(channelId, threadTs);
+  // Use postingThreadTs for all session lookups since that's our thread key
+  const workingDir = getEffectiveWorkingDir(channelId, postingThreadTs);
+  const approvalPolicy = getEffectiveApprovalPolicy(channelId, postingThreadTs);
+  let threadId = getEffectiveThreadId(channelId, postingThreadTs);
 
-  // Get session info
-  const session = threadTs
-    ? getThreadSession(channelId, threadTs)
-    : getSession(channelId);
+  // Get session info - always use thread session since all conversations are in threads
+  const session = getThreadSession(channelId, postingThreadTs) ?? getSession(channelId);
 
   // Start or resume thread
   if (!threadId) {
-    // Check if this is a Slack thread that needs forking
+    // Check if this is a Slack thread that needs forking (only for existing threads, not new anchors)
     if (threadTs) {
-      const result = await getOrCreateThreadSession(channelId, threadTs);
+      const result = await getOrCreateThreadSession(channelId, postingThreadTs);
       if (result.isNewFork && result.session.forkedFrom) {
         // Fork the Codex thread
         const forkedThread = await codex.forkThread(
@@ -298,28 +307,29 @@ async function handleUserMessage(
           result.session.forkedAtTurnIndex
         );
         threadId = forkedThread.id;
-        await saveThreadSession(channelId, threadTs, { threadId });
+        await saveThreadSession(channelId, postingThreadTs, { threadId });
       } else {
         // Start new thread
         const newThread = await codex.startThread(workingDir);
         threadId = newThread.id;
-        await saveThreadSession(channelId, threadTs, { threadId });
+        await saveThreadSession(channelId, postingThreadTs, { threadId });
       }
     } else {
-      // Start new thread in main channel
+      // New conversation from main channel mention - start new Codex thread
+      // Session is keyed by the anchor message ts (postingThreadTs = messageTs in this case)
       const newThread = await codex.startThread(workingDir);
       threadId = newThread.id;
-      await saveSession(channelId, { threadId });
+      await saveThreadSession(channelId, postingThreadTs, { threadId });
     }
   } else {
     // Resume existing thread
     await codex.resumeThread(threadId);
   }
 
-  // Post initial "processing" message
+  // Post initial "processing" message IN THE THREAD
   const initialResult = await app.client.chat.postMessage({
     channel: channelId,
-    thread_ts: threadTs,
+    thread_ts: postingThreadTs, // Always post in thread!
     blocks: buildStatusBlocks({ status: 'processing', conversationKey }),
     text: 'Processing...',
   });
@@ -331,7 +341,7 @@ async function handleUserMessage(
   // Start streaming context
   const streamingContext: StreamingContext = {
     channelId,
-    threadTs,
+    threadTs: postingThreadTs, // Track the thread we're posting to
     messageTs: initialResult.ts,
     threadId,
     turnId: '', // Will be set when turn starts
@@ -356,7 +366,7 @@ async function handleUserMessage(
 
   // Record turn for fork tracking
   const turnIndex = (session as { turns?: unknown[] })?.turns?.length ?? 0;
-  await recordTurn(channelId, threadTs ?? null, {
+  await recordTurn(channelId, postingThreadTs, {
     turnId,
     turnIndex,
     slackTs: initialResult.ts,
