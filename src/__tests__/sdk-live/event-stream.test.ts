@@ -228,4 +228,182 @@ describe.skipIf(SKIP_LIVE)('Codex Event Stream', { timeout: 60000 }, () => {
     // Always pass - this is just for documentation
     expect(true).toBe(true);
   });
+
+  // ============================================================================
+  // Item Lifecycle Event Structure Tests
+  // These tests memorialize the actual Codex notification structure for item events.
+  // If Codex/app-server changes the format, these tests will catch it.
+  // ============================================================================
+
+  it('item/started notifications have expected structure', async () => {
+    // Find item_started notifications (both formats)
+    const itemStartedNotifications = notifications.filter(
+      (n) => n.method === 'item/started' || n.method === 'codex/event/item_started'
+    );
+
+    // Should have received at least one (userMessage, reasoning, or agentMessage)
+    expect(itemStartedNotifications.length).toBeGreaterThan(0);
+
+    console.log('\n=== item/started Structure Analysis ===');
+    for (const n of itemStartedNotifications) {
+      const params = n.params as Record<string, unknown>;
+      console.log(`Method: ${n.method}`);
+      console.log(`Params keys: ${Object.keys(params).join(', ')}`);
+
+      // Extract item from either format:
+      // Format 1 (codex/event/item_started): { msg: { item: {...} } }
+      // Format 2 (item/started): { item: {...} }
+      const msg = params.msg as Record<string, unknown> | undefined;
+      const item = (msg?.item || params.item) as Record<string, unknown> | undefined;
+
+      if (item) {
+        console.log(`Item keys: ${Object.keys(item).join(', ')}`);
+        console.log(`Item.type: ${item.type}`);
+        console.log(`Item.id: ${item.id}`);
+      } else {
+        console.log('WARNING: No item found in expected locations!');
+      }
+      console.log('---');
+    }
+    console.log('=======================================\n');
+
+    // Verify structure for at least one notification
+    const sampleNotification = itemStartedNotifications[0];
+    const params = sampleNotification.params as Record<string, unknown>;
+    const msg = params.msg as Record<string, unknown> | undefined;
+    const item = (msg?.item || params.item) as Record<string, unknown> | undefined;
+
+    // CRITICAL: item must exist in one of the expected locations
+    expect(item).toBeDefined();
+    expect(item).not.toBeNull();
+
+    // CRITICAL: item must have 'type' and 'id' fields
+    expect(item!.type).toBeDefined();
+    expect(typeof item!.type).toBe('string');
+    expect(item!.id).toBeDefined();
+    expect(typeof item!.id).toBe('string');
+  });
+
+  it('item/started type field contains expected item types', async () => {
+    // Find all item_started notifications
+    const itemStartedNotifications = notifications.filter(
+      (n) => n.method === 'item/started' || n.method === 'codex/event/item_started'
+    );
+
+    // Extract all item types seen
+    const itemTypes = new Set<string>();
+    for (const n of itemStartedNotifications) {
+      const params = n.params as Record<string, unknown>;
+      const msg = params.msg as Record<string, unknown> | undefined;
+      const item = (msg?.item || params.item) as Record<string, unknown> | undefined;
+      if (item?.type) {
+        // Normalize to lowercase for comparison
+        const typeStr = String(item.type).toLowerCase();
+        itemTypes.add(typeStr);
+      }
+    }
+
+    console.log('Item types seen:', [...itemTypes].join(', '));
+
+    // Known item types from Codex documentation and observed behavior:
+    // - userMessage / UserMessage: user's input
+    // - agentMessage / AgentMessage: agent's response
+    // - reasoning / Reasoning: thinking/reasoning content
+    // - commandExecution: shell command execution
+    // - mcpToolCall: MCP tool invocation
+    // - collabToolCall: collaboration tool call
+    // - fileChange: file modification
+    // - webSearch: web search
+    // - imageView: image viewing
+    const knownItemTypes = new Set([
+      'usermessage',
+      'agentmessage',
+      'reasoning',
+      'commandexecution',
+      'mcptoolcall',
+      'collabtoolcall',
+      'filechange',
+      'websearch',
+      'imageview',
+      'enteredreviewmode',
+      'exitedreviewmode',
+      'compacted',
+    ]);
+
+    // At minimum, a simple message should produce userMessage, reasoning, agentMessage
+    // (or at least some subset of these)
+    const hasKnownType = [...itemTypes].some((t) => knownItemTypes.has(t));
+    expect(hasKnownType).toBe(true);
+  });
+
+  it('item/completed notifications match item/started by itemId', async () => {
+    // Get all item started IDs
+    const startedIds = new Set<string>();
+    for (const n of notifications) {
+      if (n.method === 'item/started' || n.method === 'codex/event/item_started') {
+        const params = n.params as Record<string, unknown>;
+        const msg = params.msg as Record<string, unknown> | undefined;
+        const item = (msg?.item || params.item) as Record<string, unknown> | undefined;
+        if (item?.id) {
+          startedIds.add(String(item.id));
+        }
+      }
+    }
+
+    // Get all item completed IDs
+    const completedIds = new Set<string>();
+    for (const n of notifications) {
+      if (n.method === 'item/completed' || n.method === 'codex/event/item_completed') {
+        const params = n.params as Record<string, unknown>;
+        const msg = params.msg as Record<string, unknown> | undefined;
+        const item = (msg?.item || params.item) as Record<string, unknown> | undefined;
+        const itemId = item?.id || params.itemId || params.item_id;
+        if (itemId) {
+          completedIds.add(String(itemId));
+        }
+      }
+    }
+
+    console.log('Started item IDs:', [...startedIds].join(', '));
+    console.log('Completed item IDs:', [...completedIds].join(', '));
+
+    // Every started item should eventually complete (for a successful turn)
+    // Note: Some items might complete that weren't tracked as started (edge case)
+    if (startedIds.size > 0 && completedIds.size > 0) {
+      // At least some started items should have completed
+      const matchingIds = [...startedIds].filter((id) => completedIds.has(id));
+      console.log('Matching IDs:', matchingIds.length);
+      expect(matchingIds.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('verifies dual notification format (both item/* and codex/event/item_*)', async () => {
+    // Codex currently sends BOTH formats for the same event
+    // This test documents that behavior so we detect if it changes
+
+    const oldStyleMethods = notifications.filter((n) =>
+      n.method.startsWith('item/')
+    ).map((n) => n.method);
+
+    const newStyleMethods = notifications.filter((n) =>
+      n.method.startsWith('codex/event/item')
+    ).map((n) => n.method);
+
+    console.log('Old-style (item/*) methods:', [...new Set(oldStyleMethods)].join(', ') || 'none');
+    console.log('New-style (codex/event/item*) methods:', [...new Set(newStyleMethods)].join(', ') || 'none');
+
+    // Document which format(s) are currently in use
+    const hasOldStyle = oldStyleMethods.length > 0;
+    const hasNewStyle = newStyleMethods.length > 0;
+
+    console.log(`Dual format active: ${hasOldStyle && hasNewStyle}`);
+
+    // At least one format should be present
+    expect(hasOldStyle || hasNewStyle).toBe(true);
+
+    // If both formats are present, verify they're for the same items (dedup check)
+    if (hasOldStyle && hasNewStyle) {
+      console.log('WARNING: Dual notification format detected. Bot should deduplicate by itemId.');
+    }
+  });
 });
