@@ -136,8 +136,9 @@ export class CodexClient extends EventEmitter {
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Delta deduplication to prevent text duplication from multiple event types
+  // Uses content-only hash (no itemId) since different event types have different itemIds
   private recentDeltaHashes = new Map<string, number>(); // hash -> timestamp
-  private readonly DELTA_HASH_TTL_MS = 5000; // 5 second TTL
+  private readonly DELTA_HASH_TTL_MS = 100; // 100ms TTL - same content within 100ms is duplicate
 
   private readonly config: Required<CodexClientConfig>;
 
@@ -476,9 +477,10 @@ export class CodexClient extends EventEmitter {
         const itemId = p.itemId || p.item_id || msg?.item_id || '';
 
         // Deduplication: prevent duplicate deltas from different event types
+        // Use content-only hash since itemId differs between event types
         const deltaStr = delta as string;
         if (deltaStr) {
-          const hash = `${itemId}:${deltaStr.slice(0, 50)}`;
+          const hash = deltaStr.slice(0, 100); // Use first 100 chars as hash
           const now = Date.now();
 
           // Clean expired hashes
@@ -488,7 +490,7 @@ export class CodexClient extends EventEmitter {
             }
           }
 
-          // Skip if duplicate
+          // Skip if duplicate (same content within 100ms is from different event types)
           if (this.recentDeltaHashes.has(hash)) {
             return;
           }
