@@ -35,6 +35,33 @@ const MAX_LIVE_ENTRIES = 300; // Threshold for rolling window
 const ROLLING_WINDOW_SIZE = 20; // Show last N entries when exceeded
 const ACTIVITY_LOG_MAX_CHARS = 1000; // Max chars for activity display
 
+// Item types that should NOT be displayed as tool activity
+// These are message lifecycle events, not tool executions
+const NON_TOOL_ITEM_TYPES = new Set([
+  'usermessage',    // User's input (already visible in Slack)
+  'agentmessage',   // Agent's response (shown separately)
+  'reasoning',      // Thinking (handled by thinking:delta events)
+]);
+
+/**
+ * Check if an item type is a displayable tool.
+ * Filters out message lifecycle events that shouldn't appear as tool activity.
+ * Uses case-insensitive matching and normalizes separators.
+ */
+export function isToolItemType(itemType: unknown): boolean {
+  // Type guard - handle null/undefined/non-string
+  if (typeof itemType !== 'string' || itemType.length === 0) {
+    return true; // Unknown types pass through (safe default)
+  }
+
+  // Normalize: convert to lowercase and remove separators
+  const normalized = itemType
+    .toLowerCase()
+    .replace(/[-_]/g, '');
+
+  return !NON_TOOL_ITEM_TYPES.has(normalized);
+}
+
 // Mutex management for concurrent update protection
 const updateMutexes = new Map<string, Mutex>();
 
@@ -334,17 +361,23 @@ export class StreamingManager {
       }
     });
 
-    // Item started (tool use) - JUST ACCUMULATE DATA, timer handles updates
+    // Item started (tool use) - FILTER non-tool items, timer handles updates
     this.codex.on('item:started', ({ itemId, itemType }) => {
+      // Skip non-tool items (userMessage, agentMessage, reasoning)
+      if (!isToolItemType(itemType)) {
+        console.log(`[streaming] Skipping non-tool item: ${itemType}`);
+        return;
+      }
+
       for (const [key, state] of this.states) {
         if (state.isStreaming) {
-          // Track tool start
+          // Track tool start (only actual tools now)
           state.activeTools.set(itemId, {
             tool: itemType,
             startTime: Date.now(),
           });
 
-          // Add activity entry (timer will display it)
+          // Add activity entry for actual tools only
           this.activityManager.addEntry(key, {
             type: 'tool_start',
             timestamp: Date.now(),
