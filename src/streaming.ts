@@ -362,7 +362,7 @@ export class StreamingManager {
     });
 
     // Item started (tool use) - FILTER non-tool items, timer handles updates
-    this.codex.on('item:started', ({ itemId, itemType }) => {
+    this.codex.on('item:started', ({ itemId, itemType, command, commandActions }) => {
       // Skip non-tool items (userMessage, agentMessage, reasoning)
       if (!isToolItemType(itemType)) {
         console.log(`[streaming] Skipping non-tool item: ${itemType}`);
@@ -371,9 +371,22 @@ export class StreamingManager {
 
       for (const [key, state] of this.states) {
         if (state.isStreaming) {
+          // Extract display command for commandExecution items
+          let toolInput: string | undefined;
+          if (itemType === 'commandExecution' || itemType === 'CommandExecution') {
+            if (commandActions && commandActions.length > 0) {
+              toolInput = commandActions[0].command; // e.g., "ls", "git status"
+            } else if (command) {
+              // Parse from "/bin/bash -lc <cmd>" format
+              const match = command.match(/-lc\s+["']?(.+?)["']?$/);
+              toolInput = match ? match[1] : command;
+            }
+          }
+
           // Track tool start (only actual tools now)
           state.activeTools.set(itemId, {
             tool: itemType,
+            input: toolInput,
             startTime: Date.now(),
           });
 
@@ -382,6 +395,7 @@ export class StreamingManager {
             type: 'tool_start',
             timestamp: Date.now(),
             tool: itemType,
+            toolInput,
             toolUseId: itemId,
           });
           break;
@@ -402,6 +416,7 @@ export class StreamingManager {
               type: 'tool_complete',
               timestamp: Date.now(),
               tool: toolInfo.tool,
+              toolInput: toolInfo.input,
               toolUseId: itemId,
               durationMs,
             });

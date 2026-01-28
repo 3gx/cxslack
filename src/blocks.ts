@@ -658,14 +658,15 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
   const blocks: Block[] = [];
   const elapsedSec = (elapsedMs / 1000).toFixed(1);
 
-  // Activity log section
+  // Activity log section - expand: true prevents Slack "See more" collapse
   blocks.push({
     type: 'section',
     text: {
       type: 'mrkdwn',
       text: activityText || ':gear: Starting...',
     },
-  });
+    expand: true,
+  } as Block);
 
   // Status line at bottom
   let statusText: string;

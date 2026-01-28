@@ -484,5 +484,34 @@ describe('Block Kit Builders', () => {
       expect(blocks[1].type).toBe('context');
       expect(blocks[1].elements?.[0].text).toContain('Processing');
     });
+
+    describe('expand property', () => {
+      it('includes expand: true on activity section block', () => {
+        const blocks = buildActivityBlocks({
+          activityText: ':gear: Test activity',
+          status: 'running',
+          conversationKey: 'C123:456.789',
+          elapsedMs: 1000,
+        });
+
+        // First block should be the section with expand: true
+        const sectionBlock = blocks[0];
+        expect(sectionBlock.type).toBe('section');
+        expect((sectionBlock as unknown as { expand: boolean }).expand).toBe(true);
+      });
+
+      it('prevents Slack collapse by setting expand: true', () => {
+        const blocks = buildActivityBlocks({
+          activityText: 'A'.repeat(500), // Long text
+          status: 'completed',
+          conversationKey: 'C123:456.789',
+          elapsedMs: 5000,
+        });
+
+        const sectionBlock = blocks[0];
+        // expand: true ensures Slack won't collapse this section
+        expect((sectionBlock as unknown as { expand: boolean }).expand).toBe(true);
+      });
+    });
   });
 });

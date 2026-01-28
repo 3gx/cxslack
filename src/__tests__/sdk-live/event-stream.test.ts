@@ -406,4 +406,57 @@ describe.skipIf(SKIP_LIVE)('Codex Event Stream', { timeout: 60000 }, () => {
       console.log('WARNING: Dual notification format detected. Bot should deduplicate by itemId.');
     }
   });
+
+  it('documents item structure including command fields when present', async () => {
+    // Clear notifications
+    notifications.length = 0;
+
+    const threadResult = await rpc<{ thread: { id: string } }>('thread/start', {
+      workingDirectory: process.cwd(),
+    });
+    const threadId = threadResult.thread.id;
+
+    // Use a prompt likely to trigger tool use (not guaranteed)
+    await rpc('turn/start', {
+      threadId,
+      input: [{ type: 'text', text: 'What files are in the current directory? Use ls.' }],
+      approvalPolicy: 'never',
+    });
+
+    // Wait for turn to complete
+    const startTime = Date.now();
+    let turnComplete = false;
+    while (!turnComplete && Date.now() - startTime < 45000) {
+      await new Promise((r) => setTimeout(r, 100));
+      turnComplete = notifications.some(
+        (n) => n.method === 'codex/event/task_complete' || n.method === 'turn/completed'
+      );
+    }
+
+    // Find any item/started notifications
+    const itemStarted = notifications.filter((n) =>
+      n.method === 'item/started' || n.method === 'codex/event/item_started'
+    );
+
+    expect(itemStarted.length).toBeGreaterThan(0);
+
+    // Document structure for any commandExecution items found
+    for (const notif of itemStarted) {
+      const p = notif.params as Record<string, unknown>;
+      const msg = p.msg as Record<string, unknown> | undefined;
+      const item = (msg?.item || p.item) as Record<string, unknown> | undefined;
+
+      if (item?.type === 'commandExecution' || item?.type === 'CommandExecution') {
+        console.log('commandExecution item found:', JSON.stringify(item, null, 2));
+        // Verify expected fields exist
+        expect(item.id).toBeDefined();
+        expect(item.command).toBeDefined();
+        expect(typeof item.command).toBe('string');
+        // commandActions may or may not be present
+        if (item.commandActions) {
+          expect(Array.isArray(item.commandActions)).toBe(true);
+        }
+      }
+    }
+  });
 });

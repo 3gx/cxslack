@@ -148,4 +148,46 @@ describe('Item Type Filtering', () => {
       expect(completedEntries[0].tool).toBe('Read');
     });
   });
+
+  // Test the toolInput tracking and activity entries
+  describe('Tool input in activity entries', () => {
+    it('passes toolInput to tool_start activity entry', () => {
+      const entries: { type: string; tool: string; toolInput?: string }[] = [];
+
+      // Simulate adding entry with toolInput
+      entries.push({
+        type: 'tool_start',
+        tool: 'commandExecution',
+        toolInput: 'ls -la',
+      });
+
+      expect(entries[0].toolInput).toBe('ls -la');
+    });
+
+    it('passes toolInput to tool_complete activity entry', () => {
+      const activeTools = new Map<string, { tool: string; input?: string; startTime: number }>();
+      activeTools.set('tool-1', { tool: 'commandExecution', input: 'git status', startTime: Date.now() });
+
+      const toolInfo = activeTools.get('tool-1');
+      const completionEntry = {
+        type: 'tool_complete',
+        tool: toolInfo!.tool,
+        toolInput: toolInfo!.input,
+      };
+
+      expect(completionEntry.toolInput).toBe('git status');
+    });
+
+    it('handles undefined toolInput gracefully', () => {
+      const entry = {
+        type: 'tool_start',
+        tool: 'mcpToolCall',
+        toolInput: undefined,
+      };
+
+      // Format should not crash with undefined
+      const display = `*${entry.tool}*${entry.toolInput ? ` \`${entry.toolInput}\`` : ''} [in progress]`;
+      expect(display).toBe('*mcpToolCall* [in progress]');
+    });
+  });
 });

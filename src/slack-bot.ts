@@ -231,9 +231,14 @@ function setupEventHandlers(): void {
       streamingManager.clearTimer(conversationKey);
       markAborted(conversationKey);
       const context = streamingManager.getContext(conversationKey);
-      if (context) {
+      if (context && context.turnId) {
+        // Only call interruptTurn if turnId is set (truthy, not empty string)
         await codex.interruptTurn(context.threadId, context.turnId);
+      } else {
+        console.log('[abort] Skipping interruptTurn: turnId not yet available');
       }
+      // If turnId is empty, abort flag is already set via markAborted()
+      // and will be handled when turn:completed fires
     }
   });
 

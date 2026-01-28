@@ -114,7 +114,12 @@ export interface CodexClientEvents {
   'notification': (notification: JsonRpcNotification) => void;
   'turn:started': (params: { threadId: string; turnId: string }) => void;
   'turn:completed': (params: { threadId: string; turnId: string; status: TurnStatus }) => void;
-  'item:started': (params: { itemId: string; itemType: string }) => void;
+  'item:started': (params: {
+    itemId: string;
+    itemType: string;
+    command?: string;
+    commandActions?: Array<{ type: string; command: string }>;
+  }) => void;
   'item:delta': (params: { itemId: string; delta: string }) => void;
   'item:completed': (params: { itemId: string }) => void;
   'approval:requested': (request: ApprovalRequest) => void;
@@ -507,7 +512,18 @@ export class CodexClient extends EventEmitter {
           itemType = itemType[0].toLowerCase() + itemType.slice(1);
         }
 
-        this.emit('item:started', { itemId, itemType });
+        // Extract command details for commandExecution items
+        // These fields exist in the item object per user's logs:
+        // {"item":{"type":"commandExecution","command":"/bin/bash -lc ls","commandActions":[{"type":"listFiles","command":"ls"}]}}
+        const command = (item.command || '') as string;
+        const commandActions = item.commandActions as Array<{ type: string; command: string }> | undefined;
+
+        this.emit('item:started', {
+          itemId,
+          itemType,
+          command: command || undefined,
+          commandActions: commandActions?.length ? commandActions : undefined,
+        });
         break;
       }
 
