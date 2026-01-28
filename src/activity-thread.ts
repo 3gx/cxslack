@@ -30,7 +30,7 @@ export interface ActivityEntry {
   type: 'starting' | 'thinking' | 'tool_start' | 'tool_complete' | 'generating' | 'error' | 'aborted';
   timestamp: number;
   tool?: string;
-  toolInput?: string;
+  toolInput?: string | Record<string, unknown>; // String for display, Record for TodoWrite etc.
   toolUseId?: string; // For race condition tracking in batch updates
   durationMs?: number;
   message?: string;

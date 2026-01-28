@@ -531,7 +531,7 @@ export class StreamingManager {
     });
 
     // Item started (tool use) - FILTER non-tool items, timer handles updates
-    this.codex.on('item:started', ({ itemId, itemType, command, commandActions }) => {
+    this.codex.on('item:started', ({ itemId, itemType, command, commandActions, toolInput: rawToolInput }) => {
       // Skip non-tool items (userMessage, agentMessage, reasoning)
       if (!isToolItemType(itemType)) {
         console.log(`[streaming] Skipping non-tool item: ${itemType}`);
@@ -541,30 +541,34 @@ export class StreamingManager {
       for (const [key, state] of this.states) {
         if (state.isStreaming) {
           // Extract display command for commandExecution items
-          let toolInput: string | undefined;
+          let displayInput: string | undefined;
           if (itemType === 'commandExecution' || itemType === 'CommandExecution') {
             if (commandActions && commandActions.length > 0) {
-              toolInput = commandActions[0].command; // e.g., "ls", "git status"
+              displayInput = commandActions[0].command; // e.g., "ls", "git status"
             } else if (command) {
               // Parse from "/bin/bash -lc <cmd>" format
               const match = command.match(/-lc\s+["']?(.+?)["']?$/);
-              toolInput = match ? match[1] : command;
+              displayInput = match ? match[1] : command;
             }
           }
 
           // Track tool start (only actual tools now)
           state.activeTools.set(itemId, {
             tool: itemType,
-            input: toolInput,
+            input: displayInput,
             startTime: Date.now(),
           });
+
+          // For TodoWrite, store the full structured input for todo extraction
+          // For other tools, use the display input string
+          const toolInputValue = rawToolInput || displayInput;
 
           // Add activity entry for actual tools only
           this.activityManager.addEntry(key, {
             type: 'tool_start',
             timestamp: Date.now(),
             tool: itemType,
-            toolInput,
+            toolInput: toolInputValue,
             toolUseId: itemId,
           });
           break;
@@ -722,6 +726,7 @@ export class StreamingManager {
         status: state.status,
         conversationKey,
         elapsedMs,
+        entries,  // Pass for todo extraction
       });
 
       const fallbackText = activityText || 'Processing...';

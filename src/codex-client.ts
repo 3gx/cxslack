@@ -119,6 +119,7 @@ export interface CodexClientEvents {
     itemType: string;
     command?: string;
     commandActions?: Array<{ type: string; command: string }>;
+    toolInput?: Record<string, unknown>;
   }) => void;
   'item:delta': (params: { itemId: string; delta: string }) => void;
   'item:completed': (params: { itemId: string }) => void;
@@ -576,6 +577,10 @@ export class CodexClient extends EventEmitter {
         const command = (item.command || '') as string;
         const commandActions = item.commandActions as Array<{ type: string; command: string }> | undefined;
 
+        // Extract tool input for tools like TodoWrite
+        // The input is in item.input as a structured object
+        const toolInput = item.input as Record<string, unknown> | undefined;
+
         // Emit context:turnId for abort fix - item/started has turnId at top level
         const threadId = (p.threadId || msg?.thread_id || '') as string;
         const turnId = (p.turnId || msg?.turn_id || '') as string;
@@ -588,6 +593,7 @@ export class CodexClient extends EventEmitter {
           itemType,
           command: command || undefined,
           commandActions: commandActions?.length ? commandActions : undefined,
+          toolInput,
         });
         break;
       }
