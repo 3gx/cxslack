@@ -458,18 +458,50 @@ export class CodexClient extends EventEmitter {
       case 'item/started':
       case 'codex/event/item_started': {
         const p = params as Record<string, unknown>;
+        // Codex notifications nest item info under params.item
+        // Structure: { item: { type: "commandExecution"|"mcpToolCall"|etc, id: "...", tool?: "..." } }
+        const item = p.item as Record<string, unknown> | undefined;
+
         // Debug log to capture actual structure
         console.log('[codex-client] item/started params:', JSON.stringify(p));
-        const itemId = (p.itemId || p.item_id || p.id || '') as string;
-        const itemType = (p.itemType || p.item_type || p.type || p.toolName || p.tool_name || p.name || 'unknown') as string;
+
+        // Extract itemId - primarily from item.id
+        const itemId = (item?.id || p.itemId || p.item_id || p.id || '') as string;
+
+        // Extract tool/item type:
+        // 1. item.tool - for mcpToolCall/collabToolCall, contains actual tool name
+        // 2. item.type - the item category (commandExecution, mcpToolCall, etc.)
+        // 3. Fallback to top-level fields for compatibility
+        let itemType = 'unknown';
+        if (item) {
+          // Prefer tool name if present (for tool calls)
+          if (item.tool) {
+            itemType = item.tool as string;
+          } else if (item.type) {
+            // Use item type (commandExecution, mcpToolCall, etc.)
+            itemType = item.type as string;
+          } else if (item.name) {
+            itemType = item.name as string;
+          }
+        }
+        // Fallback to top-level fields
+        if (itemType === 'unknown') {
+          itemType = (p.itemType || p.item_type || p.type || p.toolName || p.tool_name || p.name || 'unknown') as string;
+        }
+
         this.emit('item:started', { itemId, itemType });
         break;
       }
 
       case 'item/completed':
-      case 'codex/event/item_completed':
-        this.emit('item:completed', params as { itemId: string });
+      case 'codex/event/item_completed': {
+        const p = params as Record<string, unknown>;
+        const item = p.item as Record<string, unknown> | undefined;
+        // Extract itemId from nested item.id or top-level
+        const itemId = (item?.id || p.itemId || p.item_id || p.id || '') as string;
+        this.emit('item:completed', { itemId });
         break;
+      }
 
       // Message content streaming
       case 'item/agentMessage/delta':
