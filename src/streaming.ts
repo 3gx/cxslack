@@ -27,7 +27,17 @@ import {
   markAborted as markAbortedEmoji,
 } from './emoji-reactions.js';
 import { isAborted, clearAborted } from './abort-tracker.js';
-import { ActivityThreadManager, ActivityEntry, getToolEmoji, buildActivityLogText } from './activity-thread.js';
+import {
+  ActivityThreadManager,
+  ActivityEntry,
+  getToolEmoji,
+  buildActivityLogText,
+  postStartingToThread,
+  flushActivityBatchToThread,
+  postThinkingToThread,
+  postResponseToThread,
+  postErrorToThread,
+} from './activity-thread.js';
 import { withSlackRetry } from './slack-retry.js';
 
 // Constants matching CCSLACK architecture
@@ -136,6 +146,17 @@ interface StreamingState {
   pendingAbort?: boolean;
   /** Timeout for pending abort (safety net) */
   pendingAbortTimeout?: ReturnType<typeof setTimeout>;
+  // Activity thread batch state (for thread posting)
+  /** User's message ts (thread parent) */
+  threadParentTs: string | null;
+  /** Entries waiting to post to thread */
+  activityBatch: ActivityEntry[];
+  /** Rate limiting (min 2s gap) */
+  lastActivityPostTime: number;
+  /** For batch updates when tool_result arrives */
+  postedBatchTs: string | null;
+  /** Race condition fix - track posted tool use IDs */
+  postedBatchToolUseIds: Set<string>;
 }
 
 /**
@@ -203,6 +224,12 @@ export class StreamingManager {
       activityMessageTs: context.messageTs, // REUSE initial message!
       pendingAbort: false,
       pendingAbortTimeout: undefined,
+      // Activity thread batch state
+      threadParentTs: context.originalTs, // User's message as thread parent
+      activityBatch: [],
+      lastActivityPostTime: 0,
+      postedBatchTs: null,
+      postedBatchToolUseIds: new Set(),
     };
 
     this.contexts.set(key, context);
@@ -220,6 +247,11 @@ export class StreamingManager {
     // Add eyes emoji to user's original message
     markProcessingStart(this.slack, context.channelId, context.originalTs).catch((err) => {
       console.error('Failed to add processing emoji:', err);
+    });
+
+    // Integration point 1: Post starting message to thread
+    postStartingToThread(this.slack, context.channelId, context.originalTs).catch((err) => {
+      console.error('[activity-thread] Failed to post starting:', err);
     });
 
     // Start timer AFTER state is set - uses context.updateRateMs (from /update-rate command)
@@ -442,6 +474,48 @@ export class StreamingManager {
           // Clear abort state for next turn
           clearAborted(found.key);
 
+          // Integration point 4: Force flush activity batch on turn completion
+          await flushActivityBatchToThread(
+            this.activityManager,
+            found.key,
+            this.slack,
+            channelId,
+            state.threadParentTs || originalTs,
+            true // force
+          ).catch((err) => console.error('[streaming] Final batch flush failed:', err));
+
+          // Integration point 3: Post thinking to thread when thinking completes
+          if (state.thinkingContent && state.thinkingContent.length > 100) {
+            await postThinkingToThread(
+              this.slack,
+              channelId,
+              state.threadParentTs || originalTs,
+              state.thinkingContent,
+              Date.now() - (state.thinkingStartTime || found.context.startTime)
+            ).catch((err) => console.error('[streaming] Thinking post failed:', err));
+          }
+
+          // Integration point 5: Post response to thread
+          if (state.text && state.text.length > 200 && status === 'completed') {
+            await postResponseToThread(
+              this.slack,
+              channelId,
+              state.threadParentTs || originalTs,
+              state.text,
+              Date.now() - found.context.startTime
+            ).catch((err) => console.error('[streaming] Response post failed:', err));
+          }
+
+          // Integration point 6: Post error to thread
+          if (status === 'failed') {
+            await postErrorToThread(
+              this.slack,
+              channelId,
+              state.threadParentTs || originalTs,
+              'Turn failed'
+            ).catch((err) => console.error('[streaming] Error post failed:', err));
+          }
+
           // FINAL update - shows complete status and response
           await this.updateActivityMessage(found.key);
 
@@ -517,6 +591,20 @@ export class StreamingManager {
             });
 
             state.activeTools.delete(itemId);
+
+            // Integration point 2: Flush activity batch to thread on tool completion
+            const context = this.contexts.get(key);
+            if (context) {
+              flushActivityBatchToThread(
+                this.activityManager,
+                key,
+                this.slack,
+                context.channelId,
+                state.threadParentTs || context.originalTs
+              ).catch((err) => {
+                console.error('[streaming] Thread batch post failed:', err);
+              });
+            }
           }
           break;
         }

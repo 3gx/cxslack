@@ -740,3 +740,330 @@ export function buildAbortConfirmationModalView(params: AbortConfirmationModalPa
     ],
   };
 }
+
+// ============================================================================
+// Thread Message Formatting (Ported from ccslack)
+// ============================================================================
+
+import type { ActivityEntry } from './activity-thread.js';
+
+/**
+ * Strip markdown code fence wrapper if present.
+ *
+ * Case A: Explicit ```markdown or ```md tag -> Always strip
+ * Case B: Code blocks with language tags (```python, etc.) -> Never strip
+ * Case C: Empty ``` (bare fence) -> Don't strip (preserve as-is)
+ */
+export function stripMarkdownCodeFence(content: string): string {
+  // Must start with ``` and end with ``` on its own line
+  if (!content.startsWith('```')) return content;
+  if (!/\n```\s*$/.test(content)) return content;
+
+  // Find first newline
+  const firstNewline = content.indexOf('\n');
+  if (firstNewline === -1) return content;
+
+  // Extract first word as language tag (handles "js filename=x" info strings)
+  const tagLine = content.slice(3, firstNewline).trim();
+  const tag = tagLine.split(/\s/)[0].toLowerCase();
+
+  // Helper to extract inner content
+  const extractInner = (): string | null => {
+    const afterFirstLine = content.slice(firstNewline + 1);
+    const match = afterFirstLine.match(/^([\s\S]*)\n```\s*$/);
+    return match ? match[1].replace(/\r$/, '') : null;
+  };
+
+  // CASE A: Explicit markdown/md tag -> strip
+  if (tag === 'markdown' || tag === 'md') {
+    return extractInner() ?? content;
+  }
+
+  // CASE B: Non-empty tag that isn't markdown/md -> don't strip (it's code)
+  if (tag !== '') {
+    return content;
+  }
+
+  // CASE C: Empty tag (bare fence) -> don't strip
+  return content;
+}
+
+/**
+ * Convert standard Markdown to Slack mrkdwn format.
+ *
+ * Differences:
+ * - Bold: **text** or __text__ -> *text*
+ * - Italic: *text* or _text_ -> _text_
+ * - Bold+Italic: ***text*** or ___text___ -> *_text_*
+ * - Strikethrough: ~~text~~ -> ~text~
+ * - Links: [text](url) -> <url|text>
+ * - Headers: # Header -> *Header*
+ * - Tables: | col | col | -> wrapped in code block (Slack doesn't support tables)
+ * - Horizontal rules: --- -> unicode line separator
+ */
+export function markdownToSlack(text: string): string {
+  let result = text;
+
+  // Protect code blocks from conversion
+  const codeBlocks: string[] = [];
+  result = result.replace(/```[\s\S]*?```/g, (match) => {
+    codeBlocks.push(match);
+    return `\u27E6CODE_BLOCK_${codeBlocks.length - 1}\u27E7`;
+  });
+
+  // Convert markdown tables to code blocks
+  // Match consecutive lines that start and end with |
+  result = result.replace(
+    /(?:^[ \t]*\|.+\|[ \t]*$\n?)+/gm,
+    (table) => {
+      const wrapped = '```\n' + table.trimEnd() + '\n```';
+      codeBlocks.push(wrapped);
+      // If original table ended with newline, preserve it for spacing after code block
+      const suffix = table.endsWith('\n') ? '\n' : '';
+      return `\u27E6CODE_BLOCK_${codeBlocks.length - 1}\u27E7${suffix}`;
+    }
+  );
+
+  // Protect inline code
+  const inlineCode: string[] = [];
+  result = result.replace(/`[^`]+`/g, (match) => {
+    inlineCode.push(match);
+    return `\u27E6INLINE_CODE_${inlineCode.length - 1}\u27E7`;
+  });
+
+  // Convert links: [text](url) -> <url|text>
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>');
+
+  // Convert headers: # Header -> temporary marker (will become bold)
+  result = result.replace(/^#{1,6}\s+(.+)$/gm, '\u27E6B\u27E7$1\u27E6/B\u27E7');
+
+  // Convert bold+italic combinations FIRST (before bold/italic separately)
+  // ***text*** -> *_text_* (bold+italic with asterisks)
+  result = result.replace(/\*\*\*(.+?)\*\*\*/g, '\u27E6BI\u27E7$1\u27E6/BI\u27E7');
+  // ___text___ -> *_text_* (bold+italic with underscores)
+  result = result.replace(/___(.+?)___/g, '\u27E6BI\u27E7$1\u27E6/BI\u27E7');
+
+  // Convert bold: **text** or __text__ -> temporary marker
+  result = result.replace(/\*\*(.+?)\*\*/g, '\u27E6B\u27E7$1\u27E6/B\u27E7');
+  result = result.replace(/__(.+?)__/g, '\u27E6B\u27E7$1\u27E6/B\u27E7');
+
+  // Convert italic *text* -> _text_ (safe now since bold/headers are marked)
+  result = result.replace(/\*([^*\n]+)\*/g, '_$1_');
+
+  // Restore bold+italic markers to _*text*_ (italic wrapping bold)
+  result = result.replace(/\u27E6BI\u27E7/g, '_*').replace(/\u27E6\/BI\u27E7/g, '*_');
+
+  // Restore bold markers to *text*
+  result = result.replace(/\u27E6B\u27E7/g, '*').replace(/\u27E6\/B\u27E7/g, '*');
+
+  // Convert strikethrough: ~~text~~ -> ~text~
+  result = result.replace(/~~(.+?)~~/g, '~$1~');
+
+  // Convert horizontal rules: --- or *** or ___ -> unicode line
+  result = result.replace(/^[ \t]*[-*_]{3,}[ \t]*$/gm, '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+
+  // Restore inline code
+  for (let i = 0; i < inlineCode.length; i++) {
+    result = result.replace(`\u27E6INLINE_CODE_${i}\u27E7`, inlineCode[i]);
+  }
+
+  // Restore code blocks
+  for (let i = 0; i < codeBlocks.length; i++) {
+    result = result.replace(`\u27E6CODE_BLOCK_${i}\u27E7`, codeBlocks[i]);
+  }
+
+  return result;
+}
+
+/**
+ * Truncate text and close any open formatting markers.
+ * Handles: ``` code blocks, ` inline code, * bold, _ italic, ~ strikethrough
+ */
+export function truncateWithClosedFormatting(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+
+  // Reserve space for suffix and potential closing markers
+  const suffix = '\n\n_...truncated. Full response attached._';
+  const maxContent = limit - suffix.length - 10; // 10 chars buffer for closing markers
+
+  let truncated = text.substring(0, maxContent);
+
+  // Find good break point (newline or space)
+  const lastNewline = truncated.lastIndexOf('\n');
+  const lastSpace = truncated.lastIndexOf(' ');
+  const minBreak = Math.floor(maxContent * 0.8);
+  const breakPoint = Math.max(
+    lastNewline > minBreak ? lastNewline : -1,
+    lastSpace > minBreak ? lastSpace : -1,
+    minBreak
+  );
+  truncated = truncated.substring(0, breakPoint);
+
+  // Close open code blocks (```)
+  const codeBlockCount = (truncated.match(/```/g) || []).length;
+  const insideCodeBlock = codeBlockCount % 2 === 1;
+  if (insideCodeBlock) {
+    truncated += '\n```';
+  }
+
+  // Only check inline formatting if NOT inside a code block
+  // (inside code blocks, backticks/asterisks/etc are literal characters)
+  if (!insideCodeBlock) {
+    // Close open inline code (`) - count single backticks not part of ```
+    const inlineCodeCount = (truncated.match(/(?<!`)`(?!`)/g) || []).length;
+    if (inlineCodeCount % 2 === 1) {
+      truncated += '`';
+    }
+
+    // Close open bold (*) - count single asterisks not part of ** or ***
+    const boldCount = (truncated.match(/(?<!\*)\*(?!\*)/g) || []).length;
+    if (boldCount % 2 === 1) {
+      truncated += '*';
+    }
+
+    // Close open italic (_)
+    const italicCount = (truncated.match(/(?<!_)_(?!_)/g) || []).length;
+    if (italicCount % 2 === 1) {
+      truncated += '_';
+    }
+
+    // Close open strikethrough (~)
+    const strikeCount = (truncated.match(/~/g) || []).length;
+    if (strikeCount % 2 === 1) {
+      truncated += '~';
+    }
+  }
+
+  return truncated + suffix;
+}
+
+// ============================================================================
+// Thread Activity Formatting
+// ============================================================================
+
+// Tool emoji mapping for thread messages
+const THREAD_TOOL_EMOJI: Record<string, string> = {
+  Read: ':mag:',
+  Glob: ':mag:',
+  Grep: ':mag:',
+  Edit: ':memo:',
+  Write: ':memo:',
+  Bash: ':computer:',
+  Shell: ':computer:',
+  WebFetch: ':globe_with_meridians:',
+  Task: ':robot_face:',
+  CommandExecution: ':computer:',
+  FileRead: ':mag:',
+  FileWrite: ':memo:',
+};
+
+/**
+ * Get formatted tool name with emoji.
+ */
+export function formatToolName(tool: string): string {
+  const emoji = THREAD_TOOL_EMOJI[tool] || ':gear:';
+  return `${emoji} *${tool}*`;
+}
+
+/**
+ * Format tool input for display (truncated).
+ */
+export function formatToolInputSummary(tool: string, input?: string): string {
+  if (!input) return '';
+  // Truncate to 80 chars max
+  const truncated = input.length > 80 ? input.slice(0, 77) + '...' : input;
+  return ` \`${truncated}\``;
+}
+
+/**
+ * Format activity batch entries for thread posting.
+ * Groups tool_start and tool_complete for the same tool.
+ */
+export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
+  if (entries.length === 0) return '';
+
+  // Build set of completed tool IDs
+  const completedIds = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type === 'tool_complete' && entry.toolUseId) {
+      completedIds.add(entry.toolUseId);
+    }
+  }
+
+  const lines: string[] = [];
+  for (const entry of entries) {
+    // Skip tool_start if we have a tool_complete for the same tool
+    if (entry.type === 'tool_start' && entry.toolUseId && completedIds.has(entry.toolUseId)) {
+      continue;
+    }
+
+    const line = formatActivityEntryForThread(entry);
+    if (line) {
+      lines.push(line);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Format a single activity entry for thread display.
+ */
+function formatActivityEntryForThread(entry: ActivityEntry): string {
+  const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
+  const toolEmoji = entry.tool ? THREAD_TOOL_EMOJI[entry.tool] || ':gear:' : ':gear:';
+  const toolInput = entry.toolInput ? formatToolInputSummary(entry.tool || '', entry.toolInput) : '';
+
+  switch (entry.type) {
+    case 'starting':
+      return ':brain: *Analyzing request...*';
+    case 'thinking':
+      return `:brain: *Thinking*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+    case 'tool_start':
+      return `${toolEmoji} *${entry.tool}*${toolInput} [in progress]`;
+    case 'tool_complete':
+      return `:white_check_mark: *${entry.tool}*${toolInput}${duration}`;
+    case 'generating':
+      return `:pencil: *Generating*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+    case 'error':
+      return `:x: ${entry.message || 'Error'}`;
+    case 'aborted':
+      return ':octagonal_sign: *Aborted by user*';
+    default:
+      return `${toolEmoji} ${entry.message || entry.type}${duration}`;
+  }
+}
+
+/**
+ * Format starting message for thread.
+ */
+export function formatThreadStartingMessage(): string {
+  return ':brain: *Analyzing request...*';
+}
+
+/**
+ * Format thinking message for thread.
+ * Shows duration and character count.
+ */
+export function formatThreadThinkingMessage(content: string, durationMs?: number): string {
+  const durationStr = durationMs ? ` [${(durationMs / 1000).toFixed(1)}s]` : '';
+  const charStr = ` _[${content.length} chars]_`;
+  return `:brain: *Thinking*${durationStr}${charStr}`;
+}
+
+/**
+ * Format response message for thread.
+ * Shows duration and character count.
+ */
+export function formatThreadResponseMessage(content: string, durationMs?: number): string {
+  const durationStr = durationMs ? ` [${(durationMs / 1000).toFixed(1)}s]` : '';
+  const charStr = ` _[${content.length} chars]_`;
+  return `:speech_balloon: *Response*${durationStr}${charStr}`;
+}
+
+/**
+ * Format error message for thread.
+ */
+export function formatThreadErrorMessage(message: string): string {
+  return `:x: *Error*\n${message}`;
+}
