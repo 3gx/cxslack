@@ -524,7 +524,8 @@ export function buildTextBlocks(text: string): Block[] {
         type: 'mrkdwn',
         text,
       },
-    });
+      expand: true, // Prevent Slack "See more" collapse
+    } as Block);
   } else {
     // Split at paragraph boundaries when possible
     let remaining = text;
@@ -559,7 +560,8 @@ export function buildTextBlocks(text: string): Block[] {
           type: 'mrkdwn',
           text: chunk,
         },
-      });
+        expand: true, // Prevent Slack "See more" collapse
+      } as Block);
     }
   }
 

@@ -254,6 +254,23 @@ describe('Block Kit Builders', () => {
       const totalText = blocks.map((b) => b.text?.text || '').join('');
       expect(totalText).toBe(longText);
     });
+
+    it('includes expand: true to prevent Slack collapse', () => {
+      const blocks = buildTextBlocks('Test message');
+
+      expect(blocks).toHaveLength(1);
+      expect((blocks[0] as unknown as { expand: boolean }).expand).toBe(true);
+    });
+
+    it('includes expand: true on all blocks for long text', () => {
+      const longText = 'A'.repeat(3500);
+      const blocks = buildTextBlocks(longText);
+
+      expect(blocks.length).toBeGreaterThan(1);
+      for (const block of blocks) {
+        expect((block as unknown as { expand: boolean }).expand).toBe(true);
+      }
+    });
   });
 
   describe('buildErrorBlocks', () => {
