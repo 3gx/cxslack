@@ -441,11 +441,18 @@ export class CodexClient extends EventEmitter {
       case 'item/agentMessage/delta':
       case 'codex/event/agent_message_content_delta':
       case 'codex/event/agent_message_delta': {
-        // Extract delta text from various possible field names
-        const delta = (params as Record<string, unknown>).delta ||
-                      (params as Record<string, unknown>).content ||
-                      (params as Record<string, unknown>).text || '';
-        this.emit('item:delta', { itemId: (params as Record<string, unknown>).itemId as string, delta: delta as string });
+        // Extract delta text from various possible structures:
+        // - Old style: params.delta / params.content / params.text
+        // - New style: params.msg.delta / params.msg.content / params.msg.text
+        const p = params as Record<string, unknown>;
+        const msg = p.msg as Record<string, unknown> | undefined;
+
+        const delta = p.delta || p.content || p.text ||
+                      msg?.delta || msg?.content || msg?.text || '';
+
+        const itemId = p.itemId || p.item_id || msg?.item_id || '';
+
+        this.emit('item:delta', { itemId: itemId as string, delta: delta as string });
         break;
       }
 
