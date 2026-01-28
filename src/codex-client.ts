@@ -144,6 +144,10 @@ export class CodexClient extends EventEmitter {
   private recentDeltaHashes = new Map<string, number>(); // hash -> timestamp
   private readonly DELTA_HASH_TTL_MS = 100; // 100ms TTL - same content within 100ms is duplicate
 
+  // Item deduplication: Codex sends same item via two event types (item/started + codex/event/item_started)
+  private recentItemIds = new Map<string, number>(); // itemId -> timestamp
+  private readonly ITEM_ID_TTL_MS = 500; // 500ms TTL for dedup
+
   private readonly config: Required<CodexClientConfig>;
 
   constructor(config: CodexClientConfig = {}) {
@@ -455,38 +459,52 @@ export class CodexClient extends EventEmitter {
       }
 
       // Item lifecycle
+      // Codex sends TWO formats for the same event:
+      // 1. codex/event/item_started: { msg: { item: { type, id } }, ... }
+      // 2. item/started: { item: { type, id }, ... }
+      // We handle both and deduplicate by itemId
       case 'item/started':
       case 'codex/event/item_started': {
         const p = params as Record<string, unknown>;
-        // Codex notifications nest item info under params.item
-        // Structure: { item: { type: "commandExecution"|"mcpToolCall"|etc, id: "...", tool?: "..." } }
-        const item = p.item as Record<string, unknown> | undefined;
 
         // Debug log to capture actual structure
         console.log('[codex-client] item/started params:', JSON.stringify(p));
 
-        // Extract itemId - primarily from item.id
-        const itemId = (item?.id || p.itemId || p.item_id || p.id || '') as string;
+        // Extract item from either format
+        const msg = p.msg as Record<string, unknown> | undefined;
+        const item = (msg?.item || p.item) as Record<string, unknown> | undefined;
 
-        // Extract tool/item type:
-        // 1. item.tool - for mcpToolCall/collabToolCall, contains actual tool name
-        // 2. item.type - the item category (commandExecution, mcpToolCall, etc.)
-        // 3. Fallback to top-level fields for compatibility
-        let itemType = 'unknown';
-        if (item) {
-          // Prefer tool name if present (for tool calls)
-          if (item.tool) {
-            itemType = item.tool as string;
-          } else if (item.type) {
-            // Use item type (commandExecution, mcpToolCall, etc.)
-            itemType = item.type as string;
-          } else if (item.name) {
-            itemType = item.name as string;
-          }
+        if (!item) {
+          console.log('[codex-client] item/started: no item found, skipping');
+          break;
         }
-        // Fallback to top-level fields
-        if (itemType === 'unknown') {
-          itemType = (p.itemType || p.item_type || p.type || p.toolName || p.tool_name || p.name || 'unknown') as string;
+
+        // Extract itemId
+        const itemId = (item.id || '') as string;
+        if (!itemId) {
+          console.log('[codex-client] item/started: no itemId found, skipping');
+          break;
+        }
+
+        // Deduplicate: skip if we've seen this itemId recently
+        const now = Date.now();
+        const lastSeen = this.recentItemIds.get(itemId);
+        if (lastSeen && now - lastSeen < this.ITEM_ID_TTL_MS) {
+          console.log('[codex-client] item/started: duplicate itemId, skipping:', itemId);
+          break;
+        }
+        this.recentItemIds.set(itemId, now);
+        // Clean old entries
+        for (const [id, ts] of this.recentItemIds) {
+          if (now - ts > this.ITEM_ID_TTL_MS * 10) this.recentItemIds.delete(id);
+        }
+
+        // Extract item type - normalize to lowercase
+        // Types: UserMessage, AgentMessage, Reasoning, commandExecution, mcpToolCall, etc.
+        let itemType = (item.type || item.tool || item.name || 'unknown') as string;
+        // Normalize PascalCase to camelCase: "UserMessage" -> "userMessage"
+        if (itemType && itemType.length > 0 && itemType[0] === itemType[0].toUpperCase()) {
+          itemType = itemType[0].toLowerCase() + itemType.slice(1);
         }
 
         this.emit('item:started', { itemId, itemType });
@@ -496,8 +514,10 @@ export class CodexClient extends EventEmitter {
       case 'item/completed':
       case 'codex/event/item_completed': {
         const p = params as Record<string, unknown>;
-        const item = p.item as Record<string, unknown> | undefined;
-        // Extract itemId from nested item.id or top-level
+        // Extract item from either format
+        const msg = p.msg as Record<string, unknown> | undefined;
+        const item = (msg?.item || p.item) as Record<string, unknown> | undefined;
+        // Extract itemId
         const itemId = (item?.id || p.itemId || p.item_id || p.id || '') as string;
         this.emit('item:completed', { itemId });
         break;
