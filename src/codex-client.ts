@@ -411,28 +411,45 @@ export class CodexClient extends EventEmitter {
     this.emit('notification', notification);
 
     const params = notification.params || {};
+    const method = notification.method;
 
-    switch (notification.method) {
+    // Handle both old-style (turn/*, item/*) and new-style (codex/event/*) notifications
+    switch (method) {
+      // Task/Turn lifecycle
       case 'turn/started':
+      case 'codex/event/task_started':
         this.emit('turn:started', params as { threadId: string; turnId: string });
         break;
 
       case 'turn/completed':
+      case 'codex/event/task_complete':
         this.emit('turn:completed', params as { threadId: string; turnId: string; status: TurnStatus });
         break;
 
+      // Item lifecycle
       case 'item/started':
+      case 'codex/event/item_started':
         this.emit('item:started', params as { itemId: string; itemType: string });
         break;
 
-      case 'item/agentMessage/delta':
-        this.emit('item:delta', params as { itemId: string; delta: string });
-        break;
-
       case 'item/completed':
+      case 'codex/event/item_completed':
         this.emit('item:completed', params as { itemId: string });
         break;
 
+      // Message content streaming
+      case 'item/agentMessage/delta':
+      case 'codex/event/agent_message_content_delta':
+      case 'codex/event/agent_message_delta': {
+        // Extract delta text from various possible field names
+        const delta = (params as Record<string, unknown>).delta ||
+                      (params as Record<string, unknown>).content ||
+                      (params as Record<string, unknown>).text || '';
+        this.emit('item:delta', { itemId: (params as Record<string, unknown>).itemId as string, delta: delta as string });
+        break;
+      }
+
+      // Approval requests
       case 'item/commandExecution/requestApproval':
       case 'item/fileChange/requestApproval':
         this.emit('approval:requested', {
@@ -441,9 +458,26 @@ export class CodexClient extends EventEmitter {
         } as ApprovalRequest);
         break;
 
+      // Informational events (log but don't emit)
+      case 'thread/started':
+      case 'thread/tokenUsage/updated':
+      case 'account/rateLimits/updated':
+      case 'codex/event/mcp_startup_update':
+      case 'codex/event/mcp_startup_complete':
+      case 'codex/event/token_count':
+      case 'codex/event/user_message':
+      case 'codex/event/agent_message':
+      case 'codex/event/agent_reasoning':
+      case 'codex/event/agent_reasoning_delta':
+      case 'codex/event/agent_reasoning_section_break':
+      case 'item/reasoning/summaryPartAdded':
+      case 'item/reasoning/summaryTextDelta':
+        // These are informational - no action needed
+        break;
+
       default:
         // Unknown notification - log but don't crash
-        console.log('Unknown notification:', notification.method);
+        console.log('Unknown notification:', method);
     }
   }
 
