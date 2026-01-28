@@ -244,6 +244,7 @@ export class ActivityThreadManager {
 
 /**
  * Build activity log text from entries with rolling window.
+ * Shows most recent entries, reducing count if text exceeds maxChars.
  * @param entries - Activity entries to format
  * @param maxEntries - Maximum number of entries to show (default: 20)
  * @param maxChars - Maximum characters for output (default: 1000)
@@ -253,21 +254,32 @@ export function buildActivityLogText(
   maxEntries = 20,
   maxChars = 1000
 ): string {
-  const displayEntries = entries.slice(-maxEntries);
-  const hiddenCount = entries.length - displayEntries.length;
-
-  let text = '';
-  if (hiddenCount > 0) {
-    text += `_... ${hiddenCount} earlier entries ..._\n`;
-  }
-
   const manager = new ActivityThreadManager();
-  text += displayEntries.map((e) => (manager as any).formatEntry(e)).join('\n');
 
-  // Truncate if exceeds maxChars
-  if (text.length > maxChars) {
-    text = text.slice(0, maxChars - 20) + '\n_... truncated ..._';
+  // Start with maxEntries, reduce until text fits within maxChars
+  // This ensures we always show the MOST RECENT entries (end of array)
+  let entriesToShow = Math.min(entries.length, maxEntries);
+
+  while (entriesToShow > 0) {
+    const displayEntries = entries.slice(-entriesToShow);
+    const hiddenCount = entries.length - displayEntries.length;
+
+    let text = '';
+    if (hiddenCount > 0) {
+      text += `_... ${hiddenCount} earlier entries ..._\n`;
+    }
+
+    text += displayEntries.map((e) => (manager as any).formatEntry(e)).join('\n');
+
+    // If fits within maxChars, return it
+    if (text.length <= maxChars) {
+      return text;
+    }
+
+    // Reduce entries and try again
+    entriesToShow--;
   }
 
-  return text;
+  // Edge case: even 0 entries somehow exceeds (shouldn't happen)
+  return '_... activity too long ..._';
 }

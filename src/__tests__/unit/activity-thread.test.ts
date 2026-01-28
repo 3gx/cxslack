@@ -167,7 +167,7 @@ describe('buildActivityLogText', () => {
     expect(text).not.toContain('earlier entries');
   });
 
-  it('truncates output when exceeds maxChars', () => {
+  it('reduces entries when output exceeds maxChars (rolling window)', () => {
     // Create many entries to generate long text
     const entries: ActivityEntry[] = [];
     for (let i = 0; i < 50; i++) {
@@ -182,9 +182,34 @@ describe('buildActivityLogText', () => {
     // Set a small maxChars limit
     const text = buildActivityLogText(entries, 50, 200);
 
-    // Should be truncated
+    // Should be within char limit
     expect(text.length).toBeLessThanOrEqual(200);
-    expect(text).toContain('truncated');
+    // Should show "earlier entries" (because we reduced entry count)
+    expect(text).toContain('earlier entries');
+    // Should NOT contain "truncated" (no mid-text cutting)
+    expect(text).not.toContain('truncated');
+  });
+
+  it('shows most recent entries when maxChars forces reduction', () => {
+    // Create entries with identifiable content
+    const entries: ActivityEntry[] = [];
+    for (let i = 1; i <= 10; i++) {
+      entries.push({
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: `Tool${i}`,
+        durationMs: 1000,
+      });
+    }
+
+    // Very small maxChars forces showing only a few entries
+    const text = buildActivityLogText(entries, 10, 150);
+
+    // Should show the MOST RECENT entries (end of array)
+    // Last entry is Tool10
+    expect(text).toContain('Tool10');
+    // Earlier entries should be hidden, not cut mid-text
+    expect(text).toContain('earlier entries');
   });
 
   it('does not truncate when under maxChars', () => {

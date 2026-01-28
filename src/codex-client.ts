@@ -576,6 +576,13 @@ export class CodexClient extends EventEmitter {
         const command = (item.command || '') as string;
         const commandActions = item.commandActions as Array<{ type: string; command: string }> | undefined;
 
+        // Emit context:turnId for abort fix - item/started has turnId at top level
+        const threadId = (p.threadId || msg?.thread_id || '') as string;
+        const turnId = (p.turnId || msg?.turn_id || '') as string;
+        if (threadId && turnId) {
+          this.emit('context:turnId', { threadId, turnId });
+        }
+
         this.emit('item:started', {
           itemId,
           itemType,
@@ -675,14 +682,15 @@ export class CodexClient extends EventEmitter {
 
       // Command execution lifecycle events
       // MITIGATION: Defensive extraction - try multiple field name variants
+      // Structure: { id, msg: { turn_id, call_id, ... }, conversationId }
       case 'codex/event/exec_command_begin': {
         const p = params as Record<string, unknown>;
-        // Log structure once for debugging (remove after verification)
-        console.log('[codex-client] exec_command_begin params:', JSON.stringify(p).slice(0, 500));
+        const msg = p.msg as Record<string, unknown> | undefined;
 
-        const itemId = (p.itemId || p.item_id || p.id || '') as string;
-        const threadId = (p.threadId || p.thread_id || '') as string;
-        const turnId = (p.turnId || p.turn_id || '') as string;
+        // Extract from nested msg and top-level (conversationId = threadId)
+        const itemId = (msg?.call_id || p.itemId || p.item_id || p.id || '') as string;
+        const threadId = (p.conversationId || p.threadId || p.thread_id || msg?.thread_id || '') as string;
+        const turnId = (msg?.turn_id || p.turnId || p.turn_id || '') as string;
 
         // Emit context:turnId for abort fix if we have valid values
         if (threadId && turnId) {
@@ -705,15 +713,16 @@ export class CodexClient extends EventEmitter {
         break;
       }
 
+      // Structure: { id, msg: { turn_id, call_id, exit_code, ... }, conversationId }
       case 'codex/event/exec_command_end': {
         const p = params as Record<string, unknown>;
-        // Log structure once for debugging (remove after verification)
-        console.log('[codex-client] exec_command_end params:', JSON.stringify(p).slice(0, 500));
+        const msg = p.msg as Record<string, unknown> | undefined;
 
-        const itemId = (p.itemId || p.item_id || p.id || '') as string;
-        const threadId = (p.threadId || p.thread_id || '') as string;
-        const turnId = (p.turnId || p.turn_id || '') as string;
-        const exitCode = (p.exitCode ?? p.exit_code ?? p.code) as number | undefined;
+        // Extract from nested msg and top-level (conversationId = threadId)
+        const itemId = (msg?.call_id || p.itemId || p.item_id || p.id || '') as string;
+        const threadId = (p.conversationId || p.threadId || p.thread_id || msg?.thread_id || '') as string;
+        const turnId = (msg?.turn_id || p.turnId || p.turn_id || '') as string;
+        const exitCode = (msg?.exit_code ?? p.exitCode ?? p.exit_code ?? p.code) as number | undefined;
 
         if (threadId && turnId) {
           this.emit('context:turnId', { threadId, turnId });
