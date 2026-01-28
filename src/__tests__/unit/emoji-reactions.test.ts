@@ -7,7 +7,7 @@ import {
   addReaction,
   removeReaction,
   markProcessingStart,
-  markComplete,
+  removeProcessingEmoji,
   markError,
   markAborted,
   cleanupMutex,
@@ -119,8 +119,8 @@ describe('Emoji Reactions', () => {
     });
   });
 
-  describe('markComplete', () => {
-    it('removes eyes/question and adds white_check_mark', async () => {
+  describe('removeProcessingEmoji', () => {
+    it('removes eyes/question without adding success emoji', async () => {
       const mockClient = {
         reactions: {
           add: vi.fn().mockResolvedValue({}),
@@ -128,7 +128,7 @@ describe('Emoji Reactions', () => {
         },
       };
 
-      await markComplete(mockClient as any, 'C123', '456.789');
+      await removeProcessingEmoji(mockClient as any, 'C123', '456.789');
 
       expect(mockClient.reactions.remove).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'eyes' })
@@ -136,9 +136,8 @@ describe('Emoji Reactions', () => {
       expect(mockClient.reactions.remove).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'question' })
       );
-      expect(mockClient.reactions.add).toHaveBeenCalledWith(
-        expect.objectContaining({ name: 'white_check_mark' })
-      );
+      // Should NOT add any success emoji
+      expect(mockClient.reactions.add).not.toHaveBeenCalled();
     });
   });
 

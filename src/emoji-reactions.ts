@@ -8,7 +8,7 @@
  * - Start:           +eyes
  * - Approval wait:   +question (eyes stays)
  * - Approval done:   -question (eyes stays, continues)
- * - Complete:        -eyes +white_check_mark
+ * - Complete:        -eyes (no success emoji - ccslack style)
  * - Error:           -eyes -question +x
  * - Abort:           -eyes -question +octagonal_sign
  */
@@ -118,16 +118,15 @@ export async function markApprovalDone(
 }
 
 /**
- * Transition emojis for successful completion.
+ * Remove processing emoji on successful completion (no success emoji).
  */
-export async function markComplete(
+export async function removeProcessingEmoji(
   client: WebClient,
   channel: string,
   ts: string
 ): Promise<void> {
   await removeReaction(client, channel, ts, 'eyes');
   await removeReaction(client, channel, ts, 'question');
-  await addReaction(client, channel, ts, 'white_check_mark');
   cleanupMutex(channel, ts);
 }
 

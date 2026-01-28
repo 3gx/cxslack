@@ -14,7 +14,7 @@ import { buildTextBlocks, buildStatusBlocks, buildHeaderBlock, Block } from './b
 import type { ApprovalPolicy } from './codex-client.js';
 import {
   markProcessingStart,
-  markComplete,
+  removeProcessingEmoji,
   markError,
   markAborted as markAbortedEmoji,
 } from './emoji-reactions.js';
@@ -207,10 +207,13 @@ export class StreamingManager {
           state.isStreaming = false;
 
           // Transition emoji based on final status
+          // On success: just remove eyes (no checkmark - ccslack style)
+          // On error/abort: remove eyes, add error/abort emoji
           const { channelId, originalTs } = found.context;
           try {
             if (status === 'completed') {
-              await markComplete(this.slack, channelId, originalTs);
+              // Just remove eyes, no success emoji
+              await removeProcessingEmoji(this.slack, channelId, originalTs);
             } else if (status === 'interrupted' || wasAborted) {
               await markAbortedEmoji(this.slack, channelId, originalTs);
             } else {
@@ -309,25 +312,29 @@ export class StreamingManager {
     // Build blocks based on current state
     const blocks: Block[] = [];
 
-    // Add header
-    const headerStatus = state.status === 'running' ? 'processing' : state.status === 'completed' ? 'complete' : state.status === 'interrupted' ? 'aborted' : 'error';
-    const durationMs = state.status !== 'running' ? Date.now() - context.startTime : undefined;
-
-    blocks.push(
-      buildHeaderBlock({
-        status: headerStatus,
-        approvalPolicy: context.approvalPolicy,
-        conversationKey,
-        model: context.model,
-        durationMs,
-      })
-    );
-
-    // Add content or status
-    if (state.text) {
-      blocks.push(...buildTextBlocks(state.text));
-    } else if (state.isStreaming) {
+    if (state.status === 'completed') {
+      // On success: just show the response text, no header/status
+      if (state.text) {
+        blocks.push(...buildTextBlocks(state.text));
+      }
+    } else if (state.status === 'interrupted') {
+      // On abort: show aborted status
+      blocks.push(...buildStatusBlocks({ status: 'aborted' }));
+      if (state.text) {
+        blocks.push(...buildTextBlocks(state.text));
+      }
+    } else if (state.status === 'failed') {
+      // On error: show error status
+      blocks.push(...buildStatusBlocks({ status: 'error' }));
+      if (state.text) {
+        blocks.push(...buildTextBlocks(state.text));
+      }
+    } else {
+      // Processing: show processing status with abort button
       blocks.push(...buildStatusBlocks({ status: 'processing', conversationKey }));
+      if (state.text) {
+        blocks.push(...buildTextBlocks(state.text));
+      }
     }
 
     // Update the Slack message
