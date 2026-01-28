@@ -536,6 +536,7 @@ export class CodexClient extends EventEmitter {
       case 'codex/event/agent_reasoning':
       case 'codex/event/agent_reasoning_delta':
       case 'codex/event/agent_reasoning_section_break':
+      case 'codex/event/reasoning_content_delta':
       case 'item/reasoning/summaryPartAdded':
       case 'item/reasoning/summaryTextDelta':
         // These are informational - no action needed
