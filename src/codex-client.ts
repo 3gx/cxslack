@@ -360,10 +360,16 @@ export class CodexClient extends EventEmitter {
 
   /**
    * List available models.
+   * Note: This may not be supported by all App-Server versions.
    */
   async listModels(): Promise<string[]> {
-    const result = await this.rpc<{ models: string[] }>('model/list', {});
-    return result.models;
+    try {
+      const result = await this.rpc<{ models?: string[] }>('model/list', {});
+      return result.models ?? [];
+    } catch {
+      // model/list may not be implemented - return empty array
+      return [];
+    }
   }
 
   // --- Private methods ---

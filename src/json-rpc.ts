@@ -94,6 +94,9 @@ export function serializeMessage(message: JsonRpcMessage): string {
 /**
  * Parse a JSON-RPC message from a JSON string.
  * Returns null if parsing fails.
+ *
+ * Note: Codex App-Server may omit `jsonrpc: "2.0"` field in responses,
+ * so we accept messages with or without it.
  */
 export function parseMessage(json: string): JsonRpcMessage | null {
   try {
@@ -101,8 +104,14 @@ export function parseMessage(json: string): JsonRpcMessage | null {
     if (typeof parsed !== 'object' || parsed === null) {
       return null;
     }
-    if (parsed.jsonrpc !== '2.0') {
+    // Accept messages with or without jsonrpc field (Codex omits it)
+    // But if present, it must be "2.0"
+    if (parsed.jsonrpc !== undefined && parsed.jsonrpc !== '2.0') {
       return null;
+    }
+    // Normalize: add jsonrpc field if missing
+    if (!parsed.jsonrpc) {
+      parsed.jsonrpc = '2.0';
     }
     return parsed as JsonRpcMessage;
   } catch {

@@ -103,8 +103,14 @@ describe('JSON-RPC Helpers', () => {
       expect(parseMessage('not json')).toBeNull();
     });
 
-    it('returns null for missing jsonrpc', () => {
-      expect(parseMessage('{"id":1,"method":"test"}')).toBeNull();
+    it('accepts and normalizes messages without jsonrpc field (Codex compatibility)', () => {
+      // Codex App-Server sometimes omits jsonrpc field
+      const parsed = parseMessage('{"id":1,"result":{"data":"test"}}');
+      expect(parsed).toEqual({
+        jsonrpc: '2.0',
+        id: 1,
+        result: { data: 'test' },
+      });
     });
 
     it('returns null for wrong jsonrpc version', () => {
