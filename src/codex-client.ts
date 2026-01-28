@@ -742,6 +742,7 @@ export class CodexClient extends EventEmitter {
       case 'codex/event/agent_reasoning_section_break':
       case 'item/reasoning/summaryPartAdded':
       case 'item/reasoning/summaryTextDelta':
+      case 'codex/event/turn_aborted':
         // These are informational - no action needed
         break;
 
