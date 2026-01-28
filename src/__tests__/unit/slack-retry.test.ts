@@ -7,12 +7,15 @@ import { withSlackRetry } from '../../slack-retry.js';
 
 describe('withSlackRetry', () => {
   beforeEach(() => {
+    vi.useFakeTimers();
     vi.spyOn(console, 'log').mockImplementation(() => {});
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
+
   it('returns result on success', async () => {
     const operation = vi.fn().mockResolvedValue('success');
 
@@ -28,7 +31,9 @@ describe('withSlackRetry', () => {
       .mockRejectedValueOnce({ code: 429, retryAfter: 10 })
       .mockResolvedValue('success');
 
-    const result = await withSlackRetry(operation, 'test.operation');
+    const promise = withSlackRetry(operation, 'test.operation');
+    await vi.runAllTimersAsync();
+    const result = await promise;
 
     expect(result).toBe('success');
     expect(operation).toHaveBeenCalledTimes(2);
@@ -40,7 +45,9 @@ describe('withSlackRetry', () => {
       .mockRejectedValueOnce({ data: { error: 'ratelimited' } })
       .mockResolvedValue('success');
 
-    const result = await withSlackRetry(operation, 'test.operation');
+    const promise = withSlackRetry(operation, 'test.operation');
+    await vi.runAllTimersAsync();
+    const result = await promise;
 
     expect(result).toBe('success');
     expect(operation).toHaveBeenCalledTimes(2);
@@ -52,7 +59,9 @@ describe('withSlackRetry', () => {
       .mockRejectedValueOnce({ data: { error: 'timeout' } })
       .mockResolvedValue('success');
 
-    const result = await withSlackRetry(operation, 'test.operation');
+    const promise = withSlackRetry(operation, 'test.operation');
+    await vi.runAllTimersAsync();
+    const result = await promise;
 
     expect(result).toBe('success');
     expect(operation).toHaveBeenCalledTimes(2);
@@ -64,7 +73,9 @@ describe('withSlackRetry', () => {
       .mockRejectedValueOnce({ data: { error: 'request_timeout' } })
       .mockResolvedValue('success');
 
-    const result = await withSlackRetry(operation, 'test.operation');
+    const promise = withSlackRetry(operation, 'test.operation');
+    await vi.runAllTimersAsync();
+    const result = await promise;
 
     expect(result).toBe('success');
     expect(operation).toHaveBeenCalledTimes(2);
@@ -76,7 +87,9 @@ describe('withSlackRetry', () => {
       .mockRejectedValueOnce({ data: { error: 'service_unavailable' } })
       .mockResolvedValue('success');
 
-    const result = await withSlackRetry(operation, 'test.operation');
+    const promise = withSlackRetry(operation, 'test.operation');
+    await vi.runAllTimersAsync();
+    const result = await promise;
 
     expect(result).toBe('success');
     expect(operation).toHaveBeenCalledTimes(2);
@@ -96,7 +109,11 @@ describe('withSlackRetry', () => {
     const error = { data: { error: 'ratelimited' } };
     const operation = vi.fn().mockRejectedValue(error);
 
-    await expect(withSlackRetry(operation, 'test.operation')).rejects.toEqual(error);
+    const promise = withSlackRetry(operation, 'test.operation').catch((e) => e);
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result).toEqual(error);
     expect(operation).toHaveBeenCalledTimes(3); // MAX_RETRIES = 3
   });
 });
