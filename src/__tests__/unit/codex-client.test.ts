@@ -123,6 +123,86 @@ describe('CodexClient Delta Deduplication', () => {
   });
 });
 
+describe('CodexClient item:started Event Tool Name Extraction', () => {
+  // Test the tool name extraction logic that handles multiple possible field names
+  type ItemStartedParams = Record<string, unknown>;
+
+  function extractToolName(p: ItemStartedParams): { itemId: string; itemType: string } {
+    const itemId = (p.itemId || p.item_id || p.id || '') as string;
+    const itemType = (p.itemType || p.item_type || p.type || p.toolName || p.tool_name || p.name || 'unknown') as string;
+    return { itemId, itemType };
+  }
+
+  it('extracts itemType from itemType field (camelCase)', () => {
+    const params = { itemId: 'item-123', itemType: 'Read' };
+    const result = extractToolName(params);
+    expect(result.itemId).toBe('item-123');
+    expect(result.itemType).toBe('Read');
+  });
+
+  it('extracts itemType from item_type field (snake_case)', () => {
+    const params = { item_id: 'item-456', item_type: 'Write' };
+    const result = extractToolName(params);
+    expect(result.itemId).toBe('item-456');
+    expect(result.itemType).toBe('Write');
+  });
+
+  it('extracts itemType from type field as fallback', () => {
+    const params = { id: 'item-789', type: 'Bash' };
+    const result = extractToolName(params);
+    expect(result.itemId).toBe('item-789');
+    expect(result.itemType).toBe('Bash');
+  });
+
+  it('extracts itemType from toolName field as fallback', () => {
+    const params = { itemId: 'item-abc', toolName: 'Grep' };
+    const result = extractToolName(params);
+    expect(result.itemId).toBe('item-abc');
+    expect(result.itemType).toBe('Grep');
+  });
+
+  it('extracts itemType from tool_name field as fallback', () => {
+    const params = { itemId: 'item-def', tool_name: 'Glob' };
+    const result = extractToolName(params);
+    expect(result.itemId).toBe('item-def');
+    expect(result.itemType).toBe('Glob');
+  });
+
+  it('extracts itemType from name field as fallback', () => {
+    const params = { itemId: 'item-ghi', name: 'WebFetch' };
+    const result = extractToolName(params);
+    expect(result.itemId).toBe('item-ghi');
+    expect(result.itemType).toBe('WebFetch');
+  });
+
+  it('defaults to "unknown" when no type field present', () => {
+    const params = { itemId: 'item-jkl' };
+    const result = extractToolName(params);
+    expect(result.itemId).toBe('item-jkl');
+    expect(result.itemType).toBe('unknown');
+  });
+
+  it('defaults to empty string for missing itemId', () => {
+    const params = { itemType: 'Read' };
+    const result = extractToolName(params);
+    expect(result.itemId).toBe('');
+    expect(result.itemType).toBe('Read');
+  });
+
+  it('prioritizes itemType over other type fields', () => {
+    const params = { itemId: 'item-mno', itemType: 'Read', type: 'Write', toolName: 'Bash' };
+    const result = extractToolName(params);
+    expect(result.itemType).toBe('Read'); // itemType takes priority
+  });
+
+  it('handles completely empty params', () => {
+    const params = {};
+    const result = extractToolName(params);
+    expect(result.itemId).toBe('');
+    expect(result.itemType).toBe('unknown');
+  });
+});
+
 describe('CodexClient Token Events', () => {
   it('emits tokens:updated event with normalized field names', () => {
     const emitter = new EventEmitter();

@@ -22,7 +22,7 @@ import {
   recordTurn,
 } from './session-manager.js';
 import {
-  buildStatusBlocks,
+  buildActivityBlocks,
   buildErrorBlocks,
   buildTextBlocks,
   buildAbortConfirmationModalView,
@@ -227,6 +227,8 @@ function setupEventHandlers(): void {
     const metadata = JSON.parse(view.private_metadata || '{}');
     const { conversationKey } = metadata;
     if (conversationKey) {
+      // IMMEDIATELY clear the timer (don't wait for turn:completed)
+      streamingManager.clearTimer(conversationKey);
       markAborted(conversationKey);
       const context = streamingManager.getContext(conversationKey);
       if (context) {
@@ -364,12 +366,17 @@ async function handleUserMessage(
     await codex.resumeThread(threadId);
   }
 
-  // Post initial "processing" message IN THE THREAD
+  // Post initial "processing" message IN THE THREAD using activity format
   const initialResult = await app.client.chat.postMessage({
     channel: channelId,
     thread_ts: postingThreadTs, // Always post in thread!
-    blocks: buildStatusBlocks({ status: 'processing', conversationKey }),
-    text: 'Processing...',
+    blocks: buildActivityBlocks({
+      activityText: ':gear: Starting...',
+      status: 'running',
+      conversationKey,
+      elapsedMs: 0,
+    }),
+    text: 'Starting...',
   });
 
   if (!initialResult.ts) {

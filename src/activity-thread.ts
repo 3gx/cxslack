@@ -244,8 +244,15 @@ export class ActivityThreadManager {
 
 /**
  * Build activity log text from entries with rolling window.
+ * @param entries - Activity entries to format
+ * @param maxEntries - Maximum number of entries to show (default: 20)
+ * @param maxChars - Maximum characters for output (default: 1000)
  */
-export function buildActivityLogText(entries: ActivityEntry[], maxEntries = 20): string {
+export function buildActivityLogText(
+  entries: ActivityEntry[],
+  maxEntries = 20,
+  maxChars = 1000
+): string {
   const displayEntries = entries.slice(-maxEntries);
   const hiddenCount = entries.length - displayEntries.length;
 
@@ -256,5 +263,11 @@ export function buildActivityLogText(entries: ActivityEntry[], maxEntries = 20):
 
   const manager = new ActivityThreadManager();
   text += displayEntries.map((e) => (manager as any).formatEntry(e)).join('\n');
+
+  // Truncate if exceeds maxChars
+  if (text.length > maxChars) {
+    text = text.slice(0, maxChars - 20) + '\n_... truncated ..._';
+  }
+
   return text;
 }

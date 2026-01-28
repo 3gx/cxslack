@@ -2,15 +2,23 @@
  * Streaming handler for Codex events → Slack message updates.
  *
  * Handles:
- * - Real-time message streaming with throttling
+ * - Real-time message streaming with timer-based throttling
  * - Turn lifecycle (started, completed, interrupted)
  * - Item events (agent message deltas)
  * - Approval request routing
+ *
+ * Uses CCSLACK architecture:
+ * - Timer-based updates (not event-driven)
+ * - Single activity message that gets updated
+ * - Rolling window of entries (max 20 shown)
+ * - Status line at bottom
+ * - Mutex for concurrent update protection
  */
 
 import type { WebClient } from '@slack/web-api';
+import { Mutex } from 'async-mutex';
 import type { CodexClient, TurnStatus, ApprovalRequest } from './codex-client.js';
-import { buildTextBlocks, buildStatusBlocks, Block } from './blocks.js';
+import { buildTextBlocks, buildActivityBlocks, Block } from './blocks.js';
 import type { ApprovalPolicy } from './codex-client.js';
 import {
   markProcessingStart,
@@ -19,11 +27,27 @@ import {
   markAborted as markAbortedEmoji,
 } from './emoji-reactions.js';
 import { isAborted, clearAborted } from './abort-tracker.js';
-import { ActivityThreadManager, ActivityEntry, getToolEmoji } from './activity-thread.js';
+import { ActivityThreadManager, ActivityEntry, getToolEmoji, buildActivityLogText } from './activity-thread.js';
 import { withSlackRetry } from './slack-retry.js';
 
-// Default update rate in milliseconds
-const DEFAULT_UPDATE_RATE_MS = 500;
+// Constants matching CCSLACK architecture
+const MAX_LIVE_ENTRIES = 300; // Threshold for rolling window
+const ROLLING_WINDOW_SIZE = 20; // Show last N entries when exceeded
+const ACTIVITY_LOG_MAX_CHARS = 1000; // Max chars for activity display
+
+// Mutex management for concurrent update protection
+const updateMutexes = new Map<string, Mutex>();
+
+function getUpdateMutex(conversationKey: string): Mutex {
+  if (!updateMutexes.has(conversationKey)) {
+    updateMutexes.set(conversationKey, new Mutex());
+  }
+  return updateMutexes.get(conversationKey)!;
+}
+
+function cleanupMutex(conversationKey: string): void {
+  updateMutexes.delete(conversationKey);
+}
 
 /**
  * Conversation context for a streaming turn.
@@ -63,8 +87,8 @@ interface StreamingState {
   isStreaming: boolean;
   /** Last update timestamp */
   lastUpdateTime: number;
-  /** Pending update timer */
-  updateTimer: ReturnType<typeof setTimeout> | null;
+  /** Periodic update timer (interval, not timeout) */
+  updateTimer: ReturnType<typeof setInterval> | null;
   /** Current turn status */
   status: 'running' | 'completed' | 'interrupted' | 'failed';
   /** Accumulated input tokens */
@@ -75,12 +99,12 @@ interface StreamingState {
   thinkingContent: string;
   /** Thinking start timestamp */
   thinkingStartTime: number;
-  /** Whether we've posted the thinking message */
-  thinkingPosted: boolean;
-  /** Whether we've posted the response message */
-  responsePosted: boolean;
+  /** Whether thinking has completed (for display) */
+  thinkingComplete: boolean;
   /** Track active tools by itemId */
   activeTools: Map<string, { tool: string; input?: string; startTime: number }>;
+  /** The ONE activity message timestamp we update */
+  activityMessageTs?: string;
 }
 
 /**
@@ -127,11 +151,13 @@ export class StreamingManager {
 
   /**
    * Start streaming for a new turn.
+   * Uses CCSLACK architecture: timer-based updates, reuses initial message.
    */
   startStreaming(context: StreamingContext): void {
     const key = makeConversationKey(context.channelId, context.threadTs);
-    this.contexts.set(key, context);
-    this.states.set(key, {
+
+    // Create state - REUSE initial message as activity message
+    const state: StreamingState = {
       text: '',
       isStreaming: true,
       lastUpdateTime: 0,
@@ -141,22 +167,38 @@ export class StreamingManager {
       outputTokens: 0,
       thinkingContent: '',
       thinkingStartTime: 0,
-      thinkingPosted: false,
-      responsePosted: false,
+      thinkingComplete: false,
       activeTools: new Map(),
-    });
+      activityMessageTs: context.messageTs, // REUSE initial message!
+    };
+
+    this.contexts.set(key, context);
+    this.states.set(key, state);
 
     // Clear any previous activity entries
     this.activityManager.clearEntries(key);
+
+    // Add "Analyzing request..." entry
+    this.activityManager.addEntry(key, {
+      type: 'starting',
+      timestamp: Date.now(),
+    });
 
     // Add eyes emoji to user's original message
     markProcessingStart(this.slack, context.channelId, context.originalTs).catch((err) => {
       console.error('Failed to add processing emoji:', err);
     });
 
-    // Post initial processing message
-    this.updateStatusMessage(key).catch((err) => {
-      console.error('Failed to post initial message:', err);
+    // Start timer AFTER state is set - uses context.updateRateMs (from /update-rate command)
+    state.updateTimer = setInterval(() => {
+      this.updateActivityMessage(key).catch((err) => {
+        console.error('Failed to update activity message:', err);
+      });
+    }, context.updateRateMs);
+
+    // Do initial update immediately
+    this.updateActivityMessage(key).catch((err) => {
+      console.error('Failed to post initial activity message:', err);
     });
   }
 
@@ -166,11 +208,24 @@ export class StreamingManager {
   stopStreaming(conversationKey: string): void {
     const state = this.states.get(conversationKey);
     if (state?.updateTimer) {
-      clearTimeout(state.updateTimer);
+      clearInterval(state.updateTimer);
     }
+    cleanupMutex(conversationKey);
     this.activityManager.clearEntries(conversationKey);
     this.contexts.delete(conversationKey);
     this.states.delete(conversationKey);
+  }
+
+  /**
+   * Clear the update timer (used by abort handler).
+   */
+  clearTimer(conversationKey: string): void {
+    const state = this.states.get(conversationKey);
+    if (state?.updateTimer) {
+      clearInterval(state.updateTimer);
+      state.updateTimer = null;
+    }
+    cleanupMutex(conversationKey);
   }
 
   /**
@@ -219,6 +274,12 @@ export class StreamingManager {
       if (found) {
         const state = this.states.get(found.key);
         if (state) {
+          // IMMEDIATELY stop the timer
+          if (state.updateTimer) {
+            clearInterval(state.updateTimer);
+            state.updateTimer = null;
+          }
+
           // Check if aborted (takes precedence over other statuses)
           const wasAborted = isAborted(found.key);
           if (wasAborted) {
@@ -228,14 +289,18 @@ export class StreamingManager {
           state.status = status;
           state.isStreaming = false;
 
-          // Post thinking message if we have thinking content but haven't posted
-          if (state.thinkingContent && !state.thinkingPosted) {
-            await this.postThinkingMessage(found.key);
+          // Mark thinking as complete if we had thinking content
+          if (state.thinkingContent) {
+            state.thinkingComplete = true;
           }
 
-          // Post response message if we have response content
-          if (state.text && !state.responsePosted && status === 'completed') {
-            await this.postResponseMessage(found.key);
+          // Add response entry if we have response content
+          if (state.text && status === 'completed') {
+            this.activityManager.addEntry(found.key, {
+              type: 'generating',
+              timestamp: Date.now(),
+              charCount: state.text.length,
+            });
           }
 
           // Transition emoji based on final status
@@ -255,8 +320,13 @@ export class StreamingManager {
           // Clear abort state for next turn
           clearAborted(found.key);
 
-          // Update status message to final state
-          await this.updateStatusMessage(found.key);
+          // FINAL update - shows complete status and response
+          await this.updateActivityMessage(found.key);
+
+          // Post the full response as a separate message if long
+          if (state.text && status === 'completed') {
+            await this.postResponseMessage(found.key);
+          }
 
           // Clean up activity entries
           this.activityManager.clearEntries(found.key);
@@ -264,7 +334,7 @@ export class StreamingManager {
       }
     });
 
-    // Item started (tool use)
+    // Item started (tool use) - JUST ACCUMULATE DATA, timer handles updates
     this.codex.on('item:started', ({ itemId, itemType }) => {
       for (const [key, state] of this.states) {
         if (state.isStreaming) {
@@ -274,17 +344,12 @@ export class StreamingManager {
             startTime: Date.now(),
           });
 
-          // Add activity entry
+          // Add activity entry (timer will display it)
           this.activityManager.addEntry(key, {
             type: 'tool_start',
             timestamp: Date.now(),
             tool: itemType,
             toolUseId: itemId,
-          });
-
-          // Post tool activity to thread
-          this.postToolActivity(key, itemId, itemType, 'start').catch((err) => {
-            console.error('Failed to post tool activity:', err);
           });
           break;
         }
@@ -315,23 +380,28 @@ export class StreamingManager {
       }
     });
 
-    // Item delta (streaming response text)
+    // Item delta (streaming response text) - JUST ACCUMULATE, timer handles updates
     this.codex.on('item:delta', ({ itemId, delta }) => {
       for (const [key, state] of this.states) {
         if (state.isStreaming) {
           state.text += delta;
-          this.scheduleUpdate(key);
+          // Timer handles updates, no need to schedule
           break;
         }
       }
     });
 
-    // Thinking delta (reasoning content)
+    // Thinking delta (reasoning content) - JUST ACCUMULATE, timer handles updates
     this.codex.on('thinking:delta', ({ content }) => {
       for (const [key, state] of this.states) {
         if (state.isStreaming) {
           if (!state.thinkingStartTime) {
             state.thinkingStartTime = Date.now();
+            // Add thinking entry (will be updated by timer)
+            this.activityManager.addEntry(key, {
+              type: 'thinking',
+              timestamp: Date.now(),
+            });
           }
           state.thinkingContent += content;
           break;
@@ -359,22 +429,11 @@ export class StreamingManager {
     });
   }
 
-  private scheduleUpdate(conversationKey: string): void {
-    const context = this.contexts.get(conversationKey);
-    const state = this.states.get(conversationKey);
-
-    if (!context || !state || !state.isStreaming) {
-      return;
-    }
-
-    // For multi-message pattern, we don't update the status message on every delta
-    // Response content will be posted as a separate message on completion
-  }
-
   /**
-   * Update the status message (Message 1 in the thread).
+   * Update the ONE activity message with current state.
+   * Uses mutex for concurrent update protection (CCSLACK style).
    */
-  private async updateStatusMessage(conversationKey: string): Promise<void> {
+  private async updateActivityMessage(conversationKey: string): Promise<void> {
     const context = this.contexts.get(conversationKey);
     const state = this.states.get(conversationKey);
 
@@ -382,145 +441,130 @@ export class StreamingManager {
       return;
     }
 
-    state.lastUpdateTime = Date.now();
-
-    // Build status blocks based on current state
-    let blocks: Block[];
-    let fallbackText: string;
-
-    if (state.status === 'completed') {
-      const durationMs = Date.now() - context.startTime;
-      blocks = buildStatusBlocks({ status: 'complete', durationMs });
-      fallbackText = 'Complete';
-    } else if (state.status === 'interrupted') {
-      blocks = buildStatusBlocks({ status: 'aborted' });
-      fallbackText = 'Aborted';
-    } else if (state.status === 'failed') {
-      blocks = buildStatusBlocks({ status: 'error' });
-      fallbackText = 'Error';
-    } else {
-      // Processing: show processing status with abort button
-      blocks = buildStatusBlocks({
-        status: 'processing',
-        conversationKey,
-        messageTs: context.messageTs,
-      });
-      fallbackText = 'Processing...';
-    }
-
-    // Update the Slack message
-    try {
-      await withSlackRetry(
-        () =>
-          this.slack.chat.update({
-            channel: context.channelId,
-            ts: context.messageTs,
-            blocks,
-            text: fallbackText,
-          }),
-        'status.update'
-      );
-    } catch (err) {
-      console.error('Failed to update status message:', err);
-    }
-  }
-
-  /**
-   * Post thinking message to thread (Message 2).
-   */
-  private async postThinkingMessage(conversationKey: string): Promise<void> {
-    const context = this.contexts.get(conversationKey);
-    const state = this.states.get(conversationKey);
-
-    if (!context || !state || !state.thinkingContent || state.thinkingPosted) {
+    // Check if aborted - don't update
+    if (isAborted(conversationKey)) {
       return;
     }
 
-    state.thinkingPosted = true;
-    const durationMs = Date.now() - state.thinkingStartTime;
-    const durationSec = (durationMs / 1000).toFixed(1);
-    const charCount = state.thinkingContent.length;
+    const mutex = getUpdateMutex(conversationKey);
+    await mutex.runExclusive(async () => {
+      // Re-check abort status inside mutex
+      if (isAborted(conversationKey)) {
+        return;
+      }
 
-    // Format thinking message
-    const MAX_PREVIEW_LENGTH = 500;
-    let text: string;
+      // Get entries with rolling window
+      const entries = this.activityManager.getEntries(conversationKey);
+      const displayEntries =
+        entries.length > MAX_LIVE_ENTRIES ? entries.slice(-ROLLING_WINDOW_SIZE) : entries;
 
-    if (charCount <= MAX_PREVIEW_LENGTH) {
-      text = `:brain: *Thinking* [${durationSec}s]\n> ${state.thinkingContent.replace(/\n/g, '\n> ')}`;
-    } else {
-      const preview = state.thinkingContent.slice(-MAX_PREVIEW_LENGTH);
-      text = `:brain: *Thinking* [${durationSec}s] _[${charCount} chars]_\n> ...${preview.replace(/\n/g, '\n> ')}`;
-    }
+      // Build activity text
+      let activityText = buildActivityLogText(displayEntries, ROLLING_WINDOW_SIZE, ACTIVITY_LOG_MAX_CHARS);
 
-    try {
-      // Post thinking as a new message in thread
+      // Add hidden entries notice if needed
+      if (entries.length > MAX_LIVE_ENTRIES) {
+        const hidden = entries.length - ROLLING_WINDOW_SIZE;
+        activityText = `_... ${hidden} earlier entries ..._\n` + activityText;
+      }
+
+      // Add thinking preview if we have thinking content
+      if (state.thinkingContent) {
+        const thinkingDuration = state.thinkingComplete
+          ? (Date.now() - state.thinkingStartTime)
+          : (Date.now() - state.thinkingStartTime);
+        const thinkingDurationSec = (thinkingDuration / 1000).toFixed(1);
+        const charCount = state.thinkingContent.length;
+        const preview = state.thinkingContent.slice(-200).replace(/\n/g, ' ');
+        activityText += `\n:brain: *Thinking* [${thinkingDurationSec}s] _[${charCount} chars]_\n> ...${preview}`;
+      }
+
+      // Add response preview if we have response content
+      if (state.text) {
+        const preview = state.text.slice(0, 200).replace(/\n/g, ' ');
+        activityText += `\n:memo: *Response* _[${state.text.length} chars]_\n> ${preview}${state.text.length > 200 ? '...' : ''}`;
+      }
+
+      // Build blocks with status at bottom and abort button
+      const elapsedMs = Date.now() - context.startTime;
+      const blocks = buildActivityBlocks({
+        activityText: activityText || ':gear: Starting...',
+        status: state.status,
+        conversationKey,
+        elapsedMs,
+      });
+
+      const fallbackText = activityText || 'Processing...';
       const threadTs = context.threadTs || context.originalTs;
-      await withSlackRetry(
-        () =>
-          this.slack.chat.postMessage({
-            channel: context.channelId,
-            thread_ts: threadTs,
-            text,
-          }),
-        'thinking.post'
-      );
-    } catch (err) {
-      console.error('Failed to post thinking message:', err);
-    }
+
+      // Update or post with error fallback
+      try {
+        if (state.activityMessageTs) {
+          await withSlackRetry(
+            () =>
+              this.slack.chat.update({
+                channel: context.channelId,
+                ts: state.activityMessageTs!,
+                blocks,
+                text: fallbackText,
+              }),
+            'activity.update'
+          );
+        } else {
+          const result = await withSlackRetry(
+            () =>
+              this.slack.chat.postMessage({
+                channel: context.channelId,
+                thread_ts: threadTs,
+                blocks,
+                text: fallbackText,
+              }),
+            'activity.post'
+          );
+          state.activityMessageTs = result.ts as string;
+        }
+      } catch (error) {
+        console.error('Error updating activity message:', error);
+        // Fallback: post new message if update fails
+        try {
+          const result = await withSlackRetry(
+            () =>
+              this.slack.chat.postMessage({
+                channel: context.channelId,
+                thread_ts: threadTs,
+                blocks,
+                text: fallbackText,
+              }),
+            'activity.fallback'
+          );
+          state.activityMessageTs = result.ts as string;
+        } catch (fallbackError) {
+          console.error('Fallback post also failed:', fallbackError);
+        }
+      }
+
+      // Trim entries if too many (memory management)
+      if (entries.length > MAX_LIVE_ENTRIES * 2) {
+        // Keep only last MAX_LIVE_ENTRIES
+        const trimmed = entries.slice(-MAX_LIVE_ENTRIES);
+        this.activityManager.clearEntries(conversationKey);
+        trimmed.forEach((e) => this.activityManager.addEntry(conversationKey, e));
+      }
+
+      state.lastUpdateTime = Date.now();
+    });
   }
 
   /**
-   * Post tool activity to thread.
-   */
-  private async postToolActivity(
-    conversationKey: string,
-    itemId: string,
-    tool: string,
-    action: 'start' | 'complete',
-    input?: string,
-    durationMs?: number
-  ): Promise<void> {
-    const context = this.contexts.get(conversationKey);
-    if (!context) return;
-
-    const emoji = getToolEmoji(tool);
-    let text: string;
-
-    if (action === 'start') {
-      text = `${emoji} *${tool}*${input ? ` \`${input}\`` : ''}`;
-    } else {
-      const duration = durationMs ? ` [${(durationMs / 1000).toFixed(1)}s]` : '';
-      text = `:white_check_mark: *${tool}*${input ? ` \`${input}\`` : ''}${duration}`;
-    }
-
-    try {
-      const threadTs = context.threadTs || context.originalTs;
-      await withSlackRetry(
-        () =>
-          this.slack.chat.postMessage({
-            channel: context.channelId,
-            thread_ts: threadTs,
-            text,
-          }),
-        'tool.activity'
-      );
-    } catch (err) {
-      console.error('Failed to post tool activity:', err);
-    }
-  }
-
-  /**
-   * Post response message to thread (final message).
+   * Post full response message to thread (separate from activity message).
+   * Only posts if response is substantial and turn completed successfully.
    */
   private async postResponseMessage(conversationKey: string): Promise<void> {
     const context = this.contexts.get(conversationKey);
     const state = this.states.get(conversationKey);
 
-    if (!context || !state || !state.text || state.responsePosted) {
+    if (!context || !state || !state.text) {
       return;
     }
-
-    state.responsePosted = true;
 
     // Build response blocks
     const blocks: Block[] = [

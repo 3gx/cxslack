@@ -638,6 +638,75 @@ export interface AbortConfirmationModalParams {
   messageTs: string;
 }
 
+// ============================================================================
+// Activity Blocks
+// ============================================================================
+
+export interface ActivityBlockParams {
+  activityText: string;
+  status: 'running' | 'completed' | 'interrupted' | 'failed';
+  conversationKey: string;
+  elapsedMs: number;
+}
+
+/**
+ * Build blocks for activity message with rolling window of entries.
+ * Includes status line at bottom and abort button during processing.
+ */
+export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
+  const { activityText, status, conversationKey, elapsedMs } = params;
+  const blocks: Block[] = [];
+  const elapsedSec = (elapsedMs / 1000).toFixed(1);
+
+  // Activity log section
+  blocks.push({
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text: activityText || ':gear: Starting...',
+    },
+  });
+
+  // Status line at bottom
+  let statusText: string;
+  if (status === 'completed') {
+    statusText = `:white_check_mark: *Complete* | ${elapsedSec}s`;
+  } else if (status === 'interrupted') {
+    statusText = ':octagonal_sign: *Aborted*';
+  } else if (status === 'failed') {
+    statusText = ':x: *Error*';
+  } else {
+    statusText = `:gear: *Processing...* | ${elapsedSec}s`;
+  }
+
+  blocks.push({
+    type: 'context',
+    elements: [{ type: 'mrkdwn', text: statusText }],
+  });
+
+  // Abort button (only during processing)
+  if (status === 'running') {
+    blocks.push({
+      type: 'actions',
+      block_id: `status_panel_${conversationKey}`,
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Abort' },
+          style: 'danger',
+          action_id: `abort_${conversationKey}`,
+        },
+      ],
+    });
+  }
+
+  return blocks;
+}
+
+// ============================================================================
+// Abort Confirmation Modal
+// ============================================================================
+
 /**
  * Build a modal view for abort confirmation.
  */

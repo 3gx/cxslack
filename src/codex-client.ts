@@ -456,9 +456,15 @@ export class CodexClient extends EventEmitter {
 
       // Item lifecycle
       case 'item/started':
-      case 'codex/event/item_started':
-        this.emit('item:started', params as { itemId: string; itemType: string });
+      case 'codex/event/item_started': {
+        const p = params as Record<string, unknown>;
+        // Debug log to capture actual structure
+        console.log('[codex-client] item/started params:', JSON.stringify(p));
+        const itemId = (p.itemId || p.item_id || p.id || '') as string;
+        const itemType = (p.itemType || p.item_type || p.type || p.toolName || p.tool_name || p.name || 'unknown') as string;
+        this.emit('item:started', { itemId, itemType });
         break;
+      }
 
       case 'item/completed':
       case 'codex/event/item_completed':

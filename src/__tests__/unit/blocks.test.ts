@@ -16,6 +16,7 @@ import {
   buildErrorBlocks,
   buildUnifiedStatusLine,
   buildAbortConfirmationModalView,
+  buildActivityBlocks,
 } from '../../blocks.js';
 
 describe('Block Kit Builders', () => {
@@ -355,6 +356,133 @@ describe('Block Kit Builders', () => {
 
       expect(modal.blocks).toHaveLength(1);
       expect(modal.blocks[0].text?.text).toContain('interrupt');
+    });
+  });
+
+  describe('buildActivityBlocks', () => {
+    it('builds activity blocks with running status and abort button', () => {
+      const blocks = buildActivityBlocks({
+        activityText: ':gear: Processing...',
+        status: 'running',
+        conversationKey: 'C123:456.789',
+        elapsedMs: 5000,
+      });
+
+      // Should have 3 blocks: section, context (status), actions (abort button)
+      expect(blocks).toHaveLength(3);
+      expect(blocks[0].type).toBe('section');
+      expect(blocks[0].text?.text).toContain('Processing');
+      expect(blocks[1].type).toBe('context');
+      expect(blocks[1].elements?.[0].text).toContain('Processing');
+      expect(blocks[1].elements?.[0].text).toContain('5.0s');
+      expect(blocks[2].type).toBe('actions');
+    });
+
+    it('builds activity blocks with completed status (no abort button)', () => {
+      const blocks = buildActivityBlocks({
+        activityText: ':white_check_mark: Done',
+        status: 'completed',
+        conversationKey: 'C123:456.789',
+        elapsedMs: 3500,
+      });
+
+      // Should have 2 blocks: section, context (status) - NO actions
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0].type).toBe('section');
+      expect(blocks[1].type).toBe('context');
+      expect(blocks[1].elements?.[0].text).toContain('Complete');
+      expect(blocks[1].elements?.[0].text).toContain('3.5s');
+    });
+
+    it('builds activity blocks with interrupted status', () => {
+      const blocks = buildActivityBlocks({
+        activityText: ':octagonal_sign: Stopped',
+        status: 'interrupted',
+        conversationKey: 'C123:456.789',
+        elapsedMs: 2000,
+      });
+
+      expect(blocks).toHaveLength(2);
+      expect(blocks[1].elements?.[0].text).toContain('Aborted');
+      expect(blocks[1].elements?.[0].text).toContain(':octagonal_sign:');
+    });
+
+    it('builds activity blocks with failed status', () => {
+      const blocks = buildActivityBlocks({
+        activityText: ':x: Error occurred',
+        status: 'failed',
+        conversationKey: 'C123:456.789',
+        elapsedMs: 1000,
+      });
+
+      expect(blocks).toHaveLength(2);
+      expect(blocks[1].elements?.[0].text).toContain('Error');
+      expect(blocks[1].elements?.[0].text).toContain(':x:');
+    });
+
+    it('uses default text when activityText is empty', () => {
+      const blocks = buildActivityBlocks({
+        activityText: '',
+        status: 'running',
+        conversationKey: 'C123:456.789',
+        elapsedMs: 0,
+      });
+
+      expect(blocks[0].text?.text).toBe(':gear: Starting...');
+    });
+
+    it('formats elapsed time correctly', () => {
+      const blocks1 = buildActivityBlocks({
+        activityText: 'Test',
+        status: 'completed',
+        conversationKey: 'test',
+        elapsedMs: 1234,
+      });
+      expect(blocks1[1].elements?.[0].text).toContain('1.2s');
+
+      const blocks2 = buildActivityBlocks({
+        activityText: 'Test',
+        status: 'completed',
+        conversationKey: 'test',
+        elapsedMs: 10567,
+      });
+      expect(blocks2[1].elements?.[0].text).toContain('10.6s');
+    });
+
+    it('includes abort button with correct action_id during running', () => {
+      const blocks = buildActivityBlocks({
+        activityText: 'Test',
+        status: 'running',
+        conversationKey: 'C123:456.789',
+        elapsedMs: 0,
+      });
+
+      const actionsBlock = blocks.find((b) => b.type === 'actions');
+      expect(actionsBlock).toBeDefined();
+      expect(actionsBlock?.block_id).toBe('status_panel_C123:456.789');
+
+      const button = actionsBlock?.elements?.[0] as { action_id: string; text: { text: string }; style: string };
+      expect(button.action_id).toBe('abort_C123:456.789');
+      expect(button.text.text).toBe('Abort');
+      expect(button.style).toBe('danger');
+    });
+
+    it('status line appears at bottom (after activity text)', () => {
+      const blocks = buildActivityBlocks({
+        activityText: ':brain: Thinking...\n:mag: Read file.ts',
+        status: 'running',
+        conversationKey: 'test',
+        elapsedMs: 5000,
+      });
+
+      // First block is activity content
+      expect(blocks[0].type).toBe('section');
+      expect(blocks[0].text?.text).toContain('Thinking');
+      expect(blocks[0].text?.text).toContain('Read');
+
+      // Second block is status line (context)
+      expect(blocks[1].type).toBe('context');
+      expect(blocks[1].elements?.[0].text).toContain('Processing');
     });
   });
 });

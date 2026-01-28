@@ -166,4 +166,94 @@ describe('buildActivityLogText', () => {
 
     expect(text).not.toContain('earlier entries');
   });
+
+  it('truncates output when exceeds maxChars', () => {
+    // Create many entries to generate long text
+    const entries: ActivityEntry[] = [];
+    for (let i = 0; i < 50; i++) {
+      entries.push({
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: 'ReadFileWithVeryLongToolName',
+        durationMs: 1000 + i,
+      });
+    }
+
+    // Set a small maxChars limit
+    const text = buildActivityLogText(entries, 50, 200);
+
+    // Should be truncated
+    expect(text.length).toBeLessThanOrEqual(200);
+    expect(text).toContain('truncated');
+  });
+
+  it('does not truncate when under maxChars', () => {
+    const entries: ActivityEntry[] = [
+      { type: 'starting', timestamp: Date.now() },
+    ];
+
+    const text = buildActivityLogText(entries, 20, 1000);
+
+    expect(text).not.toContain('truncated');
+  });
+
+  it('respects both maxEntries and maxChars limits', () => {
+    const entries: ActivityEntry[] = [];
+    for (let i = 0; i < 100; i++) {
+      entries.push({ type: 'starting', timestamp: Date.now() });
+    }
+
+    // Limit to 10 entries and 100 chars
+    const text = buildActivityLogText(entries, 10, 100);
+
+    // Should show "earlier entries" (from maxEntries limit)
+    expect(text).toContain('earlier entries');
+    // Should be within char limit
+    expect(text.length).toBeLessThanOrEqual(100);
+  });
+
+  it('formats thinking entry correctly', () => {
+    const entries: ActivityEntry[] = [
+      { type: 'thinking', timestamp: Date.now() },
+    ];
+
+    const text = buildActivityLogText(entries);
+
+    expect(text).toContain(':brain:');
+    expect(text).toContain('Thinking');
+  });
+
+  it('formats tool_start entry with emoji', () => {
+    const entries: ActivityEntry[] = [
+      { type: 'tool_start', timestamp: Date.now(), tool: 'Read' },
+    ];
+
+    const text = buildActivityLogText(entries);
+
+    expect(text).toContain(':mag:'); // Read tool emoji
+    expect(text).toContain('Read');
+  });
+
+  it('formats tool_complete entry with duration', () => {
+    const entries: ActivityEntry[] = [
+      { type: 'tool_complete', timestamp: Date.now(), tool: 'Bash', durationMs: 2500 },
+    ];
+
+    const text = buildActivityLogText(entries);
+
+    expect(text).toContain(':white_check_mark:'); // Completed tool uses checkmark
+    expect(text).toContain('Bash');
+    expect(text).toContain('2.5s');
+  });
+
+  it('formats generating entry with char count', () => {
+    const entries: ActivityEntry[] = [
+      { type: 'generating', timestamp: Date.now(), charCount: 500 },
+    ];
+
+    const text = buildActivityLogText(entries);
+
+    expect(text).toContain(':pencil:'); // Generating uses pencil emoji
+    expect(text).toContain('500');
+  });
 });
