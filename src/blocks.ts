@@ -570,3 +570,91 @@ export function buildErrorBlocks(message: string): Block[] {
     },
   ];
 }
+
+// ============================================================================
+// Progress Indicators
+// ============================================================================
+
+export interface UnifiedStatusLineParams {
+  approvalPolicy: ApprovalPolicy;
+  model?: string;
+  durationMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
+/**
+ * Build a unified status line showing policy, model, duration, and tokens.
+ */
+export function buildUnifiedStatusLine(params: UnifiedStatusLineParams): string {
+  const parts: string[] = [];
+
+  // Policy badge
+  const policyEmoji: Record<ApprovalPolicy, string> = {
+    never: ':unlock:',
+    'on-request': ':question:',
+    'on-failure': ':construction:',
+    untrusted: ':lock:',
+  };
+  parts.push(`${policyEmoji[params.approvalPolicy]} ${params.approvalPolicy}`);
+
+  // Model
+  if (params.model) {
+    parts.push(`| ${params.model}`);
+  }
+
+  // Duration
+  if (params.durationMs) {
+    parts.push(`| ${(params.durationMs / 1000).toFixed(1)}s`);
+  }
+
+  // Tokens
+  if (params.inputTokens || params.outputTokens) {
+    const inp = params.inputTokens || 0;
+    const out = params.outputTokens || 0;
+    parts.push(`| ${inp}/${out} tokens`);
+  }
+
+  return `_${parts.join(' ')}_`;
+}
+
+// ============================================================================
+// Abort Confirmation Modal
+// ============================================================================
+
+export interface AbortConfirmationModalParams {
+  conversationKey: string;
+  channelId: string;
+  messageTs: string;
+}
+
+/**
+ * Build a modal view for abort confirmation.
+ */
+export function buildAbortConfirmationModalView(params: AbortConfirmationModalParams): {
+  type: 'modal';
+  callback_id: string;
+  private_metadata: string;
+  title: { type: 'plain_text'; text: string };
+  submit: { type: 'plain_text'; text: string };
+  close: { type: 'plain_text'; text: string };
+  blocks: Block[];
+} {
+  return {
+    type: 'modal',
+    callback_id: 'abort_confirmation_modal',
+    private_metadata: JSON.stringify(params),
+    title: { type: 'plain_text', text: 'Confirm Abort' },
+    submit: { type: 'plain_text', text: 'Abort' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: ':warning: *This will interrupt the current processing.*',
+        },
+      },
+    ],
+  };
+}

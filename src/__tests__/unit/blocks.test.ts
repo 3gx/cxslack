@@ -14,6 +14,8 @@ import {
   buildClearBlocks,
   buildTextBlocks,
   buildErrorBlocks,
+  buildUnifiedStatusLine,
+  buildAbortConfirmationModalView,
 } from '../../blocks.js';
 
 describe('Block Kit Builders', () => {
@@ -242,6 +244,99 @@ describe('Block Kit Builders', () => {
       expect(blocks).toHaveLength(1);
       expect(blocks[0].text?.text).toContain('Error');
       expect(blocks[0].text?.text).toContain('Something went wrong');
+    });
+  });
+
+  describe('buildUnifiedStatusLine', () => {
+    it('formats status line with all fields', () => {
+      const line = buildUnifiedStatusLine({
+        approvalPolicy: 'on-request',
+        model: 'codex-mini',
+        durationMs: 5200,
+        inputTokens: 1250,
+        outputTokens: 542,
+      });
+
+      expect(line).toContain('on-request');
+      expect(line).toContain('codex-mini');
+      expect(line).toContain('5.2s');
+      expect(line).toContain('1250/542 tokens');
+      expect(line).toMatch(/^_.*_$/); // Should be wrapped in italics
+    });
+
+    it('omits missing optional fields', () => {
+      const line = buildUnifiedStatusLine({
+        approvalPolicy: 'never',
+      });
+
+      expect(line).toContain('never');
+      expect(line).not.toContain('|');
+      expect(line).not.toContain('undefined');
+    });
+
+    it('includes policy badge emoji', () => {
+      expect(buildUnifiedStatusLine({ approvalPolicy: 'never' })).toContain(':unlock:');
+      expect(buildUnifiedStatusLine({ approvalPolicy: 'on-request' })).toContain(':question:');
+      expect(buildUnifiedStatusLine({ approvalPolicy: 'on-failure' })).toContain(':construction:');
+      expect(buildUnifiedStatusLine({ approvalPolicy: 'untrusted' })).toContain(':lock:');
+    });
+
+    it('formats token counts correctly', () => {
+      const line = buildUnifiedStatusLine({
+        approvalPolicy: 'on-request',
+        inputTokens: 0,
+        outputTokens: 100,
+      });
+
+      expect(line).toContain('0/100 tokens');
+    });
+  });
+
+  describe('buildAbortConfirmationModalView', () => {
+    it('builds modal with correct callback_id', () => {
+      const modal = buildAbortConfirmationModalView({
+        conversationKey: 'C123:456.789',
+        channelId: 'C123',
+        messageTs: '456.789',
+      });
+
+      expect(modal.type).toBe('modal');
+      expect(modal.callback_id).toBe('abort_confirmation_modal');
+    });
+
+    it('includes private_metadata with params', () => {
+      const modal = buildAbortConfirmationModalView({
+        conversationKey: 'C123:456.789',
+        channelId: 'C123',
+        messageTs: '456.789',
+      });
+
+      const metadata = JSON.parse(modal.private_metadata);
+      expect(metadata.conversationKey).toBe('C123:456.789');
+      expect(metadata.channelId).toBe('C123');
+      expect(metadata.messageTs).toBe('456.789');
+    });
+
+    it('has Abort submit button', () => {
+      const modal = buildAbortConfirmationModalView({
+        conversationKey: 'test',
+        channelId: 'C123',
+        messageTs: '456.789',
+      });
+
+      expect(modal.submit.text).toBe('Abort');
+      expect(modal.close.text).toBe('Cancel');
+    });
+
+    it('includes warning message', () => {
+      const modal = buildAbortConfirmationModalView({
+        conversationKey: 'test',
+        channelId: 'C123',
+        messageTs: '456.789',
+      });
+
+      expect(modal.blocks).toHaveLength(1);
+      expect(modal.blocks[0].text?.text).toContain('interrupt');
     });
   });
 });

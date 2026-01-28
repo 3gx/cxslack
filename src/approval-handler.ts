@@ -22,6 +22,8 @@ import {
   buildApprovalDeniedBlocks,
   Block,
 } from './blocks.js';
+import { sendDmNotification } from './dm-notifications.js';
+import { makeConversationKey } from './streaming.js';
 
 /**
  * Pending approval request.
@@ -37,6 +39,8 @@ interface PendingApproval {
   threadTs?: string;
   /** Slack message timestamp of approval message */
   messageTs: string;
+  /** User ID who should be notified */
+  userId?: string;
   /** Timestamp when approval was requested */
   createdAt: number;
 }
@@ -69,12 +73,14 @@ export class ApprovalHandler {
   async handleApprovalRequest(
     request: ApprovalRequest,
     channelId: string,
-    threadTs?: string
+    threadTs?: string,
+    userId?: string
   ): Promise<void> {
     const requestId = this.generateRequestId();
 
     // Build blocks based on request type
     let blocks: Block[];
+    let previewText: string | undefined;
     if (request.method === 'item/commandExecution/requestApproval') {
       const cmdRequest = request as CommandApprovalRequest;
       blocks = buildCommandApprovalBlocks({
@@ -86,6 +92,7 @@ export class ApprovalHandler {
         sandboxed: cmdRequest.params.sandboxed,
         requestId,
       });
+      previewText = `Command: \`${cmdRequest.params.parsedCmd}\``;
     } else {
       const fileRequest = request as FileChangeApprovalRequest;
       blocks = buildFileChangeApprovalBlocks({
@@ -96,6 +103,7 @@ export class ApprovalHandler {
         reason: fileRequest.params.reason,
         requestId,
       });
+      previewText = `File: \`${fileRequest.params.filePath}\``;
     }
 
     // Post approval message to Slack
@@ -117,8 +125,25 @@ export class ApprovalHandler {
       channelId,
       threadTs,
       messageTs: result.ts,
+      userId,
       createdAt: Date.now(),
     });
+
+    // Send DM notification if userId is provided
+    if (userId) {
+      const conversationKey = makeConversationKey(channelId, threadTs);
+      await sendDmNotification(
+        this.slack,
+        userId,
+        channelId,
+        result.ts,
+        conversationKey,
+        ':question: Approval needed',
+        previewText
+      ).catch((err) => {
+        console.error('Failed to send DM notification:', err);
+      });
+    }
   }
 
   /**

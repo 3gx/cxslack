@@ -118,6 +118,7 @@ export interface CodexClientEvents {
   'item:delta': (params: { itemId: string; delta: string }) => void;
   'item:completed': (params: { itemId: string }) => void;
   'approval:requested': (request: ApprovalRequest) => void;
+  'tokens:updated': (params: { inputTokens: number; outputTokens: number }) => void;
 
   // Errors
   'error': (error: Error) => void;
@@ -133,6 +134,10 @@ export class CodexClient extends EventEmitter {
   private initialized = false;
   private restartAttempts = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Delta deduplication to prevent text duplication from multiple event types
+  private recentDeltaHashes = new Map<string, number>(); // hash -> timestamp
+  private readonly DELTA_HASH_TTL_MS = 5000; // 5 second TTL
 
   private readonly config: Required<CodexClientConfig>;
 
@@ -470,7 +475,27 @@ export class CodexClient extends EventEmitter {
 
         const itemId = p.itemId || p.item_id || msg?.item_id || '';
 
-        this.emit('item:delta', { itemId: itemId as string, delta: delta as string });
+        // Deduplication: prevent duplicate deltas from different event types
+        const deltaStr = delta as string;
+        if (deltaStr) {
+          const hash = `${itemId}:${deltaStr.slice(0, 50)}`;
+          const now = Date.now();
+
+          // Clean expired hashes
+          for (const [h, ts] of this.recentDeltaHashes) {
+            if (now - ts > this.DELTA_HASH_TTL_MS) {
+              this.recentDeltaHashes.delete(h);
+            }
+          }
+
+          // Skip if duplicate
+          if (this.recentDeltaHashes.has(hash)) {
+            return;
+          }
+          this.recentDeltaHashes.set(hash, now);
+
+          this.emit('item:delta', { itemId: itemId as string, delta: deltaStr });
+        }
         break;
       }
 
@@ -483,13 +508,27 @@ export class CodexClient extends EventEmitter {
         } as ApprovalRequest);
         break;
 
+      // Token usage events
+      case 'thread/tokenUsage/updated':
+      case 'codex/event/token_count': {
+        const p = params as {
+          inputTokens?: number;
+          outputTokens?: number;
+          input_tokens?: number;
+          output_tokens?: number;
+        };
+        this.emit('tokens:updated', {
+          inputTokens: p.inputTokens ?? p.input_tokens ?? 0,
+          outputTokens: p.outputTokens ?? p.output_tokens ?? 0,
+        });
+        break;
+      }
+
       // Informational events (log but don't emit)
       case 'thread/started':
-      case 'thread/tokenUsage/updated':
       case 'account/rateLimits/updated':
       case 'codex/event/mcp_startup_update':
       case 'codex/event/mcp_startup_complete':
-      case 'codex/event/token_count':
       case 'codex/event/user_message':
       case 'codex/event/agent_message':
       case 'codex/event/agent_reasoning':

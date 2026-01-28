@@ -21,8 +21,15 @@ import {
   getEffectiveThreadId,
   recordTurn,
 } from './session-manager.js';
-import { buildStatusBlocks, buildErrorBlocks, buildTextBlocks, Block } from './blocks.js';
+import {
+  buildStatusBlocks,
+  buildErrorBlocks,
+  buildTextBlocks,
+  buildAbortConfirmationModalView,
+  Block,
+} from './blocks.js';
 import { toUserMessage } from './errors.js';
+import { markAborted } from './abort-tracker.js';
 
 // Global instances
 let app: App;
@@ -105,7 +112,12 @@ export async function startBot(): Promise<void> {
 
   // Set up approval callback
   streamingManager.onApprovalRequest(async (request: ApprovalRequest, context: StreamingContext) => {
-    await approvalHandler.handleApprovalRequest(request, context.channelId, context.threadTs);
+    await approvalHandler.handleApprovalRequest(
+      request,
+      context.channelId,
+      context.threadTs,
+      context.userId
+    );
   });
 
   // Register event handlers
@@ -207,6 +219,22 @@ function setupEventHandlers(): void {
     }
   });
 
+  // Handle abort confirmation modal submission
+  app.view('abort_confirmation_modal', async ({ ack, view }) => {
+    await ack();
+    // Mark as aborted before interrupting so status transition knows
+    // Modal private_metadata contains: { conversationKey, channelId, messageTs }
+    const metadata = JSON.parse(view.private_metadata || '{}');
+    const { conversationKey } = metadata;
+    if (conversationKey) {
+      markAborted(conversationKey);
+      const context = streamingManager.getContext(conversationKey);
+      if (context) {
+        await codex.interruptTurn(context.threadId, context.turnId);
+      }
+    }
+  });
+
   // Handle button actions (approve/deny/abort/fork)
   app.action(/^(approve|deny|abort|fork)_/, async ({ action, ack, body, client }) => {
     await ack();
@@ -226,11 +254,21 @@ function setupEventHandlers(): void {
         const decision = actionId.startsWith('approve_') ? 'accept' : 'decline';
         await approvalHandler.handleApprovalDecision(requestId, decision as 'accept' | 'decline');
       } else if (actionId.startsWith('abort_')) {
-        // Abort action
+        // Abort action - open confirmation modal
         const conversationKey = actionId.replace('abort_', '');
         const context = streamingManager.getContext(conversationKey);
         if (context) {
-          await codex.interruptTurn(context.threadId, context.turnId);
+          const triggerBody = body as { trigger_id?: string };
+          if (triggerBody.trigger_id) {
+            await client.views.open({
+              trigger_id: triggerBody.trigger_id,
+              view: buildAbortConfirmationModalView({
+                conversationKey,
+                channelId: context.channelId,
+                messageTs: context.messageTs,
+              }),
+            });
+          }
         }
       } else if (actionId.startsWith('fork_')) {
         // Fork action - handle thread forking
@@ -343,6 +381,8 @@ async function handleUserMessage(
     channelId,
     threadTs: postingThreadTs, // Track the thread we're posting to
     messageTs: initialResult.ts,
+    originalTs: messageTs, // User's original message for emoji reactions
+    userId, // Track user for DM notifications
     threadId,
     turnId: '', // Will be set when turn starts
     approvalPolicy,

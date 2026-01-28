@@ -12,6 +12,13 @@ import type { WebClient } from '@slack/web-api';
 import type { CodexClient, TurnStatus, ApprovalRequest } from './codex-client.js';
 import { buildTextBlocks, buildStatusBlocks, buildHeaderBlock, Block } from './blocks.js';
 import type { ApprovalPolicy } from './codex-client.js';
+import {
+  markProcessingStart,
+  markComplete,
+  markError,
+  markAborted as markAbortedEmoji,
+} from './emoji-reactions.js';
+import { isAborted, clearAborted } from './abort-tracker.js';
 
 // Default update rate in milliseconds
 const DEFAULT_UPDATE_RATE_MS = 500;
@@ -26,6 +33,10 @@ export interface StreamingContext {
   threadTs?: string;
   /** Slack message timestamp being updated */
   messageTs: string;
+  /** User's original message timestamp (for emoji reactions) */
+  originalTs: string;
+  /** User ID who initiated the request */
+  userId?: string;
   /** Codex thread ID */
   threadId: string;
   /** Current turn ID */
@@ -54,6 +65,10 @@ interface StreamingState {
   updateTimer: ReturnType<typeof setTimeout> | null;
   /** Current turn status */
   status: 'running' | 'completed' | 'interrupted' | 'failed';
+  /** Accumulated input tokens */
+  inputTokens: number;
+  /** Accumulated output tokens */
+  outputTokens: number;
 }
 
 /**
@@ -109,6 +124,13 @@ export class StreamingManager {
       lastUpdateTime: 0,
       updateTimer: null,
       status: 'running',
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+
+    // Add eyes emoji to user's original message
+    markProcessingStart(this.slack, context.channelId, context.originalTs).catch((err) => {
+      console.error('Failed to add processing emoji:', err);
     });
 
     // Post initial processing message
@@ -170,13 +192,37 @@ export class StreamingManager {
     });
 
     // Turn completed
-    this.codex.on('turn:completed', ({ threadId, turnId, status }) => {
+    this.codex.on('turn:completed', async ({ threadId, turnId, status }) => {
       const found = this.findContextByThreadId(threadId);
       if (found) {
         const state = this.states.get(found.key);
         if (state) {
+          // Check if aborted (takes precedence over other statuses)
+          const wasAborted = isAborted(found.key);
+          if (wasAborted) {
+            status = 'interrupted'; // Override status
+          }
+
           state.status = status;
           state.isStreaming = false;
+
+          // Transition emoji based on final status
+          const { channelId, originalTs } = found.context;
+          try {
+            if (status === 'completed') {
+              await markComplete(this.slack, channelId, originalTs);
+            } else if (status === 'interrupted' || wasAborted) {
+              await markAbortedEmoji(this.slack, channelId, originalTs);
+            } else {
+              await markError(this.slack, channelId, originalTs);
+            }
+          } catch (err) {
+            console.error('Failed to transition emoji:', err);
+          }
+
+          // Clear abort state for next turn
+          clearAborted(found.key);
+
           // Final update
           this.updateSlackMessage(found.key, true).catch((err) => {
             console.error('Failed to update final message:', err);
@@ -203,6 +249,18 @@ export class StreamingManager {
       const found = this.findContextByThreadId(request.params.threadId);
       if (found && this.approvalCallback) {
         this.approvalCallback(request, found.context);
+      }
+    });
+
+    // Token usage updates
+    this.codex.on('tokens:updated', ({ inputTokens, outputTokens }) => {
+      // Add tokens to the currently streaming context
+      for (const [, state] of this.states) {
+        if (state.isStreaming) {
+          state.inputTokens += inputTokens;
+          state.outputTokens += outputTokens;
+          break; // Assume one active stream at a time
+        }
       }
     });
   }
