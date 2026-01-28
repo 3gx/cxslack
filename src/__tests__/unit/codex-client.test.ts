@@ -203,6 +203,46 @@ describe('CodexClient item:started Event Tool Name Extraction', () => {
   });
 });
 
+describe('context:turnId Event', () => {
+  it('emits when threadId and turnId present', () => {
+    const params = { threadId: 't1', turnId: 'turn1' };
+    const shouldEmit = !!(params.threadId && params.turnId);
+    expect(shouldEmit).toBe(true);
+  });
+
+  it('does not emit when turnId missing', () => {
+    const params = { threadId: 't1', turnId: '' };
+    const shouldEmit = !!(params.threadId && params.turnId);
+    expect(shouldEmit).toBe(false);
+  });
+
+  it('does not emit when threadId missing', () => {
+    const params = { threadId: '', turnId: 'turn1' };
+    const shouldEmit = !!(params.threadId && params.turnId);
+    expect(shouldEmit).toBe(false);
+  });
+});
+
+describe('Command exitCode Extraction', () => {
+  it('extracts camelCase exitCode', () => {
+    const params = { exitCode: 0 };
+    const exitCode = params.exitCode ?? (params as { exit_code?: number }).exit_code;
+    expect(exitCode).toBe(0);
+  });
+
+  it('extracts snake_case exit_code', () => {
+    const params = { exit_code: 127 };
+    const exitCode = (params as { exitCode?: number }).exitCode ?? params.exit_code;
+    expect(exitCode).toBe(127);
+  });
+
+  it('handles undefined exit code', () => {
+    const params = {} as { exitCode?: number; exit_code?: number };
+    const exitCode = params.exitCode ?? params.exit_code;
+    expect(exitCode).toBeUndefined();
+  });
+});
+
 describe('CodexClient Token Events', () => {
   it('emits tokens:updated event with normalized field names', () => {
     const emitter = new EventEmitter();

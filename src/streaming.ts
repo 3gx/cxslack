@@ -132,6 +132,10 @@ interface StreamingState {
   activeTools: Map<string, { tool: string; input?: string; startTime: number }>;
   /** The ONE activity message timestamp we update */
   activityMessageTs?: string;
+  /** Whether an abort is pending (waiting for turnId) */
+  pendingAbort?: boolean;
+  /** Timeout for pending abort (safety net) */
+  pendingAbortTimeout?: ReturnType<typeof setTimeout>;
 }
 
 /**
@@ -197,6 +201,8 @@ export class StreamingManager {
       thinkingComplete: false,
       activeTools: new Map(),
       activityMessageTs: context.messageTs, // REUSE initial message!
+      pendingAbort: false,
+      pendingAbortTimeout: undefined,
     };
 
     this.contexts.set(key, context);
@@ -244,6 +250,31 @@ export class StreamingManager {
   }
 
   /**
+   * Stop all streaming contexts (used during shutdown).
+   */
+  stopAllStreaming(): void {
+    console.log(`[streaming] Stopping all streaming (${this.contexts.size} active)`);
+    for (const [key, state] of this.states) {
+      // Clear update timer
+      if (state.updateTimer) {
+        clearInterval(state.updateTimer);
+        state.updateTimer = null;
+      }
+      // Clear pending abort timeout (from abort fix)
+      if (state.pendingAbortTimeout) {
+        clearTimeout(state.pendingAbortTimeout);
+        state.pendingAbortTimeout = undefined;
+      }
+      // Clear mutex
+      cleanupMutex(key);
+      // Clear activity entries
+      this.activityManager.clearEntries(key);
+    }
+    this.contexts.clear();
+    this.states.clear();
+  }
+
+  /**
    * Clear the update timer (used by abort handler).
    */
   clearTimer(conversationKey: string): void {
@@ -260,6 +291,37 @@ export class StreamingManager {
    */
   getContext(conversationKey: string): StreamingContext | undefined {
     return this.contexts.get(conversationKey);
+  }
+
+  /**
+   * Queue an abort request. If turnId is available, executes immediately.
+   * Otherwise, queues the abort to be executed when turn:started arrives.
+   */
+  queueAbort(conversationKey: string): boolean {
+    const context = this.contexts.get(conversationKey);
+    const state = this.states.get(conversationKey);
+    if (!context || !state) {
+      console.log(`[abort] No active context for ${conversationKey}`);
+      return false;
+    }
+    if (context.turnId) {
+      console.log(`[abort] Executing immediate abort for turnId: ${context.turnId}`);
+      this.codex.interruptTurn(context.threadId, context.turnId).catch((err) => {
+        console.error('[abort] Failed to interrupt turn:', err);
+      });
+      return true;
+    } else {
+      console.log(`[abort] Queueing abort (turnId not yet available)`);
+      state.pendingAbort = true;
+      // Safety timeout: if turnId never arrives, clear pending state after 10s
+      state.pendingAbortTimeout = setTimeout(() => {
+        if (state.pendingAbort) {
+          console.error('[abort] Timeout waiting for turnId - abort may not have been sent to Codex');
+          state.pendingAbort = false;
+        }
+      }, 10000);
+      return true;
+    }
   }
 
   /**
@@ -287,11 +349,44 @@ export class StreamingManager {
   }
 
   private setupEventHandlers(): void {
-    // Turn started
+    // Turn started - update turnId and check for pending abort
     this.codex.on('turn:started', ({ threadId, turnId }) => {
       const found = this.findContextByThreadId(threadId);
       if (found) {
         found.context.turnId = turnId;
+        const state = this.states.get(found.key);
+        if (state?.pendingAbort) {
+          console.log(`[streaming] Executing pending abort for turnId: ${turnId}`);
+          state.pendingAbort = false;
+          if (state.pendingAbortTimeout) {
+            clearTimeout(state.pendingAbortTimeout);
+            state.pendingAbortTimeout = undefined;
+          }
+          this.codex.interruptTurn(threadId, turnId).catch((err) => {
+            console.error('[streaming] Failed to execute pending abort:', err);
+          });
+        }
+      }
+    });
+
+    // context:turnId - backup source for turnId from exec_command notifications
+    this.codex.on('context:turnId', ({ threadId, turnId }) => {
+      const found = this.findContextByThreadId(threadId);
+      if (found && !found.context.turnId) {
+        found.context.turnId = turnId;
+        console.log(`[streaming] Got turnId from context:turnId: ${turnId}`);
+        const state = this.states.get(found.key);
+        if (state?.pendingAbort) {
+          console.log(`[streaming] Executing pending abort from context:turnId`);
+          state.pendingAbort = false;
+          if (state.pendingAbortTimeout) {
+            clearTimeout(state.pendingAbortTimeout);
+            state.pendingAbortTimeout = undefined;
+          }
+          this.codex.interruptTurn(threadId, turnId).catch((err) => {
+            console.error('[streaming] Failed to execute pending abort:', err);
+          });
+        }
       }
     });
 

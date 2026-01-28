@@ -133,6 +133,8 @@ export async function startBot(): Promise<void> {
  */
 export async function stopBot(): Promise<void> {
   console.log('Stopping Codex Slack bot...');
+  // Order matters: stop streaming first, then codex, then app
+  streamingManager?.stopAllStreaming();
   await codex?.stop();
   await app?.stop();
   console.log('Codex Slack bot stopped.');
@@ -230,15 +232,9 @@ function setupEventHandlers(): void {
       // IMMEDIATELY clear the timer (don't wait for turn:completed)
       streamingManager.clearTimer(conversationKey);
       markAborted(conversationKey);
-      const context = streamingManager.getContext(conversationKey);
-      if (context && context.turnId) {
-        // Only call interruptTurn if turnId is set (truthy, not empty string)
-        await codex.interruptTurn(context.threadId, context.turnId);
-      } else {
-        console.log('[abort] Skipping interruptTurn: turnId not yet available');
-      }
-      // If turnId is empty, abort flag is already set via markAborted()
-      // and will be handled when turn:completed fires
+      // Queue abort - will execute immediately if turnId available,
+      // or wait for turn:started/context:turnId if not
+      streamingManager.queueAbort(conversationKey);
     }
   });
 

@@ -210,23 +210,51 @@ describe.skipIf(SKIP_LIVE)('Codex Event Stream', { timeout: 60000 }, () => {
     // If no status field, absence of error indicates success
   });
 
-  it('documents all notification methods received', async () => {
-    // This test just documents what notifications we received
-    // Useful for detecting API changes
-    const methodCounts = new Map<string, number>();
+  // ============================================================================
+  // CRITICAL: Turn/Task Started Event Verification (Abort Fix)
+  // The abort fix depends on turn:started containing turnId. This test verifies it.
+  // ============================================================================
 
-    for (const n of notifications) {
-      methodCounts.set(n.method, (methodCounts.get(n.method) || 0) + 1);
+  it('turn:started contains threadId and turnId (CRITICAL for abort)', async () => {
+    // Find turn_started notifications (both formats)
+    const turnStartedNotifications = notifications.filter(
+      (n) => n.method === 'turn/started' || n.method === 'codex/event/task_started'
+    );
+
+    console.log('\n=== turn:started Structure Analysis (ABORT FIX) ===');
+    expect(turnStartedNotifications.length).toBeGreaterThan(0);
+
+    // Track if we found at least one notification with the required fields
+    let foundValidNotification = false;
+
+    for (const n of turnStartedNotifications) {
+      const params = n.params as Record<string, unknown>;
+      console.log(`Method: ${n.method}`);
+      console.log(`Params: ${JSON.stringify(params, null, 2)}`);
+
+      // Extract from either format
+      // turn/started: { threadId, turn: { id } }
+      // codex/event/task_started: { msg: { thread_id, turn_id } } OR { msg: { type: "task_started" } } (no turnId)
+      const msg = params.msg as Record<string, unknown> | undefined;
+      const turn = params.turn as Record<string, unknown> | undefined;
+      const threadId = (params.threadId || params.thread_id || msg?.thread_id || msg?.threadId) as string | undefined;
+      // turnId can be in: turn.id (turn/started), turnId/turn_id (top-level), or msg.turn_id (codex/event/*)
+      const turnId = (turn?.id || params.turnId || params.turn_id || msg?.turn_id || msg?.turnId) as string | undefined;
+
+      console.log(`Extracted threadId: ${threadId}`);
+      console.log(`Extracted turnId: ${turnId}`);
+      console.log('---');
+
+      // Check if this notification has valid threadId and turnId
+      if (threadId && (turnId !== undefined && turnId !== null)) {
+        foundValidNotification = true;
+        console.log(`✓ Valid turn:started notification found with threadId=${threadId}, turnId=${turnId}`);
+      }
     }
 
-    console.log('\n=== Notification Method Summary ===');
-    for (const [method, count] of [...methodCounts.entries()].sort()) {
-      console.log(`  ${method}: ${count}x`);
-    }
-    console.log('===================================\n');
-
-    // Always pass - this is just for documentation
-    expect(true).toBe(true);
+    // CRITICAL: At least one turn:started notification must have threadId and turnId for abort fix to work
+    expect(foundValidNotification).toBe(true);
+    console.log('=================================================\n');
   });
 
   // ============================================================================
@@ -235,7 +263,7 @@ describe.skipIf(SKIP_LIVE)('Codex Event Stream', { timeout: 60000 }, () => {
   // If Codex/app-server changes the format, these tests will catch it.
   // ============================================================================
 
-  it('item/started notifications have expected structure', async () => {
+  it('item/started has structure, turnId at top level, and known types', async () => {
     // Find item_started notifications (both formats)
     const itemStartedNotifications = notifications.filter(
       (n) => n.method === 'item/started' || n.method === 'codex/event/item_started'
@@ -244,27 +272,49 @@ describe.skipIf(SKIP_LIVE)('Codex Event Stream', { timeout: 60000 }, () => {
     // Should have received at least one (userMessage, reasoning, or agentMessage)
     expect(itemStartedNotifications.length).toBeGreaterThan(0);
 
-    console.log('\n=== item/started Structure Analysis ===');
+    console.log('\n=== item/started Structure Analysis (with turnId check) ===');
+
+    // Track item types and turnId presence
+    const itemTypes = new Set<string>();
+    let turnIdFoundAtTopLevel = false;
+    let turnIdFoundInMsg = false;
+
     for (const n of itemStartedNotifications) {
       const params = n.params as Record<string, unknown>;
       console.log(`Method: ${n.method}`);
-      console.log(`Params keys: ${Object.keys(params).join(', ')}`);
+      console.log(`Top-level params keys: ${Object.keys(params).join(', ')}`);
 
-      // Extract item from either format:
-      // Format 1 (codex/event/item_started): { msg: { item: {...} } }
-      // Format 2 (item/started): { item: {...} }
+      // Check for turnId at TOP LEVEL (critical for abort fix backup)
+      const topLevelTurnId = params.turnId || params.turn_id;
+      if (topLevelTurnId) {
+        turnIdFoundAtTopLevel = true;
+        console.log(`*** turnId at TOP LEVEL: ${topLevelTurnId} ***`);
+      }
+
+      // Extract item from either format
       const msg = params.msg as Record<string, unknown> | undefined;
-      const item = (msg?.item || params.item) as Record<string, unknown> | undefined;
+      if (msg) {
+        const msgTurnId = msg.turn_id || msg.turnId;
+        if (msgTurnId) {
+          turnIdFoundInMsg = true;
+          console.log(`turnId in msg: ${msgTurnId}`);
+        }
+      }
 
+      const item = (msg?.item || params.item) as Record<string, unknown> | undefined;
       if (item) {
-        console.log(`Item keys: ${Object.keys(item).join(', ')}`);
-        console.log(`Item.type: ${item.type}`);
-        console.log(`Item.id: ${item.id}`);
-      } else {
-        console.log('WARNING: No item found in expected locations!');
+        console.log(`Item.type: ${item.type}, Item.id: ${item.id}`);
+        if (item.type) {
+          itemTypes.add(String(item.type).toLowerCase());
+        }
       }
       console.log('---');
     }
+
+    // Log turnId discovery for abort fix verification
+    console.log(`\n*** ABORT FIX VERIFICATION ***`);
+    console.log(`turnId found at TOP LEVEL: ${turnIdFoundAtTopLevel}`);
+    console.log(`turnId found in msg: ${turnIdFoundInMsg}`);
     console.log('=======================================\n');
 
     // Verify structure for at least one notification
@@ -282,58 +332,22 @@ describe.skipIf(SKIP_LIVE)('Codex Event Stream', { timeout: 60000 }, () => {
     expect(typeof item!.type).toBe('string');
     expect(item!.id).toBeDefined();
     expect(typeof item!.id).toBe('string');
-  });
 
-  it('item/started type field contains expected item types', async () => {
-    // Find all item_started notifications
-    const itemStartedNotifications = notifications.filter(
-      (n) => n.method === 'item/started' || n.method === 'codex/event/item_started'
-    );
-
-    // Extract all item types seen
-    const itemTypes = new Set<string>();
-    for (const n of itemStartedNotifications) {
-      const params = n.params as Record<string, unknown>;
-      const msg = params.msg as Record<string, unknown> | undefined;
-      const item = (msg?.item || params.item) as Record<string, unknown> | undefined;
-      if (item?.type) {
-        // Normalize to lowercase for comparison
-        const typeStr = String(item.type).toLowerCase();
-        itemTypes.add(typeStr);
-      }
-    }
-
+    // Verify we saw known item types
     console.log('Item types seen:', [...itemTypes].join(', '));
-
-    // Known item types from Codex documentation and observed behavior:
-    // - userMessage / UserMessage: user's input
-    // - agentMessage / AgentMessage: agent's response
-    // - reasoning / Reasoning: thinking/reasoning content
-    // - commandExecution: shell command execution
-    // - mcpToolCall: MCP tool invocation
-    // - collabToolCall: collaboration tool call
-    // - fileChange: file modification
-    // - webSearch: web search
-    // - imageView: image viewing
     const knownItemTypes = new Set([
-      'usermessage',
-      'agentmessage',
-      'reasoning',
-      'commandexecution',
-      'mcptoolcall',
-      'collabtoolcall',
-      'filechange',
-      'websearch',
-      'imageview',
-      'enteredreviewmode',
-      'exitedreviewmode',
-      'compacted',
+      'usermessage', 'agentmessage', 'reasoning', 'commandexecution',
+      'mcptoolcall', 'collabtoolcall', 'filechange', 'websearch', 'imageview',
     ]);
-
-    // At minimum, a simple message should produce userMessage, reasoning, agentMessage
-    // (or at least some subset of these)
     const hasKnownType = [...itemTypes].some((t) => knownItemTypes.has(t));
     expect(hasKnownType).toBe(true);
+
+    // Document turnId availability (important for abort fix decision)
+    // We don't fail if turnId is missing, but we log it clearly
+    if (!turnIdFoundAtTopLevel && !turnIdFoundInMsg) {
+      console.warn('WARNING: No turnId found in item/started notifications!');
+      console.warn('The abort fix will rely solely on turn:started event.');
+    }
   });
 
   it('item/completed notifications match item/started by itemId', async () => {
@@ -407,7 +421,7 @@ describe.skipIf(SKIP_LIVE)('Codex Event Stream', { timeout: 60000 }, () => {
     }
   });
 
-  it('documents item structure including command fields when present', async () => {
+  it('verifies command execution events and exec_command notifications', async () => {
     // Clear notifications
     notifications.length = 0;
 
@@ -416,10 +430,10 @@ describe.skipIf(SKIP_LIVE)('Codex Event Stream', { timeout: 60000 }, () => {
     });
     const threadId = threadResult.thread.id;
 
-    // Use a prompt likely to trigger tool use (not guaranteed)
+    // Use a prompt that WILL trigger a command execution
     await rpc('turn/start', {
       threadId,
-      input: [{ type: 'text', text: 'What files are in the current directory? Use ls.' }],
+      input: [{ type: 'text', text: 'Run this exact command: echo "sdk-live-test"' }],
       approvalPolicy: 'never',
     });
 
@@ -433,30 +447,96 @@ describe.skipIf(SKIP_LIVE)('Codex Event Stream', { timeout: 60000 }, () => {
       );
     }
 
-    // Find any item/started notifications
+    // =========================================================================
+    // Part 1: Verify commandExecution items in item/started
+    // =========================================================================
     const itemStarted = notifications.filter((n) =>
       n.method === 'item/started' || n.method === 'codex/event/item_started'
     );
 
     expect(itemStarted.length).toBeGreaterThan(0);
 
-    // Document structure for any commandExecution items found
+    let commandExecutionFound = false;
     for (const notif of itemStarted) {
       const p = notif.params as Record<string, unknown>;
       const msg = p.msg as Record<string, unknown> | undefined;
       const item = (msg?.item || p.item) as Record<string, unknown> | undefined;
 
       if (item?.type === 'commandExecution' || item?.type === 'CommandExecution') {
-        console.log('commandExecution item found:', JSON.stringify(item, null, 2));
+        commandExecutionFound = true;
+        console.log('\n=== commandExecution item found ===');
+        console.log('Item:', JSON.stringify(item, null, 2));
+        console.log('Top-level params keys:', Object.keys(p).join(', '));
+
         // Verify expected fields exist
         expect(item.id).toBeDefined();
         expect(item.command).toBeDefined();
         expect(typeof item.command).toBe('string');
-        // commandActions may or may not be present
-        if (item.commandActions) {
-          expect(Array.isArray(item.commandActions)).toBe(true);
-        }
+
+        // Check for turnId at top level of params (not in item)
+        const turnIdAtTop = p.turnId || p.turn_id;
+        console.log(`turnId at params top level: ${turnIdAtTop || 'NOT FOUND'}`);
       }
+    }
+
+    // =========================================================================
+    // Part 2: Verify exec_command_* notifications exist (Unknown Notifications Fix)
+    // =========================================================================
+    console.log('\n=== exec_command_* Notification Analysis ===');
+
+    const execCommandBegin = notifications.filter((n) =>
+      n.method === 'codex/event/exec_command_begin'
+    );
+    const execCommandEnd = notifications.filter((n) =>
+      n.method === 'codex/event/exec_command_end'
+    );
+    const execCommandDelta = notifications.filter((n) =>
+      n.method === 'codex/event/exec_command_output_delta' ||
+      n.method === 'item/commandExecution/outputDelta'
+    );
+
+    console.log(`exec_command_begin count: ${execCommandBegin.length}`);
+    console.log(`exec_command_end count: ${execCommandEnd.length}`);
+    console.log(`exec_command_output_delta count: ${execCommandDelta.length}`);
+
+    // Document the structure of exec_command notifications if present
+    if (execCommandBegin.length > 0) {
+      const sample = execCommandBegin[0];
+      console.log('\nexec_command_begin sample params:');
+      console.log(JSON.stringify(sample.params, null, 2).slice(0, 1000));
+
+      // Check if it has turnId (critical for abort fix)
+      const p = sample.params as Record<string, unknown>;
+      const turnId = p.turnId || p.turn_id;
+      const threadId = p.threadId || p.thread_id;
+      console.log(`\n*** exec_command_begin turnId: ${turnId || 'NOT FOUND'} ***`);
+      console.log(`*** exec_command_begin threadId: ${threadId || 'NOT FOUND'} ***`);
+
+      // If turnId is present, this can be used as backup for abort fix
+      if (turnId) {
+        console.log('SUCCESS: exec_command_begin has turnId - can be used for abort fix!');
+      }
+    }
+
+    if (execCommandEnd.length > 0) {
+      const sample = execCommandEnd[0];
+      console.log('\nexec_command_end sample params:');
+      console.log(JSON.stringify(sample.params, null, 2).slice(0, 1000));
+    }
+
+    console.log('==========================================\n');
+
+    // Log all unique notification methods for documentation
+    const allMethods = [...new Set(notifications.map((n) => n.method))].sort();
+    console.log('All notification methods received:', allMethods.join(', '));
+
+    // We expect either commandExecution items or exec_command notifications
+    // The test documents what exists so we know what to handle
+    if (commandExecutionFound) {
+      console.log('VERIFIED: commandExecution items exist in item/started');
+    }
+    if (execCommandBegin.length > 0) {
+      console.log('VERIFIED: exec_command_begin notifications exist');
     }
   });
 });

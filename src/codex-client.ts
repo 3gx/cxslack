@@ -129,6 +129,14 @@ export interface CodexClientEvents {
   'thinking:delta': (params: { content: string }) => void;
   'thinking:complete': (params: { content: string; durationMs: number }) => void;
 
+  // Command execution lifecycle (from exec_command notifications)
+  'command:started': (params: { itemId: string; threadId: string; turnId: string }) => void;
+  'command:output': (params: { itemId: string; delta: string }) => void;
+  'command:completed': (params: { itemId: string; threadId: string; turnId: string; exitCode?: number }) => void;
+
+  // Context update for abort fix (emitted when we extract valid threadId+turnId)
+  'context:turnId': (params: { threadId: string; turnId: string }) => void;
+
   // Errors
   'error': (error: Error) => void;
 }
@@ -154,6 +162,7 @@ export class CodexClient extends EventEmitter {
   private readonly ITEM_ID_TTL_MS = 500; // 500ms TTL for dedup
 
   private readonly config: Required<CodexClientConfig>;
+  private isShuttingDown = false;
 
   constructor(config: CodexClientConfig = {}) {
     super();
@@ -203,42 +212,82 @@ export class CodexClient extends EventEmitter {
   }
 
   /**
-   * Stop the App-Server process gracefully.
+   * Stop the App-Server process gracefully with escalating signals.
    */
   async stop(): Promise<void> {
+    if (this.isShuttingDown) return; // Prevent double-stop
+    this.isShuttingDown = true;
+
+    // Clear restart timer first
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
     }
 
+    // Reject pending requests
+    this.pendingRequests.rejectAll(new Error('Client stopped'));
+
     if (!this.process) {
+      this.initialized = false;
+      this.isShuttingDown = false;
       return;
     }
 
-    // Send shutdown request (don't wait for response)
+    const proc = this.process;
+    console.log(`[codex-client] Stopping process (PID: ${proc.pid})...`);
+
+    // Phase 1: Graceful shutdown via RPC (2s)
     try {
       const request = createRequest('shutdown', {});
-      this.process.stdin?.write(serializeMessage(request));
-    } catch {
-      // Ignore errors during shutdown
+      proc.stdin?.write(serializeMessage(request));
+    } catch { /* ignore stdin errors */ }
+
+    if (await this.waitForExit(proc, 2000)) {
+      console.log('[codex-client] Process exited gracefully');
+      this.cleanup();
+      return;
     }
 
-    // Give it time to shut down gracefully
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
-        this.process?.kill('SIGTERM');
-        resolve();
-      }, 5000);
+    // Phase 2: SIGTERM (2s)
+    console.log('[codex-client] Sending SIGTERM...');
+    try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+    if (await this.waitForExit(proc, 2000)) {
+      console.log('[codex-client] Process exited after SIGTERM');
+      this.cleanup();
+      return;
+    }
 
-      this.process?.once('exit', () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-    });
+    // Phase 3: SIGKILL (1s) - force kill
+    console.log('[codex-client] Sending SIGKILL...');
+    try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+    await this.waitForExit(proc, 1000);
+    console.log('[codex-client] Process killed');
+    this.cleanup();
+  }
 
-    this.pendingRequests.rejectAll(new Error('Client stopped'));
+  private cleanup(): void {
+    this.removeAllListeners();
     this.process = null;
     this.initialized = false;
+    this.isShuttingDown = false;
+  }
+
+  private waitForExit(proc: ChildProcess, timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (proc.exitCode !== null || proc.killed) {
+        resolve(true);
+        return;
+      }
+      const timeout = setTimeout(() => {
+        proc.removeListener('exit', onExit);
+        resolve(false);
+      }, timeoutMs);
+      const onExit = () => {
+        clearTimeout(timeout);
+        resolve(true);
+      };
+      proc.once('exit', onExit);
+    });
   }
 
   /**
@@ -436,9 +485,18 @@ export class CodexClient extends EventEmitter {
     switch (method) {
       // Task/Turn lifecycle
       case 'turn/started':
-      case 'codex/event/task_started':
-        this.emit('turn:started', params as { threadId: string; turnId: string });
+      case 'codex/event/task_started': {
+        // Extract threadId and turnId from various notification formats:
+        // turn/started: { threadId, turn: { id } }
+        // codex/event/task_started: { msg: { thread_id, turn_id } }
+        const p = params as Record<string, unknown>;
+        const msg = p.msg as Record<string, unknown> | undefined;
+        const turn = p.turn as Record<string, unknown> | undefined;
+        const threadId = (p.threadId || p.thread_id || msg?.thread_id || msg?.threadId || '') as string;
+        const turnId = (turn?.id || p.turnId || p.turn_id || msg?.turn_id || msg?.turnId || '') as string;
+        this.emit('turn:started', { threadId, turnId });
         break;
+      }
 
       case 'turn/completed':
       case 'codex/event/task_complete': {
@@ -615,6 +673,55 @@ export class CodexClient extends EventEmitter {
         break;
       }
 
+      // Command execution lifecycle events
+      // MITIGATION: Defensive extraction - try multiple field name variants
+      case 'codex/event/exec_command_begin': {
+        const p = params as Record<string, unknown>;
+        // Log structure once for debugging (remove after verification)
+        console.log('[codex-client] exec_command_begin params:', JSON.stringify(p).slice(0, 500));
+
+        const itemId = (p.itemId || p.item_id || p.id || '') as string;
+        const threadId = (p.threadId || p.thread_id || '') as string;
+        const turnId = (p.turnId || p.turn_id || '') as string;
+
+        // Emit context:turnId for abort fix if we have valid values
+        if (threadId && turnId) {
+          this.emit('context:turnId', { threadId, turnId });
+        }
+        this.emit('command:started', { itemId, threadId, turnId });
+        break;
+      }
+
+      case 'codex/event/exec_command_output_delta':
+      case 'item/commandExecution/outputDelta': {
+        const p = params as Record<string, unknown>;
+        const itemId = (p.itemId || p.item_id || '') as string;
+        const msg = p.msg as Record<string, unknown> | undefined;
+        const delta = (p.delta || p.content || p.output ||
+                       msg?.delta || msg?.content || msg?.output || '') as string;
+        if (delta) {
+          this.emit('command:output', { itemId, delta });
+        }
+        break;
+      }
+
+      case 'codex/event/exec_command_end': {
+        const p = params as Record<string, unknown>;
+        // Log structure once for debugging (remove after verification)
+        console.log('[codex-client] exec_command_end params:', JSON.stringify(p).slice(0, 500));
+
+        const itemId = (p.itemId || p.item_id || p.id || '') as string;
+        const threadId = (p.threadId || p.thread_id || '') as string;
+        const turnId = (p.turnId || p.turn_id || '') as string;
+        const exitCode = (p.exitCode ?? p.exit_code ?? p.code) as number | undefined;
+
+        if (threadId && turnId) {
+          this.emit('context:turnId', { threadId, turnId });
+        }
+        this.emit('command:completed', { itemId, threadId, turnId, exitCode });
+        break;
+      }
+
       // Informational events (log but don't emit)
       case 'thread/started':
       case 'account/rateLimits/updated':
@@ -636,6 +743,12 @@ export class CodexClient extends EventEmitter {
   }
 
   private handleProcessExit(code: number | null): void {
+    // CRITICAL: Don't restart during intentional shutdown
+    if (this.isShuttingDown) {
+      console.log('[codex-client] Process exited during shutdown, not restarting');
+      return;
+    }
+
     this.process = null;
     this.initialized = false;
     this.pendingRequests.rejectAll(Errors.codexProcessDied(code ?? undefined));
