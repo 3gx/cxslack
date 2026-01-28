@@ -39,11 +39,29 @@ describe('Block Kit Builders', () => {
       expect(blocks[0].text?.text).toContain('Processing');
     });
 
-    it('builds aborted status', () => {
+    it('builds aborted status with octagonal_sign emoji', () => {
       const blocks = buildStatusBlocks({ status: 'aborted' });
 
       expect(blocks).toHaveLength(1);
+      expect(blocks[0].text?.text).toContain(':octagonal_sign:');
       expect(blocks[0].text?.text).toContain('Aborted');
+    });
+
+    it('builds complete status without duration', () => {
+      const blocks = buildStatusBlocks({ status: 'complete' });
+
+      expect(blocks).toHaveLength(1);
+      expect(blocks[0].text?.text).toContain(':white_check_mark:');
+      expect(blocks[0].text?.text).toContain('Complete');
+    });
+
+    it('builds complete status with duration', () => {
+      const blocks = buildStatusBlocks({ status: 'complete', durationMs: 5500 });
+
+      expect(blocks).toHaveLength(1);
+      expect(blocks[0].text?.text).toContain(':white_check_mark:');
+      expect(blocks[0].text?.text).toContain('Complete');
+      expect(blocks[0].text?.text).toContain('5.5s');
     });
 
     it('builds error status with message', () => {

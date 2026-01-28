@@ -120,6 +120,10 @@ export interface CodexClientEvents {
   'approval:requested': (request: ApprovalRequest) => void;
   'tokens:updated': (params: { inputTokens: number; outputTokens: number }) => void;
 
+  // Thinking/reasoning events
+  'thinking:delta': (params: { content: string }) => void;
+  'thinking:complete': (params: { content: string; durationMs: number }) => void;
+
   // Errors
   'error': (error: Error) => void;
 }
@@ -526,6 +530,17 @@ export class CodexClient extends EventEmitter {
         break;
       }
 
+      // Thinking/reasoning content streaming
+      case 'codex/event/reasoning_content_delta':
+      case 'codex/event/agent_reasoning_delta': {
+        const p = params as Record<string, unknown>;
+        const content = (p.delta || p.content || p.text || '') as string;
+        if (content) {
+          this.emit('thinking:delta', { content });
+        }
+        break;
+      }
+
       // Informational events (log but don't emit)
       case 'thread/started':
       case 'account/rateLimits/updated':
@@ -534,9 +549,7 @@ export class CodexClient extends EventEmitter {
       case 'codex/event/user_message':
       case 'codex/event/agent_message':
       case 'codex/event/agent_reasoning':
-      case 'codex/event/agent_reasoning_delta':
       case 'codex/event/agent_reasoning_section_break':
-      case 'codex/event/reasoning_content_delta':
       case 'item/reasoning/summaryPartAdded':
       case 'item/reasoning/summaryTextDelta':
         // These are informational - no action needed

@@ -26,13 +26,14 @@ export interface StatusBlockParams {
   messageTs?: string;
   errorMessage?: string;
   conversationKey?: string; // For abort button
+  durationMs?: number; // For complete status
 }
 
 /**
  * Build blocks for processing status messages.
  */
 export function buildStatusBlocks(params: StatusBlockParams): Block[] {
-  const { status, messageTs, errorMessage, conversationKey } = params;
+  const { status, messageTs, errorMessage, conversationKey, durationMs } = params;
   const blocks: Block[] = [];
 
   switch (status) {
@@ -67,7 +68,7 @@ export function buildStatusBlocks(params: StatusBlockParams): Block[] {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: ':stop_sign: *Aborted*',
+          text: ':octagonal_sign: *Aborted*',
         },
       });
       break;
@@ -82,9 +83,18 @@ export function buildStatusBlocks(params: StatusBlockParams): Block[] {
       });
       break;
 
-    case 'complete':
-      // Complete status is typically just the response content
+    case 'complete': {
+      // Complete status shows checkmark with duration
+      const durationText = durationMs ? ` | ${(durationMs / 1000).toFixed(1)}s` : '';
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `:white_check_mark: *Complete*${durationText}`,
+        },
+      });
       break;
+    }
   }
 
   return blocks;

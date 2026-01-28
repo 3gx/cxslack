@@ -10,7 +10,7 @@
 
 import type { WebClient } from '@slack/web-api';
 import type { CodexClient, TurnStatus, ApprovalRequest } from './codex-client.js';
-import { buildTextBlocks, buildStatusBlocks, buildHeaderBlock, Block } from './blocks.js';
+import { buildTextBlocks, buildStatusBlocks, Block } from './blocks.js';
 import type { ApprovalPolicy } from './codex-client.js';
 import {
   markProcessingStart,
@@ -19,6 +19,8 @@ import {
   markAborted as markAbortedEmoji,
 } from './emoji-reactions.js';
 import { isAborted, clearAborted } from './abort-tracker.js';
+import { ActivityThreadManager, ActivityEntry, getToolEmoji } from './activity-thread.js';
+import { withSlackRetry } from './slack-retry.js';
 
 // Default update rate in milliseconds
 const DEFAULT_UPDATE_RATE_MS = 500;
@@ -55,7 +57,7 @@ export interface StreamingContext {
  * Streaming state for a turn.
  */
 interface StreamingState {
-  /** Accumulated message text */
+  /** Accumulated message text (response content) */
   text: string;
   /** Whether we're actively streaming */
   isStreaming: boolean;
@@ -69,6 +71,16 @@ interface StreamingState {
   inputTokens: number;
   /** Accumulated output tokens */
   outputTokens: number;
+  /** Accumulated thinking content */
+  thinkingContent: string;
+  /** Thinking start timestamp */
+  thinkingStartTime: number;
+  /** Whether we've posted the thinking message */
+  thinkingPosted: boolean;
+  /** Whether we've posted the response message */
+  responsePosted: boolean;
+  /** Track active tools by itemId */
+  activeTools: Map<string, { tool: string; input?: string; startTime: number }>;
 }
 
 /**
@@ -98,6 +110,7 @@ export class StreamingManager {
   private slack: WebClient;
   private codex: CodexClient;
   private approvalCallback?: (request: ApprovalRequest, context: StreamingContext) => void;
+  private activityManager = new ActivityThreadManager();
 
   constructor(slack: WebClient, codex: CodexClient) {
     this.slack = slack;
@@ -126,7 +139,15 @@ export class StreamingManager {
       status: 'running',
       inputTokens: 0,
       outputTokens: 0,
+      thinkingContent: '',
+      thinkingStartTime: 0,
+      thinkingPosted: false,
+      responsePosted: false,
+      activeTools: new Map(),
     });
+
+    // Clear any previous activity entries
+    this.activityManager.clearEntries(key);
 
     // Add eyes emoji to user's original message
     markProcessingStart(this.slack, context.channelId, context.originalTs).catch((err) => {
@@ -134,7 +155,7 @@ export class StreamingManager {
     });
 
     // Post initial processing message
-    this.updateSlackMessage(key, true).catch((err) => {
+    this.updateStatusMessage(key).catch((err) => {
       console.error('Failed to post initial message:', err);
     });
   }
@@ -147,6 +168,7 @@ export class StreamingManager {
     if (state?.updateTimer) {
       clearTimeout(state.updateTimer);
     }
+    this.activityManager.clearEntries(conversationKey);
     this.contexts.delete(conversationKey);
     this.states.delete(conversationKey);
   }
@@ -206,13 +228,20 @@ export class StreamingManager {
           state.status = status;
           state.isStreaming = false;
 
+          // Post thinking message if we have thinking content but haven't posted
+          if (state.thinkingContent && !state.thinkingPosted) {
+            await this.postThinkingMessage(found.key);
+          }
+
+          // Post response message if we have response content
+          if (state.text && !state.responsePosted && status === 'completed') {
+            await this.postResponseMessage(found.key);
+          }
+
           // Transition emoji based on final status
-          // On success: just remove eyes (no checkmark - ccslack style)
-          // On error/abort: remove eyes, add error/abort emoji
           const { channelId, originalTs } = found.context;
           try {
             if (status === 'completed') {
-              // Just remove eyes, no success emoji
               await removeProcessingEmoji(this.slack, channelId, originalTs);
             } else if (status === 'interrupted' || wasAborted) {
               await markAbortedEmoji(this.slack, channelId, originalTs);
@@ -226,23 +255,86 @@ export class StreamingManager {
           // Clear abort state for next turn
           clearAborted(found.key);
 
-          // Final update
-          this.updateSlackMessage(found.key, true).catch((err) => {
-            console.error('Failed to update final message:', err);
-          });
+          // Update status message to final state
+          await this.updateStatusMessage(found.key);
+
+          // Clean up activity entries
+          this.activityManager.clearEntries(found.key);
         }
       }
     });
 
-    // Item delta (streaming text)
+    // Item started (tool use)
+    this.codex.on('item:started', ({ itemId, itemType }) => {
+      for (const [key, state] of this.states) {
+        if (state.isStreaming) {
+          // Track tool start
+          state.activeTools.set(itemId, {
+            tool: itemType,
+            startTime: Date.now(),
+          });
+
+          // Add activity entry
+          this.activityManager.addEntry(key, {
+            type: 'tool_start',
+            timestamp: Date.now(),
+            tool: itemType,
+            toolUseId: itemId,
+          });
+
+          // Post tool activity to thread
+          this.postToolActivity(key, itemId, itemType, 'start').catch((err) => {
+            console.error('Failed to post tool activity:', err);
+          });
+          break;
+        }
+      }
+    });
+
+    // Item completed (tool finished)
+    this.codex.on('item:completed', ({ itemId }) => {
+      for (const [key, state] of this.states) {
+        if (state.isStreaming) {
+          const toolInfo = state.activeTools.get(itemId);
+          if (toolInfo) {
+            const durationMs = Date.now() - toolInfo.startTime;
+
+            // Add completion entry
+            this.activityManager.addEntry(key, {
+              type: 'tool_complete',
+              timestamp: Date.now(),
+              tool: toolInfo.tool,
+              toolUseId: itemId,
+              durationMs,
+            });
+
+            state.activeTools.delete(itemId);
+          }
+          break;
+        }
+      }
+    });
+
+    // Item delta (streaming response text)
     this.codex.on('item:delta', ({ itemId, delta }) => {
-      // Find context that might be receiving this delta
-      // We match by looking for any active streaming context
       for (const [key, state] of this.states) {
         if (state.isStreaming) {
           state.text += delta;
           this.scheduleUpdate(key);
-          break; // Assume one active stream at a time
+          break;
+        }
+      }
+    });
+
+    // Thinking delta (reasoning content)
+    this.codex.on('thinking:delta', ({ content }) => {
+      for (const [key, state] of this.states) {
+        if (state.isStreaming) {
+          if (!state.thinkingStartTime) {
+            state.thinkingStartTime = Date.now();
+          }
+          state.thinkingContent += content;
+          break;
         }
       }
     });
@@ -257,12 +349,11 @@ export class StreamingManager {
 
     // Token usage updates
     this.codex.on('tokens:updated', ({ inputTokens, outputTokens }) => {
-      // Add tokens to the currently streaming context
       for (const [, state] of this.states) {
         if (state.isStreaming) {
           state.inputTokens += inputTokens;
           state.outputTokens += outputTokens;
-          break; // Assume one active stream at a time
+          break;
         }
       }
     });
@@ -276,30 +367,14 @@ export class StreamingManager {
       return;
     }
 
-    const now = Date.now();
-    const timeSinceLastUpdate = now - state.lastUpdateTime;
-    const updateRate = context.updateRateMs || DEFAULT_UPDATE_RATE_MS;
-
-    if (timeSinceLastUpdate >= updateRate) {
-      // Enough time has passed, update now
-      this.updateSlackMessage(conversationKey, false).catch((err) => {
-        console.error('Failed to update message:', err);
-      });
-    } else if (!state.updateTimer) {
-      // Schedule update for later
-      const delay = updateRate - timeSinceLastUpdate;
-      state.updateTimer = setTimeout(() => {
-        state.updateTimer = null;
-        if (this.states.has(conversationKey)) {
-          this.updateSlackMessage(conversationKey, false).catch((err) => {
-            console.error('Failed to update message:', err);
-          });
-        }
-      }, delay);
-    }
+    // For multi-message pattern, we don't update the status message on every delta
+    // Response content will be posted as a separate message on completion
   }
 
-  private async updateSlackMessage(conversationKey: string, force: boolean): Promise<void> {
+  /**
+   * Update the status message (Message 1 in the thread).
+   */
+  private async updateStatusMessage(conversationKey: string): Promise<void> {
     const context = this.contexts.get(conversationKey);
     const state = this.states.get(conversationKey);
 
@@ -309,44 +384,170 @@ export class StreamingManager {
 
     state.lastUpdateTime = Date.now();
 
-    // Build blocks based on current state
-    const blocks: Block[] = [];
+    // Build status blocks based on current state
+    let blocks: Block[];
+    let fallbackText: string;
 
     if (state.status === 'completed') {
-      // On success: just show the response text, no header/status
-      if (state.text) {
-        blocks.push(...buildTextBlocks(state.text));
-      }
+      const durationMs = Date.now() - context.startTime;
+      blocks = buildStatusBlocks({ status: 'complete', durationMs });
+      fallbackText = 'Complete';
     } else if (state.status === 'interrupted') {
-      // On abort: show aborted status
-      blocks.push(...buildStatusBlocks({ status: 'aborted' }));
-      if (state.text) {
-        blocks.push(...buildTextBlocks(state.text));
-      }
+      blocks = buildStatusBlocks({ status: 'aborted' });
+      fallbackText = 'Aborted';
     } else if (state.status === 'failed') {
-      // On error: show error status
-      blocks.push(...buildStatusBlocks({ status: 'error' }));
-      if (state.text) {
-        blocks.push(...buildTextBlocks(state.text));
-      }
+      blocks = buildStatusBlocks({ status: 'error' });
+      fallbackText = 'Error';
     } else {
       // Processing: show processing status with abort button
-      blocks.push(...buildStatusBlocks({ status: 'processing', conversationKey }));
-      if (state.text) {
-        blocks.push(...buildTextBlocks(state.text));
-      }
+      blocks = buildStatusBlocks({
+        status: 'processing',
+        conversationKey,
+        messageTs: context.messageTs,
+      });
+      fallbackText = 'Processing...';
     }
 
     // Update the Slack message
     try {
-      await this.slack.chat.update({
-        channel: context.channelId,
-        ts: context.messageTs,
-        blocks,
-        text: state.text || 'Processing...', // Fallback text
-      });
+      await withSlackRetry(
+        () =>
+          this.slack.chat.update({
+            channel: context.channelId,
+            ts: context.messageTs,
+            blocks,
+            text: fallbackText,
+          }),
+        'status.update'
+      );
     } catch (err) {
-      console.error('Failed to update Slack message:', err);
+      console.error('Failed to update status message:', err);
+    }
+  }
+
+  /**
+   * Post thinking message to thread (Message 2).
+   */
+  private async postThinkingMessage(conversationKey: string): Promise<void> {
+    const context = this.contexts.get(conversationKey);
+    const state = this.states.get(conversationKey);
+
+    if (!context || !state || !state.thinkingContent || state.thinkingPosted) {
+      return;
+    }
+
+    state.thinkingPosted = true;
+    const durationMs = Date.now() - state.thinkingStartTime;
+    const durationSec = (durationMs / 1000).toFixed(1);
+    const charCount = state.thinkingContent.length;
+
+    // Format thinking message
+    const MAX_PREVIEW_LENGTH = 500;
+    let text: string;
+
+    if (charCount <= MAX_PREVIEW_LENGTH) {
+      text = `:brain: *Thinking* [${durationSec}s]\n> ${state.thinkingContent.replace(/\n/g, '\n> ')}`;
+    } else {
+      const preview = state.thinkingContent.slice(-MAX_PREVIEW_LENGTH);
+      text = `:brain: *Thinking* [${durationSec}s] _[${charCount} chars]_\n> ...${preview.replace(/\n/g, '\n> ')}`;
+    }
+
+    try {
+      // Post thinking as a new message in thread
+      const threadTs = context.threadTs || context.originalTs;
+      await withSlackRetry(
+        () =>
+          this.slack.chat.postMessage({
+            channel: context.channelId,
+            thread_ts: threadTs,
+            text,
+          }),
+        'thinking.post'
+      );
+    } catch (err) {
+      console.error('Failed to post thinking message:', err);
+    }
+  }
+
+  /**
+   * Post tool activity to thread.
+   */
+  private async postToolActivity(
+    conversationKey: string,
+    itemId: string,
+    tool: string,
+    action: 'start' | 'complete',
+    input?: string,
+    durationMs?: number
+  ): Promise<void> {
+    const context = this.contexts.get(conversationKey);
+    if (!context) return;
+
+    const emoji = getToolEmoji(tool);
+    let text: string;
+
+    if (action === 'start') {
+      text = `${emoji} *${tool}*${input ? ` \`${input}\`` : ''}`;
+    } else {
+      const duration = durationMs ? ` [${(durationMs / 1000).toFixed(1)}s]` : '';
+      text = `:white_check_mark: *${tool}*${input ? ` \`${input}\`` : ''}${duration}`;
+    }
+
+    try {
+      const threadTs = context.threadTs || context.originalTs;
+      await withSlackRetry(
+        () =>
+          this.slack.chat.postMessage({
+            channel: context.channelId,
+            thread_ts: threadTs,
+            text,
+          }),
+        'tool.activity'
+      );
+    } catch (err) {
+      console.error('Failed to post tool activity:', err);
+    }
+  }
+
+  /**
+   * Post response message to thread (final message).
+   */
+  private async postResponseMessage(conversationKey: string): Promise<void> {
+    const context = this.contexts.get(conversationKey);
+    const state = this.states.get(conversationKey);
+
+    if (!context || !state || !state.text || state.responsePosted) {
+      return;
+    }
+
+    state.responsePosted = true;
+
+    // Build response blocks
+    const blocks: Block[] = [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: ':speech_balloon: *Response*',
+        },
+      },
+      ...buildTextBlocks(state.text),
+    ];
+
+    try {
+      const threadTs = context.threadTs || context.originalTs;
+      await withSlackRetry(
+        () =>
+          this.slack.chat.postMessage({
+            channel: context.channelId,
+            thread_ts: threadTs,
+            blocks,
+            text: state.text,
+          }),
+        'response.post'
+      );
+    } catch (err) {
+      console.error('Failed to post response message:', err);
     }
   }
 }
