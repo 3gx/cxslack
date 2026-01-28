@@ -1,0 +1,31 @@
+{
+  "name": "cxslack",
+  "version": "1.0.0",
+  "description": "OpenAI Codex Slack Bot",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run --exclude='src/__tests__/sdk-live/**'",
+    "test:watch": "vitest --exclude='src/__tests__/sdk-live/**'",
+    "test:coverage": "vitest run --coverage --exclude='src/__tests__/sdk-live/**'",
+    "test:sdk": "vitest run src/__tests__/sdk-live/ --reporter=verbose",
+    "test:all": "vitest run --reporter=verbose"
+  },
+  "dependencies": {
+    "@slack/bolt": "^4.1.0",
+    "@slack/web-api": "^7.8.0",
+    "async-mutex": "^0.5.0",
+    "dotenv": "^16.4.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^4.0.17",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.17"
+  }
+}
