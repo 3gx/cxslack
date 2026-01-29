@@ -601,7 +601,7 @@ describe('formatThreadActivityEntry with metrics', () => {
     expect(result).toContain('500 chars');
   });
 
-  it('formats generating with speech balloon emoji', () => {
+  it('formats generating with memo emoji (matches main activity message)', () => {
     const entry: ActivityEntry = {
       type: 'generating',
       timestamp: Date.now(),
@@ -609,7 +609,7 @@ describe('formatThreadActivityEntry with metrics', () => {
       durationMs: 2000,
     };
     const result = formatThreadActivityEntry(entry);
-    expect(result).toContain(':speech_balloon:');
+    expect(result).toContain(':memo:');
     expect(result).toContain('Generating');
     expect(result).toContain('1000 chars');
   });

@@ -1933,7 +1933,7 @@ export function formatThreadActivityEntry(entry: ActivityEntry): string {
     }
     case 'generating': {
       const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
-      return `:speech_balloon: *Generating*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+      return `:memo: *Generating*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
     }
     case 'error':
       return `:x: *Error:* ${entry.message || 'Unknown error'}`;

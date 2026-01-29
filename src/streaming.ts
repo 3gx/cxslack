@@ -40,7 +40,6 @@ import {
   ActivityEntry,
   getToolEmoji,
   buildActivityLogText,
-  postStartingToThread,
   flushActivityBatchToThread,
   postThinkingToThread,
   postResponseToThread,
@@ -317,11 +316,6 @@ export class StreamingManager {
     markProcessingStart(this.slack, context.channelId, context.originalTs).catch((err) => {
       console.error('Failed to add processing emoji:', err);
     });
-
-      // Integration point 1: Post starting message to thread
-      postStartingToThread(this.slack, context.channelId, context.originalTs).catch((err) => {
-        console.error('[activity-thread] Failed to post starting:', err);
-      });
 
     // Start timer AFTER state is set - uses context.updateRateMs (from /update-rate command)
     state.updateTimer = setInterval(() => {
@@ -1102,7 +1096,7 @@ export class StreamingManager {
       // Add response preview if we have response content
       if (state.text) {
         const preview = state.text.slice(0, 200).replace(/\n/g, ' ');
-        activityText += `\n:memo: *Response* _[${state.text.length} chars]_\n> ${preview}${state.text.length > 200 ? '...' : ''}`;
+        activityText += `\n:speech_balloon: *Response* _[${state.text.length} chars]_\n> ${preview}${state.text.length > 200 ? '...' : ''}`;
       }
 
       const elapsedMs = Date.now() - context.startTime;
