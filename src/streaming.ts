@@ -857,9 +857,10 @@ export class StreamingManager {
       state.spinnerIndex = (state.spinnerIndex + 1) % STATUS_SPINNER_FRAMES.length;
       const spinner = STATUS_SPINNER_FRAMES[state.spinnerIndex];
 
-      // Compute context % and compact stats (best-effort)
-      const contextTokens =
-        state.inputTokens + state.cacheCreationInputTokens + state.cacheReadInputTokens;
+      // Compute context usage - VERIFIED from Codex API:
+      // total_tokens = input_tokens + output_tokens
+      // (cached_input_tokens is a SUBSET of input_tokens, not additional)
+      const contextTokens = state.inputTokens + state.outputTokens;
       const contextWindow = state.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
       const contextPercent =
         contextTokens > 0
