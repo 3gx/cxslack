@@ -458,8 +458,9 @@ describe('Block Kit Builders', () => {
         reasoningEffort: 'high',
         sessionId: 'thread-123',
         contextPercent: 42.5,
-        compactPercent: 25.1,
-        tokensToCompact: 67516,
+        contextTokens: 85000, // 42.5% of 200k
+        contextWindow: 200000,
+        // compactPercent and tokensToCompact are now commented out (use assumed values)
         inputTokens: 1250,
         outputTokens: 542,
         costUsd: 0.05,
@@ -469,9 +470,9 @@ describe('Block Kit Builders', () => {
       expect(line).toContain('on-request');
       expect(line).toContain('codex-mini [high]');
       expect(line).toContain('thread-123');
-      expect(line).toContain('42.5% ctx');
-      expect(line).toContain('25.1%');
-      expect(line).toContain('67.5k tok to :zap:');
+      // New format: "X% left, Y used / Z" instead of compact threshold
+      expect(line).toContain('58% left'); // 100 - 42.5 = 57.5, rounded to 58
+      expect(line).toContain('85.0k / 200.0k');
       expect(line).toContain('1.3k/542');
       expect(line).toContain('$0.05');
       expect(line).toContain('5.2s');

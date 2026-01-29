@@ -894,8 +894,12 @@ export class StreamingManager {
         reasoningEffort: context.reasoningEffort,
         sessionId: context.threadId,
         contextPercent,
-        compactPercent,
-        tokensToCompact,
+        contextTokens: contextTokens > 0 ? contextTokens : undefined,
+        contextWindow,
+        // COMMENTED OUT: compactPercent and tokensToCompact use assumed values
+        // that Codex does NOT provide. See blocks.ts for details.
+        // compactPercent,
+        // tokensToCompact,
         inputTokens: includeFinalStats && hasTokenCounts ? state.inputTokens : undefined,
         outputTokens: includeFinalStats && hasTokenCounts ? state.outputTokens : undefined,
         costUsd: includeFinalStats ? state.costUsd : undefined,

@@ -864,6 +864,12 @@ export interface UnifiedStatusLineParams {
   reasoningEffort?: ReasoningEffort;
   sessionId?: string;
   contextPercent?: number;
+  contextTokens?: number;
+  contextWindow?: number;
+  // COMMENTED OUT: compactPercent and tokensToCompact use assumed values (COMPACT_BUFFER=13000,
+  // DEFAULT_EFFECTIVE_MAX_OUTPUT_TOKENS=32000) that Codex does NOT provide via API.
+  // Verified via test-token-fields.ts: Codex only sends model_context_window, not maxOutputTokens.
+  // Keep these fields in case Codex adds this info in the future.
   compactPercent?: number;
   tokensToCompact?: number;
   inputTokens?: number;
@@ -891,19 +897,27 @@ export function buildUnifiedStatusLine(params: UnifiedStatusLineParams): string 
   line1Parts.push(modelWithReasoning);
   line1Parts.push(sessionLabel);
 
-  if (params.contextPercent !== undefined) {
-    if (params.compactPercent !== undefined && params.tokensToCompact !== undefined) {
-      line2Parts.push(
-        `${params.contextPercent.toFixed(1)}% ctx (${params.compactPercent.toFixed(1)}% ${formatTokensK(
-          params.tokensToCompact
-        )} tok to :zap:)`
-      );
-    } else if (params.compactPercent !== undefined) {
-      line2Parts.push(`${params.contextPercent.toFixed(1)}% ctx (${params.compactPercent.toFixed(1)}% to :zap:)`);
-    } else {
-      line2Parts.push(`${params.contextPercent.toFixed(1)}% ctx`);
-    }
+  // Show context usage: "X% left, Y used / Z"
+  // Uses only verified data from Codex (contextWindow is sent via model_context_window)
+  if (params.contextPercent !== undefined && params.contextTokens !== undefined && params.contextWindow !== undefined) {
+    const percentLeft = (100 - params.contextPercent).toFixed(0);
+    const usedK = formatTokensK(params.contextTokens);
+    const windowK = formatTokensK(params.contextWindow);
+    line2Parts.push(`${percentLeft}% left, ${usedK} / ${windowK}`);
+  } else if (params.contextPercent !== undefined) {
+    line2Parts.push(`${params.contextPercent.toFixed(1)}% ctx`);
   }
+
+  // COMMENTED OUT: Auto-compact threshold display uses assumed values that Codex does NOT provide.
+  // Verified via test-token-fields.ts: Codex only sends model_context_window, not maxOutputTokens.
+  // Keep this code in case Codex adds maxOutputTokens in the future.
+  // if (params.compactPercent !== undefined && params.tokensToCompact !== undefined) {
+  //   line2Parts.push(
+  //     `${params.contextPercent?.toFixed(1)}% ctx (${params.compactPercent.toFixed(1)}% ${formatTokensK(
+  //       params.tokensToCompact
+  //     )} tok to :zap:)`
+  //   );
+  // }
 
   if (params.inputTokens !== undefined || params.outputTokens !== undefined) {
     const inStr = formatTokenCount(params.inputTokens ?? 0);
@@ -951,6 +965,8 @@ export interface ActivityBlockParams {
   reasoningEffort?: ReasoningEffort;
   sessionId?: string;
   contextPercent?: number;
+  contextTokens?: number;
+  contextWindow?: number;
   compactPercent?: number;
   tokensToCompact?: number;
   inputTokens?: number;
@@ -976,6 +992,8 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
     reasoningEffort,
     sessionId,
     contextPercent,
+    contextTokens,
+    contextWindow,
     compactPercent,
     tokensToCompact,
     inputTokens,
@@ -1030,6 +1048,8 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
           reasoningEffort,
           sessionId,
           contextPercent,
+          contextTokens,
+          contextWindow,
           compactPercent,
           tokensToCompact,
           inputTokens,
