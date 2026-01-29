@@ -773,13 +773,14 @@ export class StreamingManager {
     this.codex.on('tokens:updated', ({ inputTokens, outputTokens, contextWindow, maxOutputTokens, cacheReadInputTokens, cacheCreationInputTokens, costUsd }) => {
       for (const [, state] of this.states) {
         if (state.isStreaming) {
-          state.inputTokens += inputTokens;
-          state.outputTokens += outputTokens;
-          if (cacheReadInputTokens) {
-            state.cacheReadInputTokens += cacheReadInputTokens;
+          // VERIFIED: Codex sends CUMULATIVE TOTALS, not deltas (test-token-accumulation.ts)
+          state.inputTokens = inputTokens;
+          state.outputTokens = outputTokens;
+          if (cacheReadInputTokens !== undefined) {
+            state.cacheReadInputTokens = cacheReadInputTokens;
           }
-          if (cacheCreationInputTokens) {
-            state.cacheCreationInputTokens += cacheCreationInputTokens;
+          if (cacheCreationInputTokens !== undefined) {
+            state.cacheCreationInputTokens = cacheCreationInputTokens;
           }
           if (contextWindow) {
             state.contextWindow = contextWindow;
