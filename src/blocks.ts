@@ -327,7 +327,8 @@ export function buildApprovalDeniedBlocks(command?: string): Block[] {
 // ============================================================================
 
 export interface ForkBlockParams {
-  turnIndex: number;
+  /** Codex turn ID - used to query actual index from Codex (source of truth) */
+  turnId: string;
   slackTs: string;
   conversationKey: string;
 }
@@ -335,9 +336,12 @@ export interface ForkBlockParams {
 /**
  * Build blocks for "Fork here" button.
  * Matches ccslack style: emoji + text, shown only after query completes.
+ *
+ * NOTE: We store turnId (not turnIndex) because the index must always be
+ * queried from Codex at fork time to handle CLI usage, bot restarts, etc.
  */
 export function buildForkButton(params: ForkBlockParams): Block {
-  const { turnIndex, slackTs, conversationKey } = params;
+  const { turnId, slackTs, conversationKey } = params;
 
   return {
     type: 'actions',
@@ -350,8 +354,8 @@ export function buildForkButton(params: ForkBlockParams): Block {
           text: ':twisted_rightwards_arrows: Fork here',
           emoji: true,
         },
-        action_id: `fork_${conversationKey}_${turnIndex}`,
-        value: JSON.stringify({ turnIndex, slackTs, conversationKey }),
+        action_id: `fork_${conversationKey}_${turnId}`,
+        value: JSON.stringify({ turnId, slackTs, conversationKey }),
       },
     ],
   };
@@ -363,14 +367,15 @@ export function buildForkButton(params: ForkBlockParams): Block {
 
 export interface ActivityEntryActionParams {
   conversationKey: string;
-  turnIndex: number;
+  /** Codex turn ID - used to query actual index from Codex (source of truth) */
+  turnId: string;
   slackTs: string;
   includeFork?: boolean;
   includeAttachThinking?: boolean;
 }
 
 export function buildActivityEntryActions(params: ActivityEntryActionParams): Block {
-  const { conversationKey, turnIndex, slackTs, includeFork = true, includeAttachThinking = true } = params;
+  const { conversationKey, turnId, slackTs, includeFork = true, includeAttachThinking = true } = params;
   const elements: any[] = [];
   if (includeFork) {
     elements.push({
@@ -380,8 +385,8 @@ export function buildActivityEntryActions(params: ActivityEntryActionParams): Bl
         text: ':twisted_rightwards_arrows: Fork here',
         emoji: true,
       },
-      action_id: `fork_${conversationKey}_${turnIndex}`,
-      value: JSON.stringify({ turnIndex, slackTs, conversationKey }),
+      action_id: `fork_${conversationKey}_${turnId}`,
+      value: JSON.stringify({ turnId, slackTs, conversationKey }),
     });
   }
   if (includeAttachThinking) {
@@ -423,7 +428,7 @@ export function buildActivityEntryBlocks(params: ActivityEntryBlockParams): Bloc
 export function buildActivityEntryActionParams(
   entry: import('./activity-thread.js').ActivityEntry,
   conversationKey: string,
-  turnIndex: number,
+  turnId: string,
   slackTs: string,
   includeAttachThinking: boolean
 ): ActivityEntryActionParams | undefined {
@@ -436,7 +441,7 @@ export function buildActivityEntryActionParams(
   }
   return {
     conversationKey,
-    turnIndex,
+    turnId,
     slackTs,
     includeFork,
     includeAttachThinking: includeAttachThinking && isThinking,
@@ -1125,7 +1130,8 @@ export interface ForkToChannelModalParams {
   sourceMessageTs: string;
   sourceThreadTs: string;
   conversationKey: string;
-  turnIndex: number;
+  /** Codex turn ID - actual index is queried from Codex at fork execution time */
+  turnId: string;
 }
 
 /**
@@ -1172,7 +1178,7 @@ export function buildForkToChannelModalView(params: ForkToChannelModalParams): {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `:twisted_rightwards_arrows: *Fork conversation at turn ${params.turnIndex}*\n\nThis will create a new channel with a forked copy of the conversation up to this point.`,
+          text: `:twisted_rightwards_arrows: *Fork conversation from this point*\n\nThis will create a new channel with a forked copy of the conversation up to this point.`,
         },
       },
       {
@@ -1216,7 +1222,8 @@ export interface ActivityBlockParams {
   outputTokens?: number;
   costUsd?: number;
   spinner?: string;
-  forkTurnIndex?: number;
+  /** Codex turn ID for fork button - index is queried from Codex at fork time */
+  forkTurnId?: string;
   forkSlackTs?: string;
 }
 
@@ -1335,10 +1342,10 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
   // Fork button on main activity/status panel - ONLY after query completes (matches ccslack UX)
   // During processing: show Abort button
   // After completion: show Fork button (replaces Abort)
-  if (!isRunning && params.forkTurnIndex !== undefined && params.forkSlackTs) {
+  if (!isRunning && params.forkTurnId && params.forkSlackTs) {
     blocks.push(
       buildForkButton({
-        turnIndex: params.forkTurnIndex,
+        turnId: params.forkTurnId,
         slackTs: params.forkSlackTs,
         conversationKey,
       })

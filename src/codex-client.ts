@@ -452,14 +452,53 @@ export class CodexClient extends EventEmitter {
    * Find the index of a turn by its turnId in Codex (source of truth).
    * Returns -1 if not found.
    *
+   * IMPORTANT: Codex has a format mismatch between events and thread/read:
+   * - turn:started event returns turnId as "0", "1", "2" (0-indexed number strings)
+   * - thread/read returns turns[].id as "turn-1", "turn-2" (1-indexed with "turn-" prefix)
+   *
+   * This function handles both formats for robustness.
+   *
    * @param threadId - The thread to query
-   * @param turnId - The turn ID to find
+   * @param turnId - The turn ID to find (from turn:started event)
    * @returns The 0-based index of the turn, or -1 if not found
    */
   async findTurnIndex(threadId: string, turnId: string): Promise<number> {
     const { turns } = await this.readThread(threadId, true);
-    if (!turns) return -1;
-    return turns.findIndex((t) => t.id === turnId);
+    if (!turns || turns.length === 0) return -1;
+
+    // Try direct match first (in case Codex fixes the format mismatch)
+    let index = turns.findIndex((t) => t.id === turnId);
+    if (index >= 0) {
+      console.log(`[codex-client] findTurnIndex: direct match for turnId="${turnId}" at index ${index}`);
+      return index;
+    }
+
+    // Handle format mismatch: turnId from turn:started is "0", "1", etc.
+    // but thread/read returns "turn-1", "turn-2", etc.
+    // Convert "0" -> "turn-1", "1" -> "turn-2", etc.
+    const numericId = parseInt(turnId, 10);
+    if (!isNaN(numericId)) {
+      const convertedId = `turn-${numericId + 1}`;
+      index = turns.findIndex((t) => t.id === convertedId);
+      if (index >= 0) {
+        console.log(`[codex-client] findTurnIndex: converted "${turnId}" to "${convertedId}", found at index ${index}`);
+        return index;
+      }
+    }
+
+    // Also try the reverse: if turnId is "turn-1", extract the number
+    const turnMatch = turnId.match(/^turn-(\d+)$/);
+    if (turnMatch) {
+      const turnNum = parseInt(turnMatch[1], 10);
+      // Return 0-based index: "turn-1" -> index 0
+      if (turnNum >= 1 && turnNum <= turns.length) {
+        console.log(`[codex-client] findTurnIndex: extracted index ${turnNum - 1} from "${turnId}"`);
+        return turnNum - 1;
+      }
+    }
+
+    console.log(`[codex-client] findTurnIndex: turnId="${turnId}" not found in turns: [${turns.map(t => t.id).join(', ')}]`);
+    return -1;
   }
 
   /**

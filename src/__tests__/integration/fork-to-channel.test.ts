@@ -5,6 +5,9 @@
  * 1. Fork button click → modal opens
  * 2. Modal submission → channel created, session forked
  * 3. Source message updated with fork link
+ *
+ * NOTE: We store turnId (Codex's stable identifier) NOT turnIndex.
+ * The actual turn index is ALWAYS queried from Codex at fork time.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -75,7 +78,7 @@ describe('Fork to Channel Flow', () => {
       sourceMessageTs: '123.456',
       sourceThreadTs: '789.012',
       conversationKey: 'C123456:789.012',
-      turnIndex: 5,
+      turnId: 'turn_abc123', // Codex turn ID (NOT turnIndex)
     };
 
     it('suggests channel name with -fork suffix', () => {
@@ -98,7 +101,7 @@ describe('Fork to Channel Flow', () => {
       expect(inputBlock?.element?.initial_value).toBe('my-channel-fork-fork');
     });
 
-    it('preserves all metadata in private_metadata', () => {
+    it('preserves turnId in private_metadata', () => {
       const modal = buildForkToChannelModalView(baseParams);
       const metadata = JSON.parse(modal.private_metadata);
 
@@ -107,16 +110,15 @@ describe('Fork to Channel Flow', () => {
       expect(metadata.sourceMessageTs).toBe('123.456');
       expect(metadata.sourceThreadTs).toBe('789.012');
       expect(metadata.conversationKey).toBe('C123456:789.012');
-      expect(metadata.turnIndex).toBe(5);
+      expect(metadata.turnId).toBe('turn_abc123'); // turnId, NOT turnIndex
     });
 
-    it('shows correct turn index in description', () => {
-      const modal = buildForkToChannelModalView({
-        ...baseParams,
-        turnIndex: 10,
-      });
+    it('shows generic description without turn number', () => {
+      // Modal no longer shows turn number - actual index is queried from Codex at fork time
+      const modal = buildForkToChannelModalView(baseParams);
       const sectionBlock = modal.blocks.find((b) => b.type === 'section');
-      expect(sectionBlock?.text?.text).toContain('turn 10');
+      expect(sectionBlock?.text?.text).toContain('Fork conversation from this point');
+      expect(sectionBlock?.text?.text).not.toMatch(/turn \d+/); // No turn number
     });
 
     it('uses correct callback_id for submission handler', () => {
@@ -126,18 +128,20 @@ describe('Fork to Channel Flow', () => {
   });
 
   describe('Fork Button Action', () => {
-    it('fork button value contains required metadata', () => {
-      // Simulates the value stored in the fork button
+    it('fork button value contains turnId (not turnIndex)', () => {
+      // Button stores turnId (Codex identifier) - actual index queried at fork time
       const buttonValue = JSON.stringify({
-        turnIndex: 3,
+        turnId: 'turn_xyz789', // Codex turn ID
         slackTs: '123.456',
         conversationKey: 'C123:789.012',
       });
 
       const parsed = JSON.parse(buttonValue);
-      expect(parsed.turnIndex).toBe(3);
+      expect(parsed.turnId).toBe('turn_xyz789');
       expect(parsed.slackTs).toBe('123.456');
       expect(parsed.conversationKey).toBe('C123:789.012');
+      // turnIndex should NOT be in the button value
+      expect(parsed.turnIndex).toBeUndefined();
     });
   });
 
@@ -199,16 +203,16 @@ describe('Fork to Channel Flow', () => {
   });
 
   describe('Source Message Update', () => {
-    it('generates correct fork link format', () => {
+    it('generates correct fork link format (without turn number)', () => {
       const channelId = 'C_NEW_123';
-      const turnIndex = 5;
 
-      // This is the format used to update the source message
-      const linkText = `:twisted_rightwards_arrows: Forked at turn ${turnIndex} to <#${channelId}>`;
+      // Source message is updated to show fork link (no turn number)
+      const linkText = `:twisted_rightwards_arrows: Forked to <#${channelId}>`;
 
-      expect(linkText).toBe(':twisted_rightwards_arrows: Forked at turn 5 to <#C_NEW_123>');
+      expect(linkText).toBe(':twisted_rightwards_arrows: Forked to <#C_NEW_123>');
       expect(linkText).toContain(':twisted_rightwards_arrows:');
       expect(linkText).toContain('<#C_NEW_123>'); // Slack channel link format
+      expect(linkText).not.toMatch(/turn \d+/); // No turn number
     });
   });
 
@@ -216,7 +220,6 @@ describe('Fork to Channel Flow', () => {
     it('generates correct source link format', () => {
       const sourceChannelId = 'C123';
       const sourceThreadTs = '456.789';
-      const turnIndex = 3;
 
       // Slack permalink format (ts without the dot)
       const sourceLink = `<https://slack.com/archives/${sourceChannelId}/p${sourceThreadTs.replace('.', '')}|source conversation>`;
@@ -228,6 +231,7 @@ describe('Fork to Channel Flow', () => {
   describe('Point-in-Time Fork Calculation', () => {
     // This tests the rollback calculation logic used when forking at a specific turn
     // Formula: turnsToRollback = totalTurns - (turnIndex + 1)
+    // NOTE: The actual turnIndex is always queried from Codex using the turnId
     function calculateRollback(turnIndex: number, totalTurns: number): number {
       const turnsToKeep = turnIndex + 1;
       return totalTurns - turnsToKeep;
@@ -265,47 +269,37 @@ describe('Fork to Channel Flow', () => {
   });
 
   describe('Fork Metadata in Session', () => {
-    it('preserves turnIndex in modal private_metadata', () => {
-      // Verify the modal correctly stores turnIndex for use in fork
+    it('preserves turnId in modal private_metadata', () => {
+      // Verify the modal correctly stores turnId for use in fork
+      // Actual turnIndex is queried from Codex at fork execution time
       const modal = buildForkToChannelModalView({
         sourceChannelId: 'C123456',
         sourceChannelName: 'general',
         sourceMessageTs: '123.456',
         sourceThreadTs: '789.012',
         conversationKey: 'C123456:789.012',
-        turnIndex: 7,
+        turnId: 'turn_def456',
       });
 
       const metadata = JSON.parse(modal.private_metadata);
-      expect(metadata.turnIndex).toBe(7);
+      expect(metadata.turnId).toBe('turn_def456');
+      expect(metadata.turnIndex).toBeUndefined(); // turnIndex is NOT stored
     });
 
-    it('handles turn 0 (fork at first turn)', () => {
+    it('modal description does not include turn number', () => {
+      // Turn number is not displayed because it must be queried from Codex
       const modal = buildForkToChannelModalView({
         sourceChannelId: 'C123456',
         sourceChannelName: 'general',
         sourceMessageTs: '123.456',
         sourceThreadTs: '789.012',
         conversationKey: 'C123456:789.012',
-        turnIndex: 0,
-      });
-
-      const metadata = JSON.parse(modal.private_metadata);
-      expect(metadata.turnIndex).toBe(0);
-    });
-
-    it('modal description mentions correct turn number', () => {
-      const modal = buildForkToChannelModalView({
-        sourceChannelId: 'C123456',
-        sourceChannelName: 'general',
-        sourceMessageTs: '123.456',
-        sourceThreadTs: '789.012',
-        conversationKey: 'C123456:789.012',
-        turnIndex: 0,
+        turnId: 'turn_first',
       });
 
       const sectionBlock = modal.blocks.find((b) => b.type === 'section');
-      expect(sectionBlock?.text?.text).toContain('turn 0');
+      expect(sectionBlock?.text?.text).toContain('Fork conversation from this point');
+      expect(sectionBlock?.text?.text).not.toMatch(/turn \d+/);
     });
   });
 });

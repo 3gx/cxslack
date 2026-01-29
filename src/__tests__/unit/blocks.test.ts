@@ -560,7 +560,7 @@ describe('Block Kit Builders', () => {
       sourceMessageTs: '123.456',
       sourceThreadTs: '789.012',
       conversationKey: 'C123:789.012',
-      turnIndex: 3,
+      turnId: 'turn_abc123', // Codex turn ID (NOT turnIndex)
     };
 
     it('builds a modal with correct callback_id', () => {
@@ -576,7 +576,7 @@ describe('Block Kit Builders', () => {
 
       expect(metadata.sourceChannelId).toBe('C123');
       expect(metadata.sourceChannelName).toBe('general');
-      expect(metadata.turnIndex).toBe(3);
+      expect(metadata.turnId).toBe('turn_abc123'); // turnId, NOT turnIndex
       expect(metadata.conversationKey).toBe('C123:789.012');
     });
 
@@ -589,11 +589,13 @@ describe('Block Kit Builders', () => {
       expect(inputBlock?.element?.initial_value).toBe('general-fork');
     });
 
-    it('shows turn index in description', () => {
+    it('shows generic description without turn number', () => {
+      // Modal no longer shows turn number - actual index is queried from Codex at fork time
       const modal = buildForkToChannelModalView(baseParams);
 
       const sectionBlock = modal.blocks.find((b) => b.type === 'section');
-      expect(sectionBlock?.text?.text).toContain('turn 3');
+      expect(sectionBlock?.text?.text).toContain('Fork conversation from this point');
+      expect(sectionBlock?.text?.text).not.toMatch(/turn \d+/); // No turn number
     });
 
     it('has submit and close buttons', () => {
@@ -742,7 +744,7 @@ describe('Block Kit Builders', () => {
         status: 'completed',
         conversationKey: 'C123:456.789',
         elapsedMs: 2000,
-        forkTurnIndex: 3,
+        forkTurnId: 'turn_xyz789', // Codex turn ID (NOT turnIndex)
         forkSlackTs: '999.000',
         ...baseParams,
       });
@@ -750,11 +752,11 @@ describe('Block Kit Builders', () => {
       const forkBlock = blocks.find((b) => b.type === 'actions' && (b.block_id || '').startsWith('fork_')) as any;
       expect(forkBlock).toBeDefined();
       const forkBtn = forkBlock.elements?.[0];
-      expect(forkBtn?.action_id).toBe('fork_C123:456.789_3');
+      expect(forkBtn?.action_id).toBe('fork_C123:456.789_turn_xyz789');
       // Button text should match ccslack format with emoji
       expect(forkBtn?.text?.text).toBe(':twisted_rightwards_arrows: Fork here');
       expect(forkBtn?.text?.emoji).toBe(true);
-      expect(forkBtn?.value).toContain('"turnIndex":3');
+      expect(forkBtn?.value).toContain('"turnId":"turn_xyz789"');
     });
 
     it('does NOT show fork button during running status (only Abort shown)', () => {
@@ -763,7 +765,7 @@ describe('Block Kit Builders', () => {
         status: 'running',
         conversationKey: 'C123:456.789',
         elapsedMs: 1000,
-        forkTurnIndex: 3,
+        forkTurnId: 'turn_xyz789',
         forkSlackTs: '999.000',
         ...baseParams,
       });
@@ -784,7 +786,7 @@ describe('Block Kit Builders', () => {
         status: 'completed',
         conversationKey: 'C123:456.789',
         elapsedMs: 5000,
-        forkTurnIndex: 2,
+        forkTurnId: 'turn_def456',
         forkSlackTs: '888.000',
         ...baseParams,
       });

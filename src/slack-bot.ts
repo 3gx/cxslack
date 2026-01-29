@@ -28,7 +28,6 @@ import {
   getEffectiveApprovalPolicy,
   getEffectiveThreadId,
   recordTurn,
-  getTurnBySlackTs,
 } from './session-manager.js';
 import {
   buildActivityBlocks,
@@ -290,26 +289,27 @@ function setupEventHandlers(): void {
 
     await ack();
 
-    // Parse metadata
+    // Parse metadata - contains turnId (Codex identifier), NOT turnIndex
     const metadata = JSON.parse(view.private_metadata || '{}') as {
       sourceChannelId: string;
       sourceChannelName: string;
       sourceMessageTs: string;
       sourceThreadTs: string;
       conversationKey: string;
-      turnIndex: number;
+      turnId: string;
     };
 
     const userId = body.user.id;
 
     try {
       // Create the fork channel and session
+      // createForkChannel queries Codex for actual turn index using turnId
       const result = await createForkChannel({
         channelName: normalizedName,
         sourceChannelId: metadata.sourceChannelId,
         sourceThreadTs: metadata.sourceThreadTs,
         conversationKey: metadata.conversationKey,
-        turnIndex: metadata.turnIndex,
+        turnId: metadata.turnId,
         userId,
         client,
       });
@@ -327,7 +327,7 @@ function setupEventHandlers(): void {
                 elements: [
                   {
                     type: 'mrkdwn',
-                    text: `:twisted_rightwards_arrows: Forked at turn ${metadata.turnIndex} to <#${result.channelId}>`,
+                    text: `:twisted_rightwards_arrows: Forked to <#${result.channelId}>`,
                   },
                 ],
               },
@@ -385,54 +385,11 @@ function setupEventHandlers(): void {
         }
       } else if (actionId.startsWith('fork_')) {
         // Fork action - open modal for channel name input
+        // Button value contains turnId (Codex identifier), NOT turnIndex
         const value = (action as { value: string }).value;
-        const { turnIndex: storedTurnIndex, slackTs, conversationKey } = JSON.parse(value);
+        const { turnId, slackTs, conversationKey } = JSON.parse(value);
         const messageTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.ts;
         const threadTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.thread_ts ?? messageTs;
-
-        // ROBUST: Determine actual turn index from Codex (source of truth)
-        // The stored turnIndex may be stale if bot was restarted or user used CLI
-        let actualTurnIndex = storedTurnIndex;
-        try {
-          // Get the thread ID for this conversation
-          const parts = conversationKey.split(':');
-          const convChannelId = parts[0];
-          const convThreadTs = parts[1];
-          const threadId = getEffectiveThreadId(convChannelId, convThreadTs);
-
-          if (threadId) {
-            // Try to look up the turnId for this Slack message
-            let turnId: string | undefined;
-
-            // For main channel: use turns array
-            const turnInfo = getTurnBySlackTs(convChannelId, slackTs);
-            if (turnInfo?.turnId) {
-              turnId = turnInfo.turnId;
-            } else if (convThreadTs) {
-              // For thread: use messageTurnMap
-              const threadSession = getThreadSession(convChannelId, convThreadTs);
-              turnId = threadSession?.messageTurnMap?.[slackTs];
-            }
-
-            if (turnId) {
-              // Query Codex to find the actual index of this turn
-              const codexIndex = await codex.findTurnIndex(threadId, turnId);
-              if (codexIndex >= 0) {
-                actualTurnIndex = codexIndex;
-                console.log(`[fork] Resolved turnIndex from Codex: stored=${storedTurnIndex}, actual=${actualTurnIndex}`);
-              }
-            } else {
-              // Fallback: validate stored index against Codex turn count
-              const totalTurns = await codex.getThreadTurnCount(threadId);
-              if (storedTurnIndex >= totalTurns && totalTurns > 0) {
-                actualTurnIndex = totalTurns - 1; // Cap at last turn
-                console.log(`[fork] Capped turnIndex: stored=${storedTurnIndex}, capped=${actualTurnIndex} (total=${totalTurns})`);
-              }
-            }
-          }
-        } catch (err) {
-          console.warn('[fork] Failed to resolve actual turn index from Codex, using stored value:', err);
-        }
 
         // Get channel name for suggested fork channel name
         const triggerBody = body as { trigger_id?: string };
@@ -453,7 +410,7 @@ function setupEventHandlers(): void {
               sourceMessageTs: messageTs ?? '',
               sourceThreadTs: threadTs ?? '',
               conversationKey,
-              turnIndex: actualTurnIndex,
+              turnId,
             }),
           });
         }
@@ -876,7 +833,8 @@ interface CreateForkChannelParams {
   sourceChannelId: string;
   sourceThreadTs: string;
   conversationKey: string;
-  turnIndex: number;
+  /** Codex turn ID - actual index is queried from Codex at fork time */
+  turnId: string;
   userId: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   client: any; // Slack WebClient - using any for flexibility with Slack API types
@@ -888,17 +846,23 @@ interface CreateForkChannelResult {
 }
 
 async function createForkChannel(params: CreateForkChannelParams): Promise<CreateForkChannelResult> {
-  const { channelName, sourceChannelId, sourceThreadTs, conversationKey, turnIndex, userId, client } = params;
+  const { channelName, sourceChannelId, sourceThreadTs, conversationKey, turnId, userId, client } = params;
 
   // Parse source conversation key to get source thread info
   const parts = conversationKey.split(':');
   const sourceConvChannelId = parts[0];
   const sourceConvThreadTs = parts[1];
 
-  // Get source Codex thread ID and turn count
+  // Get source Codex thread ID
   const sourceThreadId = getEffectiveThreadId(sourceConvChannelId, sourceConvThreadTs);
   if (!sourceThreadId) {
     throw new Error('Cannot fork: No active session found in source thread.');
+  }
+
+  // Query Codex for actual turn index (source of truth)
+  const turnIndex = await codex.findTurnIndex(sourceThreadId, turnId);
+  if (turnIndex < 0) {
+    throw new Error('Cannot fork: Turn not found in Codex thread.');
   }
 
   // 1. Create new Slack channel
@@ -953,7 +917,7 @@ async function createForkChannel(params: CreateForkChannelParams): Promise<Creat
   const sourceLink = `<https://slack.com/archives/${sourceChannelId}/p${sourceThreadTs.replace('.', '')}|source conversation>`;
   await client.chat.postMessage({
     channel: newChannelId,
-    text: `:twisted_rightwards_arrows: Forked from ${sourceLink} at turn ${turnIndex}.\n\nThis channel continues from that point in the conversation. Send a message to continue.`,
+    text: `:twisted_rightwards_arrows: Forked from ${sourceLink}.\n\nThis channel continues from that point in the conversation. Send a message to continue.`,
   });
 
   return {
