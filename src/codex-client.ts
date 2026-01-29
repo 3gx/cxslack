@@ -544,8 +544,29 @@ export class CodexClient extends EventEmitter {
 
       case 'turn/completed':
       case 'codex/event/task_complete': {
-        // Normalize status: Codex may send 'success', 'done', 'completed', or omit status entirely
-        const rawStatus = (params as { status?: string }).status;
+        // VERIFIED via test-multi-query.ts - two different structures:
+        //
+        // codex/event/task_complete:
+        //   { id: "0", msg: { type: "task_complete", ... }, conversationId: "uuid" }
+        //   - threadId is in params.conversationId
+        //   - turnId is in params.id
+        //
+        // turn/completed:
+        //   { threadId: "uuid", turn: { id: "0", status: "completed", ... } }
+        //   - threadId is in params.threadId
+        //   - turnId is in params.turn.id
+        //   - status is in params.turn.status
+        const p = params as Record<string, unknown>;
+        const turn = p.turn as Record<string, unknown> | undefined;
+
+        // Extract threadId from multiple locations
+        const threadId = (p.threadId || p.conversationId || '') as string;
+
+        // Extract turnId from multiple locations
+        const turnId = (turn?.id || p.turnId || p.id || '') as string;
+
+        // Extract status from multiple locations
+        const rawStatus = (turn?.status || p.status) as string | undefined;
         let normalizedStatus: TurnStatus = 'completed'; // Default to completed for task_complete
 
         if (rawStatus === 'completed' || rawStatus === 'success' || rawStatus === 'done') {
@@ -555,11 +576,12 @@ export class CodexClient extends EventEmitter {
         } else if (rawStatus === 'failed' || rawStatus === 'error') {
           normalizedStatus = 'failed';
         }
-        // Note: 'running' status in a task_complete event doesn't make sense, ignore it
+
+        console.log(`[codex-client] ${method}: threadId="${threadId}" turnId="${turnId}" status="${normalizedStatus}"`);
 
         this.emit('turn:completed', {
-          threadId: (params as { threadId?: string }).threadId ?? '',
-          turnId: (params as { turnId?: string }).turnId ?? '',
+          threadId,
+          turnId,
           status: normalizedStatus,
         });
         break;

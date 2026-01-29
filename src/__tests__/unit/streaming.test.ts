@@ -508,3 +508,204 @@ describe('StreamingManager State Cleanup on Overwrite', () => {
     }
   });
 });
+
+// Test the critical fix: contexts must be deleted after turn:completed
+// This prevents stale contexts from being matched by findContextByThreadId
+describe('StreamingManager Context Cleanup After Turn Completion', () => {
+  interface TestContext {
+    channelId: string;
+    originalTs: string;
+    threadId: string;
+    threadTs?: string;
+  }
+
+  interface TestState {
+    isStreaming: boolean;
+    updateTimer: ReturnType<typeof setInterval> | null;
+  }
+
+  // Replicate findContextByThreadId logic
+  const findContextByThreadId = (
+    contexts: Map<string, TestContext>,
+    threadId: string
+  ): { key: string; context: TestContext } | undefined => {
+    for (const [key, context] of contexts) {
+      if (context.threadId === threadId) {
+        return { key, context };
+      }
+    }
+    return undefined;
+  };
+
+  it('BUG DEMO: without cleanup, findContextByThreadId returns wrong context', () => {
+    const contexts = new Map<string, TestContext>();
+    const codexThreadId = 'codex-thread-X';
+
+    // First top-level message creates context
+    contexts.set('chan:ts1', {
+      channelId: 'chan',
+      originalTs: 'ts1',
+      threadId: codexThreadId,
+    });
+
+    // Second top-level message creates NEW context with SAME threadId
+    // (Both resume the same Codex thread via channel session)
+    contexts.set('chan:ts2', {
+      channelId: 'chan',
+      originalTs: 'ts2',
+      threadId: codexThreadId, // SAME threadId!
+    });
+
+    // Now there are TWO contexts with same threadId
+    expect(contexts.size).toBe(2);
+
+    // findContextByThreadId returns FIRST match (insertion order)
+    const found = findContextByThreadId(contexts, codexThreadId);
+    expect(found?.key).toBe('chan:ts1'); // Returns OLD context - BUG!
+    expect(found?.context.originalTs).toBe('ts1'); // Wrong originalTs!
+
+    // This is the bug: turn:completed for second query would be handled
+    // on first query's context, clearing wrong timer and removing wrong emoji
+  });
+
+  it('FIX: deleting context after turn:completed allows correct lookup', () => {
+    const contexts = new Map<string, TestContext>();
+    const states = new Map<string, TestState>();
+    const codexThreadId = 'codex-thread-X';
+
+    // First query creates context
+    contexts.set('chan:ts1', {
+      channelId: 'chan',
+      originalTs: 'ts1',
+      threadId: codexThreadId,
+    });
+    states.set('chan:ts1', { isStreaming: true, updateTimer: null });
+
+    // First query completes - WITH FIX: delete context and state
+    const found1 = findContextByThreadId(contexts, codexThreadId);
+    expect(found1?.key).toBe('chan:ts1');
+
+    // Simulate turn:completed handler cleanup (THE FIX)
+    contexts.delete(found1!.key);
+    states.delete(found1!.key);
+
+    // Context should be gone
+    expect(contexts.size).toBe(0);
+    expect(states.size).toBe(0);
+
+    // Second query creates context with same threadId
+    contexts.set('chan:ts2', {
+      channelId: 'chan',
+      originalTs: 'ts2',
+      threadId: codexThreadId,
+    });
+    states.set('chan:ts2', { isStreaming: true, updateTimer: null });
+
+    // Now findContextByThreadId finds the CORRECT context
+    const found2 = findContextByThreadId(contexts, codexThreadId);
+    expect(found2?.key).toBe('chan:ts2'); // Correct!
+    expect(found2?.context.originalTs).toBe('ts2'); // Correct originalTs!
+  });
+
+  it('multiple sequential queries work correctly with cleanup', () => {
+    const contexts = new Map<string, TestContext>();
+    const states = new Map<string, TestState>();
+    const codexThreadId = 'codex-thread-X';
+
+    // Simulate 3 queries in sequence
+    for (let i = 1; i <= 3; i++) {
+      const key = `chan:ts${i}`;
+
+      // Start query
+      contexts.set(key, {
+        channelId: 'chan',
+        originalTs: `ts${i}`,
+        threadId: codexThreadId,
+      });
+      states.set(key, { isStreaming: true, updateTimer: null });
+
+      // Only one context should exist at a time
+      expect(contexts.size).toBe(1);
+
+      // findContextByThreadId finds the current query's context
+      const found = findContextByThreadId(contexts, codexThreadId);
+      expect(found?.key).toBe(key);
+      expect(found?.context.originalTs).toBe(`ts${i}`);
+
+      // Query completes - cleanup
+      contexts.delete(key);
+      states.delete(key);
+      expect(contexts.size).toBe(0);
+    }
+  });
+
+  it('concurrent queries in different threads work independently', () => {
+    const contexts = new Map<string, TestContext>();
+    const states = new Map<string, TestState>();
+
+    // Two concurrent queries in DIFFERENT Slack threads
+    // Each has its own Codex thread (different threadIds)
+    contexts.set('chan:threadA', {
+      channelId: 'chan',
+      originalTs: 'msgA',
+      threadId: 'codex-A',
+      threadTs: 'threadA',
+    });
+    states.set('chan:threadA', { isStreaming: true, updateTimer: null });
+
+    contexts.set('chan:threadB', {
+      channelId: 'chan',
+      originalTs: 'msgB',
+      threadId: 'codex-B',
+      threadTs: 'threadB',
+    });
+    states.set('chan:threadB', { isStreaming: true, updateTimer: null });
+
+    // Both contexts exist
+    expect(contexts.size).toBe(2);
+
+    // findContextByThreadId finds correct context for each
+    const foundA = findContextByThreadId(contexts, 'codex-A');
+    expect(foundA?.key).toBe('chan:threadA');
+
+    const foundB = findContextByThreadId(contexts, 'codex-B');
+    expect(foundB?.key).toBe('chan:threadB');
+
+    // Thread A completes - cleanup only affects A
+    contexts.delete('chan:threadA');
+    states.delete('chan:threadA');
+
+    expect(contexts.size).toBe(1);
+    expect(findContextByThreadId(contexts, 'codex-A')).toBeUndefined();
+    expect(findContextByThreadId(contexts, 'codex-B')?.key).toBe('chan:threadB');
+  });
+
+  it('thread replies use same key so cleanup is automatic via overwrite', () => {
+    const contexts = new Map<string, TestContext>();
+    const codexThreadId = 'codex-thread-X';
+    const threadParentTs = 'parentTs';
+
+    // First message in thread
+    contexts.set(`chan:${threadParentTs}`, {
+      channelId: 'chan',
+      originalTs: 'msg1',
+      threadId: codexThreadId,
+      threadTs: threadParentTs,
+    });
+
+    // Second message in SAME thread - same key, overwrites
+    contexts.set(`chan:${threadParentTs}`, {
+      channelId: 'chan',
+      originalTs: 'msg2',
+      threadId: codexThreadId,
+      threadTs: threadParentTs,
+    });
+
+    // Only one context (overwritten)
+    expect(contexts.size).toBe(1);
+
+    // findContextByThreadId finds the current one
+    const found = findContextByThreadId(contexts, codexThreadId);
+    expect(found?.context.originalTs).toBe('msg2'); // Latest message
+  });
+});

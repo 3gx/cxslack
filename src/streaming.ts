@@ -228,6 +228,7 @@ export class StreamingManager {
    */
   startStreaming(context: StreamingContext): void {
     const key = makeConversationKey(context.channelId, context.threadTs);
+    console.log(`[streaming] startStreaming: key="${key}" threadId="${context.threadId}"`);
 
     // CRITICAL: Clean up any existing state for this key to prevent:
     // 1. Orphaned timers that keep running
@@ -502,10 +503,18 @@ export class StreamingManager {
 
     // Turn completed
     this.codex.on('turn:completed', async ({ threadId, turnId, status }) => {
+      console.log(`[streaming] turn:completed HANDLER: threadId="${threadId}" status="${status}"`);
+      console.log(`[streaming] Current contexts: ${Array.from(this.contexts.entries()).map(([k, c]) => `${k}→${c.threadId}`).join(', ')}`);
+
       const found = this.findContextByThreadId(threadId);
-      if (found) {
-        const state = this.states.get(found.key);
-        if (state) {
+      if (!found) {
+        console.log(`[streaming] turn:completed: NO CONTEXT FOUND for threadId="${threadId}"`);
+        return;
+      }
+
+      console.log(`[streaming] turn:completed: FOUND context key="${found.key}"`);
+      const state = this.states.get(found.key);
+      if (state) {
           // IMMEDIATELY stop the timer
           if (state.updateTimer) {
             clearInterval(state.updateTimer);
@@ -626,8 +635,16 @@ export class StreamingManager {
 
           // Clean up activity entries
           this.activityManager.clearEntries(found.key);
+
+          // CRITICAL FIX: Delete context and state from Maps to prevent stale contexts
+          // from being matched by findContextByThreadId on subsequent queries.
+          // Without this, multiple top-level messages sharing the same Codex threadId
+          // would accumulate contexts, and findContextByThreadId would always return
+          // the first (oldest) one, causing turn:completed to be handled on wrong context.
+          this.contexts.delete(found.key);
+          this.states.delete(found.key);
+          console.log(`[streaming] Cleaned up context and state for key="${found.key}"`);
         }
-      }
     });
 
     // Item started (tool use) - FILTER non-tool items, timer handles updates
