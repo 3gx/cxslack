@@ -157,8 +157,12 @@ export interface CodexClientEvents {
   }) => void;
 
   // Thinking/reasoning events
+  // NOTE: Codex encrypts thinking content - we can only detect when thinking happens,
+  // not the actual content. The 'thinking:started' event signals reasoning began,
+  // 'thinking:complete' signals it ended. Content will be empty or minimal summary.
+  'thinking:started': (params: { itemId: string }) => void;
   'thinking:delta': (params: { content: string }) => void;
-  'thinking:complete': (params: { content: string; durationMs: number }) => void;
+  'thinking:complete': (params: { itemId: string; durationMs: number }) => void;
 
   // Command execution lifecycle (from exec_command notifications)
   'command:started': (params: { itemId: string; threadId: string; turnId: string }) => void;
@@ -195,6 +199,9 @@ export class CodexClient extends EventEmitter {
   // Turn completion deduplication: turn/completed and codex/event/task_complete can both arrive
   private recentTurnCompletions = new Map<string, number>(); // threadId:turnId -> timestamp
   private readonly TURN_COMPLETION_TTL_MS = 1000; // 1s TTL for dedup
+
+  // Reasoning item tracking for thinking:started/complete events
+  private reasoningItemStartTimes = new Map<string, number>(); // itemId -> startTime
 
   private readonly config: Required<CodexClientConfig>;
   private isShuttingDown = false;
@@ -830,6 +837,13 @@ export class CodexClient extends EventEmitter {
           commandActions: commandActions?.length ? commandActions : undefined,
           toolInput,
         });
+
+        // Emit thinking:started for Reasoning items
+        // NOTE: Codex encrypts thinking content - we can only detect when it happens
+        if (itemType === 'reasoning') {
+          this.reasoningItemStartTimes.set(itemId, Date.now());
+          this.emit('thinking:started', { itemId });
+        }
         break;
       }
 
@@ -839,9 +853,23 @@ export class CodexClient extends EventEmitter {
         // Extract item from either format
         const msg = p.msg as Record<string, unknown> | undefined;
         const item = (msg?.item || p.item) as Record<string, unknown> | undefined;
-        // Extract itemId
+        // Extract itemId and type
         const itemId = (item?.id || p.itemId || p.item_id || p.id || '') as string;
+        let itemType = (item?.type || '') as string;
+        // Normalize PascalCase to camelCase
+        if (itemType && itemType.length > 0 && itemType[0] === itemType[0].toUpperCase()) {
+          itemType = itemType[0].toLowerCase() + itemType.slice(1);
+        }
+
         this.emit('item:completed', { itemId });
+
+        // Emit thinking:complete for Reasoning items
+        if (itemType === 'reasoning' || this.reasoningItemStartTimes.has(itemId)) {
+          const startTime = this.reasoningItemStartTimes.get(itemId);
+          const durationMs = startTime ? Date.now() - startTime : 0;
+          this.reasoningItemStartTimes.delete(itemId);
+          this.emit('thinking:complete', { itemId, durationMs });
+        }
         break;
       }
 

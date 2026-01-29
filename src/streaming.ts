@@ -165,6 +165,8 @@ interface StreamingState {
   thinkingComplete: boolean;
   /** Thinking message ts for in-place updates (ccslack parity) */
   thinkingMessageTs?: string;
+  /** Thinking item ID (for matching complete event) */
+  thinkingItemId?: string;
   /** Last thinking message update time (rate limiting - 2s gap) */
   lastThinkingUpdateTime: number;
   /** Track active tools by itemId */
@@ -916,7 +918,96 @@ export class StreamingManager {
       }
     });
 
+    // Thinking started - Codex detected a Reasoning item started
+    // NOTE: Codex encrypts thinking content, so we only know WHEN thinking happens,
+    // not WHAT is being thought. We use this to show "Thinking..." in activity.
+    this.codex.on('thinking:started', ({ itemId }) => {
+      console.log(`[streaming] thinking:started itemId=${itemId}`);
+      for (const [key, state] of this.states) {
+        if (state.isStreaming) {
+          const context = this.contexts.get(key);
+          const isFirstThinking = !state.thinkingStartTime;
+
+          if (isFirstThinking) {
+            state.thinkingStartTime = Date.now();
+            state.thinkingItemId = itemId;
+
+            // Add thinking entry to activity (content will be empty but shows "Thinking...")
+            this.activityManager.addEntry(key, {
+              type: 'thinking',
+              timestamp: Date.now(),
+              thinkingInProgress: true,
+            });
+
+            // Post placeholder to thread (ccslack parity)
+            if (context) {
+              const threadTs = state.threadParentTs || context.originalTs;
+              withSlackRetry(
+                () => this.slack.chat.postMessage({
+                  channel: context.channelId,
+                  thread_ts: threadTs,
+                  text: ':brain: _Thinking..._',
+                }),
+                'thinking.placeholder'
+              ).then((result) => {
+                state.thinkingMessageTs = (result as any).ts;
+                console.log(`[streaming] Posted thinking placeholder: ${state.thinkingMessageTs}`);
+              }).catch((err) => {
+                console.error('[streaming] Failed to post thinking placeholder:', err);
+              });
+            }
+          }
+          break;
+        }
+      }
+    });
+
+    // Thinking complete - Codex Reasoning item finished
+    this.codex.on('thinking:complete', ({ itemId, durationMs }) => {
+      console.log(`[streaming] thinking:complete itemId=${itemId} durationMs=${durationMs}`);
+      for (const [key, state] of this.states) {
+        if (state.isStreaming && (state.thinkingItemId === itemId || state.thinkingStartTime)) {
+          const context = this.contexts.get(key);
+
+          // Mark thinking as complete in activity entries
+          const entries = this.activityManager.getEntries(key);
+          for (let i = entries.length - 1; i >= 0; i--) {
+            if (entries[i].type === 'thinking') {
+              entries[i].thinkingInProgress = false;
+              entries[i].durationMs = durationMs;
+              break;
+            }
+          }
+
+          // Update thread message to show thinking completed
+          if (state.thinkingMessageTs && context) {
+            const durationSec = Math.round(durationMs / 1000);
+            const charCount = state.thinkingContent?.length || 0;
+            const summaryText = charCount > 0
+              ? `:brain: _Thinking complete_ [${durationSec}s] _${charCount} chars_`
+              : `:brain: _Thinking complete_ [${durationSec}s] _(content encrypted)_`;
+
+            withSlackRetry(
+              () => this.slack.chat.update({
+                channel: context.channelId,
+                ts: state.thinkingMessageTs!,
+                text: summaryText,
+              }),
+              'thinking.complete'
+            ).catch((err) => {
+              console.error('[streaming] Failed to update thinking complete message:', err);
+            });
+          }
+
+          // Reset for next thinking block
+          state.thinkingItemId = undefined;
+          break;
+        }
+      }
+    });
+
     // Thinking delta (reasoning content) - IN-PLACE UPDATES like ccslack
+    // NOTE: This rarely fires since Codex encrypts thinking content.
     // On first delta: post placeholder message, save ts
     // On subsequent deltas: update in-place with rolling tail (rate-limited 2s)
     this.codex.on('thinking:delta', ({ content }) => {
