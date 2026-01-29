@@ -32,6 +32,7 @@ import {
   markAborted as markAbortedEmoji,
 } from './emoji-reactions.js';
 import { isAborted, clearAborted } from './abort-tracker.js';
+import { saveThreadSession, LastUsage } from './session-manager.js';
 import {
   ActivityThreadManager,
   ActivityEntry,
@@ -530,6 +531,21 @@ export class StreamingManager {
 
           // Clear abort state for next turn
           clearAborted(found.key);
+
+          // Save lastUsage to session for /status and /context commands
+          if (status === 'completed' && state.contextWindow && found.context.threadTs) {
+            const lastUsage: LastUsage = {
+              inputTokens: state.inputTokens,
+              outputTokens: state.outputTokens,
+              cacheReadInputTokens: state.cacheReadInputTokens,
+              cacheCreationInputTokens: state.cacheCreationInputTokens,
+              contextWindow: state.contextWindow,
+              model: found.context.model || 'unknown',
+              maxOutputTokens: state.maxOutputTokens,
+            };
+            await saveThreadSession(channelId, found.context.threadTs, { lastUsage })
+              .catch((err) => console.error('[streaming] Failed to save lastUsage:', err));
+          }
 
           // Integration point 4: Force flush activity batch on turn completion
           await flushActivityBatchToThread(

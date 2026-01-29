@@ -23,6 +23,7 @@ import {
   getEffectiveApprovalPolicy,
   getEffectiveWorkingDir,
   APPROVAL_POLICIES,
+  LastUsage,
 } from './session-manager.js';
 import {
   buildPolicyStatusBlocks,
@@ -286,8 +287,11 @@ export async function handleStatusCommand(
   // Get effective threadId (may come from channel session via fallback)
   const effectiveThreadId = session?.threadId || getSession(channelId)?.threadId;
 
+  // Get lastUsage from thread session or channel session
+  const lastUsage = session?.lastUsage || getSession(channelId)?.lastUsage;
+
   // Format model like CLI: "gpt-5.2-codex (reasoning xhigh)"
-  const modelName = session?.model || DEFAULT_MODEL;
+  const modelName = lastUsage?.model || session?.model || DEFAULT_MODEL;
   const reasoning = session?.reasoningEffort || DEFAULT_REASONING;
 
   const lines: string[] = [
@@ -299,6 +303,16 @@ export async function handleStatusCommand(
     `*Account:* ${accountInfo}`,
     `*Session:* \`${effectiveThreadId || 'none'}\``,
   ];
+
+  // Show context window info if available
+  if (lastUsage) {
+    const totalTokens = lastUsage.inputTokens + (lastUsage.cacheCreationInputTokens ?? 0) + lastUsage.cacheReadInputTokens;
+    const contextPercent = lastUsage.contextWindow > 0
+      ? Math.min(100, Math.max(0, Math.round((totalTokens / lastUsage.contextWindow) * 100)))
+      : 0;
+    const percentLeft = 100 - contextPercent;
+    lines.push(`*Context window:* ${percentLeft}% left (${(totalTokens / 1000).toFixed(1)}K used / ${(lastUsage.contextWindow / 1000).toFixed(0)}K)`);
+  }
 
   // Show fork info if applicable
   if (threadTs) {

@@ -35,6 +35,19 @@ export const APPROVAL_POLICIES: readonly ApprovalPolicy[] = [
 ];
 
 /**
+ * Usage data from the last query (for /status and /context commands).
+ */
+export interface LastUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens?: number;
+  contextWindow: number;
+  model: string;
+  maxOutputTokens?: number;
+}
+
+/**
  * Main channel session.
  */
 export interface Session {
@@ -61,6 +74,8 @@ export interface Session {
   configuredAt: number | null;
   /** Message update rate in seconds (1-10, default 3) */
   updateRateSeconds?: number;
+  /** Usage data from last query (for /status and /context) */
+  lastUsage?: LastUsage;
 }
 
 /**
@@ -94,6 +109,8 @@ export interface ThreadSession {
   updateRateSeconds?: number;
   /** Previous thread IDs (for /resume after /clear) */
   previousThreadIds?: string[];
+  /** Usage data from last query (for /status and /context) */
+  lastUsage?: LastUsage;
 }
 
 /**
