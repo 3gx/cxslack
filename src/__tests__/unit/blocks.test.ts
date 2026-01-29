@@ -677,6 +677,25 @@ describe('Block Kit Builders', () => {
       expect(button.style).toBe('danger');
     });
 
+    it('adds fork button on status panel when turn index provided', () => {
+      const blocks = buildActivityBlocks({
+        activityText: 'Done',
+        status: 'completed',
+        conversationKey: 'C123:456.789',
+        elapsedMs: 2000,
+        forkTurnIndex: 3,
+        forkSlackTs: '999.000',
+        ...baseParams,
+      });
+
+      const forkBlock = blocks.find((b) => b.type === 'actions' && (b.block_id || '').startsWith('fork_')) as any;
+      expect(forkBlock).toBeDefined();
+      const forkBtn = forkBlock.elements?.[0];
+      expect(forkBtn?.action_id).toBe('fork_C123:456.789_3');
+      expect(forkBtn?.text?.text).toBe('Fork here');
+      expect(forkBtn?.value).toContain('"turnIndex":3');
+    });
+
     it('status line appears at bottom (after activity text)', () => {
       const blocks = buildActivityBlocks({
         activityText: ':brain: Thinking...\n:mag: Read file.ts',
