@@ -410,6 +410,42 @@ describe('CodexClient Point-in-Time Fork', () => {
 
       expect(count).toBe(0);
     });
+
+    it('findTurnIndex returns correct index for existing turn', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      vi.spyOn(client, 'readThread').mockResolvedValue({
+        thread: { id: 'thread-123', workingDirectory: '/test', createdAt: new Date().toISOString() },
+        turns: [{ id: 'turn-a' }, { id: 'turn-b' }, { id: 'turn-c' }],
+      });
+
+      const index = await client.findTurnIndex('thread-123', 'turn-b');
+
+      expect(index).toBe(1);
+    });
+
+    it('findTurnIndex returns -1 for non-existent turn', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      vi.spyOn(client, 'readThread').mockResolvedValue({
+        thread: { id: 'thread-123', workingDirectory: '/test', createdAt: new Date().toISOString() },
+        turns: [{ id: 'turn-a' }, { id: 'turn-b' }],
+      });
+
+      const index = await client.findTurnIndex('thread-123', 'turn-xyz');
+
+      expect(index).toBe(-1);
+    });
+
+    it('findTurnIndex returns -1 for undefined turns', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      vi.spyOn(client, 'readThread').mockResolvedValue({
+        thread: { id: 'thread-123', workingDirectory: '/test', createdAt: new Date().toISOString() },
+        turns: undefined,
+      });
+
+      const index = await client.findTurnIndex('thread-123', 'turn-a');
+
+      expect(index).toBe(-1);
+    });
   });
 
   describe('forkThreadAtTurn calculation', () => {

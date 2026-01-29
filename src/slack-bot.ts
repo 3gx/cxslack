@@ -28,6 +28,7 @@ import {
   getEffectiveApprovalPolicy,
   getEffectiveThreadId,
   recordTurn,
+  getTurnBySlackTs,
 } from './session-manager.js';
 import {
   buildActivityBlocks,
@@ -385,9 +386,53 @@ function setupEventHandlers(): void {
       } else if (actionId.startsWith('fork_')) {
         // Fork action - open modal for channel name input
         const value = (action as { value: string }).value;
-        const { turnIndex, slackTs, conversationKey } = JSON.parse(value);
+        const { turnIndex: storedTurnIndex, slackTs, conversationKey } = JSON.parse(value);
         const messageTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.ts;
         const threadTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.thread_ts ?? messageTs;
+
+        // ROBUST: Determine actual turn index from Codex (source of truth)
+        // The stored turnIndex may be stale if bot was restarted or user used CLI
+        let actualTurnIndex = storedTurnIndex;
+        try {
+          // Get the thread ID for this conversation
+          const parts = conversationKey.split(':');
+          const convChannelId = parts[0];
+          const convThreadTs = parts[1];
+          const threadId = getEffectiveThreadId(convChannelId, convThreadTs);
+
+          if (threadId) {
+            // Try to look up the turnId for this Slack message
+            let turnId: string | undefined;
+
+            // For main channel: use turns array
+            const turnInfo = getTurnBySlackTs(convChannelId, slackTs);
+            if (turnInfo?.turnId) {
+              turnId = turnInfo.turnId;
+            } else if (convThreadTs) {
+              // For thread: use messageTurnMap
+              const threadSession = getThreadSession(convChannelId, convThreadTs);
+              turnId = threadSession?.messageTurnMap?.[slackTs];
+            }
+
+            if (turnId) {
+              // Query Codex to find the actual index of this turn
+              const codexIndex = await codex.findTurnIndex(threadId, turnId);
+              if (codexIndex >= 0) {
+                actualTurnIndex = codexIndex;
+                console.log(`[fork] Resolved turnIndex from Codex: stored=${storedTurnIndex}, actual=${actualTurnIndex}`);
+              }
+            } else {
+              // Fallback: validate stored index against Codex turn count
+              const totalTurns = await codex.getThreadTurnCount(threadId);
+              if (storedTurnIndex >= totalTurns && totalTurns > 0) {
+                actualTurnIndex = totalTurns - 1; // Cap at last turn
+                console.log(`[fork] Capped turnIndex: stored=${storedTurnIndex}, capped=${actualTurnIndex} (total=${totalTurns})`);
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('[fork] Failed to resolve actual turn index from Codex, using stored value:', err);
+        }
 
         // Get channel name for suggested fork channel name
         const triggerBody = body as { trigger_id?: string };
@@ -408,7 +453,7 @@ function setupEventHandlers(): void {
               sourceMessageTs: messageTs ?? '',
               sourceThreadTs: threadTs ?? '',
               conversationKey,
-              turnIndex,
+              turnIndex: actualTurnIndex,
             }),
           });
         }

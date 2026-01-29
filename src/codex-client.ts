@@ -449,6 +449,20 @@ export class CodexClient extends EventEmitter {
   }
 
   /**
+   * Find the index of a turn by its turnId in Codex (source of truth).
+   * Returns -1 if not found.
+   *
+   * @param threadId - The thread to query
+   * @param turnId - The turn ID to find
+   * @returns The 0-based index of the turn, or -1 if not found
+   */
+  async findTurnIndex(threadId: string, turnId: string): Promise<number> {
+    const { turns } = await this.readThread(threadId, true);
+    if (!turns) return -1;
+    return turns.findIndex((t) => t.id === turnId);
+  }
+
+  /**
    * Fork a thread (creates a full copy).
    * Note: Codex thread/fork does NOT support turnIndex parameter.
    * For point-in-time forking, use forkThread + rollbackThread.
