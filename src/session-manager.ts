@@ -377,18 +377,20 @@ export function getTurnBySlackTs(channelId: string, slackTs: string): TurnInfo |
  * Preserves the thread ID in previousThreadIds for potential resume.
  */
 export async function clearSession(channelId: string, threadTs?: string): Promise<void> {
+  // Always clear channel session's threadId (since main channel mentions use fallback)
+  const channelSession = getSession(channelId);
+  if (channelSession?.threadId) {
+    await saveSession(channelId, {
+      threadId: null,
+      previousThreadIds: [...(channelSession.previousThreadIds || []), channelSession.threadId],
+    });
+  }
+
+  // Also clear thread session if specified
   if (threadTs) {
     const existing = getThreadSession(channelId, threadTs);
     if (existing?.threadId) {
       await saveThreadSession(channelId, threadTs, {
-        threadId: null,
-        previousThreadIds: [...(existing.previousThreadIds || []), existing.threadId],
-      });
-    }
-  } else {
-    const existing = getSession(channelId);
-    if (existing?.threadId) {
-      await saveSession(channelId, {
         threadId: null,
         previousThreadIds: [...(existing.previousThreadIds || []), existing.threadId],
       });

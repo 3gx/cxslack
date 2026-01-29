@@ -283,24 +283,28 @@ export async function handleStatusCommand(
     accountInfo = 'Error checking auth';
   }
 
+  // Get effective threadId (may come from channel session via fallback)
+  const effectiveThreadId = session?.threadId || getSession(channelId)?.threadId;
+
+  // Format model like CLI: "gpt-5.2-codex (reasoning xhigh)"
+  const modelName = session?.model || DEFAULT_MODEL;
+  const reasoning = session?.reasoningEffort || DEFAULT_REASONING;
+
   const lines: string[] = [
-    ':information_source: *Session Status*',
+    ':information_source: *Codex Session Status*',
     '',
-    `*Thread ID:* ${session?.threadId || 'None (new session)'}`,
-    `*Working Directory:* \`${workingDir}\``,
-    `*Approval Policy:* ${policy}`,
-    `*Model:* ${session?.model || 'default'}`,
-    `*Reasoning Effort:* ${session?.reasoningEffort || 'default'}`,
-    `*Authentication:* ${accountInfo}`,
-    '',
-    `*Created:* ${session?.createdAt ? new Date(session.createdAt).toLocaleString() : 'N/A'}`,
-    `*Last Active:* ${session?.lastActiveAt ? new Date(session.lastActiveAt).toLocaleString() : 'N/A'}`,
+    `*Model:* ${modelName} (reasoning ${reasoning})`,
+    `*Directory:* \`${workingDir}\``,
+    `*Approval:* ${policy}`,
+    `*Account:* ${accountInfo}`,
+    `*Session:* \`${effectiveThreadId || 'none'}\``,
   ];
 
+  // Show fork info if applicable
   if (threadTs) {
     const threadSession = getThreadSession(channelId, threadTs);
     if (threadSession?.forkedFrom) {
-      lines.push(`*Forked From:* ${threadSession.forkedFrom}`);
+      lines.push(`*Forked From:* \`${threadSession.forkedFrom}\``);
     }
   }
 
@@ -481,6 +485,10 @@ export async function handleCommand(
     case 'help':
       return handleHelpCommand();
     default:
-      return null; // Unknown command - treat as regular message
+      // Unknown command - return error, don't send to Codex
+      return {
+        blocks: buildErrorBlocks(`Unknown command: \`/${command}\`\nType \`/help\` for available commands.`),
+        text: `Unknown command: /${command}`,
+      };
   }
 }
