@@ -334,6 +334,7 @@ export interface ForkBlockParams {
 
 /**
  * Build blocks for "Fork here" button.
+ * Matches ccslack style: emoji + text, shown only after query completes.
  */
 export function buildForkButton(params: ForkBlockParams): Block {
   const { turnIndex, slackTs, conversationKey } = params;
@@ -344,13 +345,16 @@ export function buildForkButton(params: ForkBlockParams): Block {
     elements: [
       {
         type: 'button',
-        text: { type: 'plain_text', text: 'Fork here' },
+        text: {
+          type: 'plain_text',
+          text: ':twisted_rightwards_arrows: Fork here',
+          emoji: true,
+        },
         action_id: `fork_${conversationKey}_${turnIndex}`,
         value: JSON.stringify({ turnIndex, slackTs, conversationKey }),
       },
     ],
   };
-
 }
 
 // ============================================================================
@@ -371,7 +375,11 @@ export function buildActivityEntryActions(params: ActivityEntryActionParams): Bl
   if (includeFork) {
     elements.push({
       type: 'button',
-      text: { type: 'plain_text', text: 'Fork here' },
+      text: {
+        type: 'plain_text',
+        text: ':twisted_rightwards_arrows: Fork here',
+        emoji: true,
+      },
       action_id: `fork_${conversationKey}_${turnIndex}`,
       value: JSON.stringify({ turnIndex, slackTs, conversationKey }),
     });
@@ -1247,8 +1255,10 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
     });
   }
 
-  // Fork button on main activity/status panel (matches ccslack UX)
-  if (params.forkTurnIndex !== undefined && params.forkSlackTs) {
+  // Fork button on main activity/status panel - ONLY after query completes (matches ccslack UX)
+  // During processing: show Abort button
+  // After completion: show Fork button (replaces Abort)
+  if (!isRunning && params.forkTurnIndex !== undefined && params.forkSlackTs) {
     blocks.push(
       buildForkButton({
         turnIndex: params.forkTurnIndex,

@@ -677,7 +677,7 @@ describe('Block Kit Builders', () => {
       expect(button.style).toBe('danger');
     });
 
-    it('adds fork button on status panel when turn index provided', () => {
+    it('adds fork button on status panel when turn index provided AND status is completed', () => {
       const blocks = buildActivityBlocks({
         activityText: 'Done',
         status: 'completed',
@@ -692,8 +692,52 @@ describe('Block Kit Builders', () => {
       expect(forkBlock).toBeDefined();
       const forkBtn = forkBlock.elements?.[0];
       expect(forkBtn?.action_id).toBe('fork_C123:456.789_3');
-      expect(forkBtn?.text?.text).toBe('Fork here');
+      // Button text should match ccslack format with emoji
+      expect(forkBtn?.text?.text).toBe(':twisted_rightwards_arrows: Fork here');
+      expect(forkBtn?.text?.emoji).toBe(true);
       expect(forkBtn?.value).toContain('"turnIndex":3');
+    });
+
+    it('does NOT show fork button during running status (only Abort shown)', () => {
+      const blocks = buildActivityBlocks({
+        activityText: 'Working...',
+        status: 'running',
+        conversationKey: 'C123:456.789',
+        elapsedMs: 1000,
+        forkTurnIndex: 3,
+        forkSlackTs: '999.000',
+        ...baseParams,
+      });
+
+      // Should have abort button, NOT fork button
+      const abortBlock = blocks.find((b) => b.type === 'actions' && (b.block_id || '').startsWith('status_panel_')) as any;
+      expect(abortBlock).toBeDefined();
+      expect(abortBlock.elements?.[0]?.action_id).toContain('abort_');
+
+      // Should NOT have fork button
+      const forkBlock = blocks.find((b) => b.type === 'actions' && (b.block_id || '').startsWith('fork_')) as any;
+      expect(forkBlock).toBeUndefined();
+    });
+
+    it('shows fork button instead of abort after completion', () => {
+      const blocks = buildActivityBlocks({
+        activityText: 'Done',
+        status: 'completed',
+        conversationKey: 'C123:456.789',
+        elapsedMs: 5000,
+        forkTurnIndex: 2,
+        forkSlackTs: '888.000',
+        ...baseParams,
+      });
+
+      // Should NOT have abort button
+      const abortBlock = blocks.find((b) => b.type === 'actions' && (b.block_id || '').startsWith('status_panel_')) as any;
+      expect(abortBlock).toBeUndefined();
+
+      // Should have fork button
+      const forkBlock = blocks.find((b) => b.type === 'actions' && (b.block_id || '').startsWith('fork_')) as any;
+      expect(forkBlock).toBeDefined();
+      expect(forkBlock.elements?.[0]?.text?.text).toBe(':twisted_rightwards_arrows: Fork here');
     });
 
     it('status line appears at bottom (after activity text)', () => {
