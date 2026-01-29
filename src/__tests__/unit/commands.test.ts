@@ -67,4 +67,14 @@ describe('Command Handlers', () => {
     expect(result.blocks.length).toBeGreaterThan(0);
     expect(result.blocks[0].text?.text).toContain('Select Model');
   });
-});
+
+  it('falls back to bundled models when listModels returns empty', async () => {
+    const codex = {
+      listModels: vi.fn().mockResolvedValue([]),
+    } as unknown as CodexClient;
+
+    const result = await handleModelCommand({ ...baseContext, text: '' }, codex);
+
+    expect(JSON.stringify(result.blocks)).toContain('gpt-5.2-codex');
+  });
+}); 

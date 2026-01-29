@@ -522,13 +522,14 @@ export interface ModelSelectionBlockParams {
   availableModels: string[];
   currentModel?: string;
   currentReasoning?: ReasoningEffort;
+  modelDescriptions?: Record<string, string>;
 }
 
 /**
  * Build blocks for /model command selection prompt (model + reasoning).
  */
 export function buildModelSelectionBlocks(params: ModelSelectionBlockParams): Block[] {
-  const { availableModels, currentModel, currentReasoning } = params;
+  const { availableModels, currentModel, currentReasoning, modelDescriptions } = params;
 
   const modelOptions = availableModels.map((model) => ({
     text: { type: 'plain_text', text: model },
@@ -623,6 +624,24 @@ export function buildModelSelectionBlocks(params: ModelSelectionBlockParams): Bl
       },
     ],
   });
+
+  if (modelDescriptions && availableModels.length > 0) {
+    const descLines = availableModels
+      .filter((m) => modelDescriptions[m])
+      .map((m) => `• *${m}*: ${modelDescriptions[m]}`)
+      .join('\n');
+    if (descLines) {
+      blocks.push({
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text: descLines,
+          },
+        ],
+      });
+    }
+  }
 
   return blocks;
 }

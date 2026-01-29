@@ -9,7 +9,13 @@ import { App, LogLevel } from '@slack/bolt';
 import { CodexClient, ApprovalRequest, TurnContent, ReasoningEffort, ApprovalPolicy } from './codex-client.js';
 import { StreamingManager, makeConversationKey, StreamingContext } from './streaming.js';
 import { ApprovalHandler } from './approval-handler.js';
-import { handleCommand, CommandContext, parseCommand } from './commands.js';
+import {
+  handleCommand,
+  CommandContext,
+  parseCommand,
+  FALLBACK_MODELS,
+  FALLBACK_MODEL_DESCRIPTIONS,
+} from './commands.js';
 import {
   getSession,
   saveSession,
@@ -372,6 +378,9 @@ function setupEventHandlers(): void {
     } catch (err) {
       console.error('Failed to list models:', err);
     }
+    if (availableModels.length === 0) {
+      availableModels = [...FALLBACK_MODELS];
+    }
 
     await client.chat.update({
       channel: channelId,
@@ -381,6 +390,7 @@ function setupEventHandlers(): void {
         availableModels,
         currentModel: session?.model,
         currentReasoning: session?.reasoningEffort,
+        modelDescriptions: FALLBACK_MODEL_DESCRIPTIONS,
       }),
     });
   });
@@ -429,6 +439,9 @@ function setupEventHandlers(): void {
     } catch (err) {
       console.error('Failed to list models:', err);
     }
+    if (availableModels.length === 0) {
+      availableModels = [...FALLBACK_MODELS];
+    }
 
     await client.chat.update({
       channel: channelId,
@@ -438,6 +451,7 @@ function setupEventHandlers(): void {
         availableModels,
         currentModel: session?.model,
         currentReasoning: session?.reasoningEffort,
+        modelDescriptions: FALLBACK_MODEL_DESCRIPTIONS,
       }),
     });
   });

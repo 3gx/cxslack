@@ -36,6 +36,20 @@ import {
 } from './blocks.js';
 import fs from 'fs';
 
+export const FALLBACK_MODELS = [
+  'gpt-5.2-codex',
+  'gpt-5.2',
+  'gpt-5.1-codex-max',
+  'gpt-5.1-codex-mini',
+] as const;
+
+export const FALLBACK_MODEL_DESCRIPTIONS: Record<string, string> = {
+  'gpt-5.2-codex': 'Latest frontier agentic coding model.',
+  'gpt-5.2': 'Latest frontier model with improvements across knowledge, reasoning and coding.',
+  'gpt-5.1-codex-max': 'Codex-optimized flagship for deep and fast reasoning.',
+  'gpt-5.1-codex-mini': 'Optimized for codex. Cheaper, faster, but less capable.',
+};
+
 /**
  * Command result to return to the caller.
  */
@@ -172,6 +186,9 @@ export async function handleModelCommand(
   } catch (err) {
     console.error('Failed to list models:', err);
   }
+  if (availableModels.length === 0) {
+    availableModels = [...FALLBACK_MODELS];
+  }
 
   if (args) {
     // Ignore inline model args; prompt is required to pick model + reasoning
@@ -180,6 +197,7 @@ export async function handleModelCommand(
         availableModels,
         currentModel,
         currentReasoning,
+        modelDescriptions: FALLBACK_MODEL_DESCRIPTIONS,
       }),
       text: 'Use the model selector to choose a model and reasoning level.',
     };
@@ -191,6 +209,7 @@ export async function handleModelCommand(
       availableModels,
       currentModel,
       currentReasoning,
+      modelDescriptions: FALLBACK_MODEL_DESCRIPTIONS,
     }),
     text: 'Select a model and reasoning level.',
   };
