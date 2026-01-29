@@ -32,7 +32,7 @@ import {
   markAborted as markAbortedEmoji,
 } from './emoji-reactions.js';
 import { isAborted, clearAborted } from './abort-tracker.js';
-import { saveThreadSession, LastUsage } from './session-manager.js';
+import { saveSession, saveThreadSession, LastUsage } from './session-manager.js';
 import {
   ActivityThreadManager,
   ActivityEntry,
@@ -532,8 +532,9 @@ export class StreamingManager {
           // Clear abort state for next turn
           clearAborted(found.key);
 
-          // Save lastUsage to session for /status and /context commands
-          if (status === 'completed' && state.contextWindow && found.context.threadTs) {
+          // Save lastUsage to BOTH channel and thread sessions for /status command
+          // (Channel session is needed when /status is called from main channel @bot mentions)
+          if (status === 'completed' && state.contextWindow) {
             const lastUsage: LastUsage = {
               inputTokens: state.inputTokens,
               outputTokens: state.outputTokens,
@@ -543,8 +544,14 @@ export class StreamingManager {
               model: found.context.model || 'unknown',
               maxOutputTokens: state.maxOutputTokens,
             };
-            await saveThreadSession(channelId, found.context.threadTs, { lastUsage })
-              .catch((err) => console.error('[streaming] Failed to save lastUsage:', err));
+            // Save to channel session (for main channel @bot mentions)
+            await saveSession(channelId, { lastUsage })
+              .catch((err) => console.error('[streaming] Failed to save lastUsage to channel:', err));
+            // Save to thread session (for threaded conversations)
+            if (found.context.threadTs) {
+              await saveThreadSession(channelId, found.context.threadTs, { lastUsage })
+                .catch((err) => console.error('[streaming] Failed to save lastUsage to thread:', err));
+            }
           }
 
           // Integration point 4: Force flush activity batch on turn completion

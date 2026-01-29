@@ -338,8 +338,10 @@ export async function handleStatusCommand(
       if (rateLimits.credits) {
         if (rateLimits.credits.unlimited) {
           lines.push(`*Credits:* unlimited`);
-        } else if (rateLimits.credits.balance) {
-          lines.push(`*Credits:* ${rateLimits.credits.balance}`);
+        } else if (rateLimits.credits.balance !== undefined) {
+          const balanceNum = parseFloat(rateLimits.credits.balance);
+          const formatted = isNaN(balanceNum) ? rateLimits.credits.balance : `$${balanceNum.toFixed(2)}`;
+          lines.push(`*Credits:* ${formatted}`);
         }
       }
     }
