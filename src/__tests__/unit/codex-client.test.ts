@@ -4,6 +4,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
+import { CodexClient } from '../../codex-client.js';
+import type { JsonRpcNotification } from '../../json-rpc.js';
 
 // We'll test the notification handling logic in isolation
 // by simulating the handleNotification behavior
@@ -120,6 +122,37 @@ describe('CodexClient Delta Deduplication', () => {
     // Next word arrives
     expect(dedup.isDuplicate(' was')).toBe(false);
     expect(dedup.isDuplicate(' was')).toBe(true); // Deduplicated
+  });
+});
+
+describe('CodexClient turn:completed deduplication', () => {
+  it('emits turn:completed only once for task_complete + turn/completed', () => {
+    const client = new CodexClient({ requestTimeout: 10 });
+    const handler = vi.fn();
+    client.on('turn:completed', handler);
+
+    const taskComplete: JsonRpcNotification = {
+      method: 'codex/event/task_complete',
+      params: {
+        id: 'turn-1',
+        conversationId: 'thread-1',
+        status: 'completed',
+      },
+    };
+
+    const turnCompleted: JsonRpcNotification = {
+      method: 'turn/completed',
+      params: {
+        threadId: 'thread-1',
+        turn: { id: 'turn-1', status: 'completed' },
+      },
+    };
+
+    (client as any).handleNotification(taskComplete);
+    (client as any).handleNotification(turnCompleted);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith({ threadId: 'thread-1', turnId: 'turn-1', status: 'completed' });
   });
 });
 

@@ -192,6 +192,10 @@ export class CodexClient extends EventEmitter {
   private recentItemIds = new Map<string, number>(); // itemId -> timestamp
   private readonly ITEM_ID_TTL_MS = 500; // 500ms TTL for dedup
 
+  // Turn completion deduplication: turn/completed and codex/event/task_complete can both arrive
+  private recentTurnCompletions = new Map<string, number>(); // threadId:turnId -> timestamp
+  private readonly TURN_COMPLETION_TTL_MS = 1000; // 1s TTL for dedup
+
   private readonly config: Required<CodexClientConfig>;
   private isShuttingDown = false;
 
@@ -578,6 +582,22 @@ export class CodexClient extends EventEmitter {
         }
 
         console.log(`[codex-client] ${method}: threadId="${threadId}" turnId="${turnId}" status="${normalizedStatus}"`);
+
+        // Deduplicate turn completions (task_complete + turn/completed)
+        const key = `${threadId}:${turnId}`;
+        const now = Date.now();
+        const lastSeen = this.recentTurnCompletions.get(key);
+        if (lastSeen && now - lastSeen < this.TURN_COMPLETION_TTL_MS) {
+          console.log(`[codex-client] turn:completed duplicate suppressed for key=${key}`);
+          break;
+        }
+        this.recentTurnCompletions.set(key, now);
+        // Cleanup old entries occasionally
+        for (const [k, ts] of this.recentTurnCompletions) {
+          if (now - ts > this.TURN_COMPLETION_TTL_MS * 10) {
+            this.recentTurnCompletions.delete(k);
+          }
+        }
 
         this.emit('turn:completed', {
           threadId,
