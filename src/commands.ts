@@ -33,6 +33,7 @@ import {
   buildReasoningStatusBlocks,
   buildTextBlocks,
   buildErrorBlocks,
+  buildResumeConfirmationBlocks,
   Block,
   ModelInfo,
 } from './blocks.js';
@@ -254,6 +255,100 @@ export async function handleReasoningCommand(
 }
 
 /**
+ * Handle /resume command.
+ * Resumes an existing Codex thread and pins it to the Slack channel/thread session.
+ */
+export async function handleResumeCommand(
+  context: CommandContext,
+  codex: CodexClient
+): Promise<CommandResult> {
+  const { channelId, threadTs, userId, text: args } = context;
+
+  const resumeThreadId = args.trim();
+  if (!resumeThreadId) {
+    return {
+      blocks: buildErrorBlocks('Usage: `/resume <thread-id>`'),
+      text: 'Usage: /resume <thread-id>',
+    };
+  }
+
+  try {
+    const threadInfo = await codex.resumeThread(resumeThreadId);
+
+    // Load existing sessions to preserve previous thread IDs and path metadata
+    const channelSession = getSession(channelId);
+    const threadSession = threadTs ? getThreadSession(channelId, threadTs) : null;
+
+    const previousChannelIds = channelSession?.previousThreadIds ?? [];
+    const previousThreadIds = threadSession?.previousThreadIds ?? [];
+
+    const oldChannelThreadId = channelSession?.threadId;
+    const oldThreadThreadId = threadSession?.threadId;
+
+    // Prefer workingDirectory from Codex; fall back to existing configured path or cwd
+    const workingDir =
+      threadInfo.workingDirectory ||
+      threadSession?.configuredPath ||
+      threadSession?.workingDir ||
+      channelSession?.configuredPath ||
+      channelSession?.workingDir ||
+      process.cwd();
+
+    const now = Date.now();
+
+    // Update channel-level session (fallback for main-channel mentions)
+    await saveSession(channelId, {
+      threadId: resumeThreadId,
+      workingDir,
+      configuredPath: workingDir,
+      configuredBy: userId,
+      configuredAt: channelSession?.configuredAt ?? now,
+      pathConfigured: true,
+      previousThreadIds:
+        oldChannelThreadId && oldChannelThreadId !== resumeThreadId
+          ? [...previousChannelIds, oldChannelThreadId]
+          : previousChannelIds,
+    });
+
+    // Update thread-level session if applicable
+    if (threadTs) {
+      await saveThreadSession(channelId, threadTs, {
+        threadId: resumeThreadId,
+        workingDir,
+        configuredPath: workingDir,
+        configuredBy: userId,
+        configuredAt: threadSession?.configuredAt ?? now,
+        pathConfigured: true,
+        previousThreadIds:
+          oldThreadThreadId && oldThreadThreadId !== resumeThreadId
+            ? [...previousThreadIds, oldThreadThreadId]
+            : previousThreadIds,
+      });
+    }
+
+    return {
+      blocks: buildResumeConfirmationBlocks({
+        resumedThreadId: resumeThreadId,
+        workingDir,
+        previousThreadId:
+          oldThreadThreadId && oldThreadThreadId !== resumeThreadId
+            ? oldThreadThreadId
+            : oldChannelThreadId && oldChannelThreadId !== resumeThreadId
+              ? oldChannelThreadId
+              : undefined,
+      }),
+      text: `Resumed session ${resumeThreadId} in ${workingDir}. Your next message will continue this session.`,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    return {
+      blocks: buildErrorBlocks(`Failed to resume session: ${message}`),
+      text: `Failed to resume session: ${message}`,
+    };
+  }
+}
+
+/**
  * Handle /status command.
  */
 export async function handleStatusCommand(
@@ -306,7 +401,8 @@ export async function handleStatusCommand(
 
   // Show context window info if available
   if (lastUsage) {
-    const totalTokens = lastUsage.inputTokens + (lastUsage.cacheCreationInputTokens ?? 0) + lastUsage.cacheReadInputTokens;
+    // Align with Codex UI: count prompt + completion (+ cache creation), but exclude cache reads
+    const totalTokens = lastUsage.inputTokens + lastUsage.outputTokens + (lastUsage.cacheCreationInputTokens ?? 0);
     const contextPercent = lastUsage.contextWindow > 0
       ? Math.min(100, Math.max(0, Math.round((totalTokens / lastUsage.contextWindow) * 100)))
       : 0;
@@ -483,6 +579,7 @@ export function handleHelpCommand(): CommandResult {
   _Levels: minimal, low, medium, high, xhigh_
 \`/cwd [path]\` - View/set working directory
 \`/update-rate [1-10]\` - Set message update rate in seconds
+\`/resume <thread-id>\` - Resume an existing Codex thread
 
 *Help:*
 \`/help\` - Show this help message
@@ -531,6 +628,8 @@ export async function handleCommand(
       return handleCwdCommand(contextWithArgs);
     case 'update-rate':
       return handleUpdateRateCommand(contextWithArgs);
+    case 'resume':
+      return handleResumeCommand(contextWithArgs, codex);
     case 'help':
       return handleHelpCommand();
     default:

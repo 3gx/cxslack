@@ -541,6 +541,17 @@ async function handleUserMessage(
 
   const parsedCommand = parseCommand(text);
 
+  // Prevent /resume while a turn is streaming to avoid state corruption
+  if (parsedCommand?.command === 'resume' && streamingManager.isStreaming(conversationKey)) {
+    await app.client.chat.postMessage({
+      channel: channelId,
+      thread_ts: postingThreadTs,
+      blocks: buildErrorBlocks('Cannot resume while a turn is running. Abort first, or wait for completion.'),
+      text: 'Cannot resume while a turn is running. Abort first, or wait for completion.',
+    });
+    return;
+  }
+
   // Check if this is a command
   const commandContext: CommandContext = {
     channelId,

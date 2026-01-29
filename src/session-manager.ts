@@ -55,6 +55,8 @@ export interface Session {
   threadId: string | null;
   /** Previous thread IDs (for /resume after /clear) */
   previousThreadIds?: string[];
+  /** Turn history (channel scope) for fork/abort mapping */
+  turns?: TurnInfo[];
   /** Working directory for Codex */
   workingDir: string;
   /** Approval policy */
@@ -402,6 +404,14 @@ export async function clearSession(channelId: string, threadTs?: string): Promis
     await saveSession(channelId, {
       threadId: null,
       previousThreadIds: [...(channelSession.previousThreadIds || []), channelSession.threadId],
+      lastUsage: undefined,
+      turns: [],
+    });
+  } else if (channelSession) {
+    // No active thread, still clear contextual usage/turns to start fresh
+    await saveSession(channelId, {
+      lastUsage: undefined,
+      turns: [],
     });
   }
 
@@ -412,7 +422,10 @@ export async function clearSession(channelId: string, threadTs?: string): Promis
       await saveThreadSession(channelId, threadTs, {
         threadId: null,
         previousThreadIds: [...(existing.previousThreadIds || []), existing.threadId],
+        lastUsage: undefined,
       });
+    } else if (existing) {
+      await saveThreadSession(channelId, threadTs, { lastUsage: undefined });
     }
   }
 }

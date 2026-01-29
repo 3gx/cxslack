@@ -7,12 +7,13 @@ import type { CodexClient } from '../../codex-client.js';
 import {
   handlePolicyCommand,
   handleModelCommand,
+  handleResumeCommand,
   type CommandContext,
 } from '../../commands.js';
 
 vi.mock('../../session-manager.js', () => ({
   getEffectiveApprovalPolicy: vi.fn(() => 'on-request'),
-  getSession: vi.fn(() => ({ model: 'model-a', reasoningEffort: 'high' })),
+  getSession: vi.fn(() => ({ model: 'model-a', reasoningEffort: 'high', workingDir: '/tmp' })),
   getThreadSession: vi.fn(() => null),
   saveSession: vi.fn(),
   saveThreadSession: vi.fn(),
@@ -77,4 +78,81 @@ describe('Command Handlers', () => {
 
     expect(JSON.stringify(result.blocks)).toContain('gpt-5.2-codex');
   });
-}); 
+
+  describe('handleResumeCommand', () => {
+    const codex = {
+      resumeThread: vi.fn(),
+    } as unknown as CodexClient;
+
+    it('returns usage error when no thread id provided', async () => {
+      const result = await handleResumeCommand({ ...baseContext, text: '' }, codex);
+      expect(result.text).toContain('Usage: /resume');
+    });
+
+    it('resumes thread, updates sessions, and includes previous hint', async () => {
+      const mockResumeId = 'thread-123';
+      (codex.resumeThread as vi.Mock).mockResolvedValue({ id: mockResumeId, workingDirectory: '/proj' });
+
+      const { getSession, getThreadSession, saveSession, saveThreadSession } = await import('../../session-manager.js');
+
+      (getSession as vi.Mock).mockReturnValue({
+        threadId: 'old-channel-thread',
+        previousThreadIds: ['c-prev'],
+        workingDir: '/old',
+        approvalPolicy: 'on-request',
+        pathConfigured: true,
+        configuredPath: '/old',
+        configuredBy: 'U0',
+        configuredAt: 1,
+      });
+
+      (getThreadSession as vi.Mock).mockReturnValue({
+        threadId: 'old-thread-thread',
+        previousThreadIds: ['t-prev'],
+        workingDir: '/t-old',
+        approvalPolicy: 'on-request',
+        pathConfigured: true,
+        configuredPath: '/t-old',
+        configuredBy: 'U9',
+        configuredAt: 2,
+      });
+
+      const result = await handleResumeCommand(
+        { ...baseContext, text: mockResumeId },
+        codex
+      );
+
+      expect(codex.resumeThread).toHaveBeenCalledWith(mockResumeId);
+
+      expect(saveSession).toHaveBeenCalled();
+      const channelArgs = (saveSession as vi.Mock).mock.calls[0][1];
+      expect(channelArgs.threadId).toBe(mockResumeId);
+      expect(channelArgs.previousThreadIds).toContain('old-channel-thread');
+      expect(channelArgs.configuredPath).toBe('/proj');
+
+      expect(saveThreadSession).toHaveBeenCalled();
+      const threadArgs = (saveThreadSession as vi.Mock).mock.calls[0][2];
+      expect(threadArgs.threadId).toBe(mockResumeId);
+      expect(threadArgs.previousThreadIds).toContain('old-thread-thread');
+      expect(threadArgs.configuredPath).toBe('/proj');
+
+      expect(result.text).toContain('Resumed session');
+      expect(result.text).toContain(mockResumeId);
+      expect(result.text).toContain('/proj');
+      const blocksJson = JSON.stringify(result.blocks);
+      expect(blocksJson).toContain('Previous session');
+    });
+
+    it('surfaces errors from Codex resumeThread', async () => {
+      (codex.resumeThread as vi.Mock).mockRejectedValue(new Error('not found'));
+
+      const result = await handleResumeCommand(
+        { ...baseContext, text: 'bad-id' },
+        codex
+      );
+
+      expect(result.text).toContain('Failed to resume session');
+      expect(result.text).toContain('not found');
+    });
+  });
+});

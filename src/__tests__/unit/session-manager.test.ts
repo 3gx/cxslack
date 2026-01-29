@@ -671,6 +671,8 @@ describe('Session Manager', () => {
               configuredPath: null,
               configuredBy: null,
               configuredAt: null,
+              lastUsage: { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 0, contextWindow: 1000, model: 'm' },
+              turns: [{ turnId: 't1', turnIndex: 0, slackTs: '1' }],
             },
           },
         })
@@ -686,6 +688,8 @@ describe('Session Manager', () => {
       expect(writtenData.channels.C123.threadId).toBeNull();
       expect(writtenData.channels.C123.previousThreadIds).toContain('thread-123');
       expect(writtenData.channels.C123.previousThreadIds).toContain('thread-100');
+      expect(writtenData.channels.C123.lastUsage).toBeUndefined();
+      expect(writtenData.channels.C123.turns).toEqual([]);
     });
   });
 });

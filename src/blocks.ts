@@ -810,6 +810,55 @@ export function buildTextBlocks(text: string): Block[] {
   return blocks;
 }
 
+// ============================================================================
+// Resume Confirmation Blocks
+// ============================================================================
+
+export interface ResumeConfirmationParams {
+  resumedThreadId: string;
+  workingDir: string;
+  previousThreadId?: string;
+}
+
+/**
+ * Build blocks for a resume confirmation message.
+ * Mirrors ccslack style with bookmark affordances and a clear next-step hint.
+ */
+export function buildResumeConfirmationBlocks(params: ResumeConfirmationParams): Block[] {
+  const { resumedThreadId, workingDir, previousThreadId } = params;
+  const blocks: Block[] = [];
+
+  blocks.push({
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text: `:bookmark_tabs: Resumed session \`${resumedThreadId}\` in \`${workingDir}\``,
+    },
+  });
+
+  if (previousThreadId) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:bookmark: Previous session: \`${previousThreadId}\`\n• _Use_ \`/resume ${previousThreadId}\` _to return_`,
+      },
+    });
+  }
+
+  blocks.push({
+    type: 'context',
+    elements: [
+      {
+        type: 'mrkdwn',
+        text: 'Your next message will continue this session.',
+      },
+    ],
+  });
+
+  return blocks;
+}
+
 /**
  * Build blocks for an error message.
  */

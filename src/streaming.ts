@@ -145,6 +145,10 @@ interface StreamingState {
   cacheReadInputTokens: number;
   /** Cache creation input tokens (if provided) */
   cacheCreationInputTokens: number;
+  /** Baseline cumulative tokens at turn start (to compute deltas) */
+  baseInputTokens?: number;
+  baseOutputTokens?: number;
+  baseCacheCreationInputTokens?: number;
   /** Context window size (if provided) */
   contextWindow?: number;
   /** Max output tokens (if provided) */
@@ -564,11 +568,15 @@ export class StreamingManager {
           // Save lastUsage to BOTH channel and thread sessions for /status command
           // (Channel session is needed when /status is called from main channel @bot mentions)
           if (status === 'completed') {
+            // Compute per-turn deltas to avoid cumulative totals from resumed sessions
+            const adjInput = Math.max(0, state.inputTokens - (state.baseInputTokens ?? 0));
+            const adjOutput = Math.max(0, state.outputTokens - (state.baseOutputTokens ?? 0));
+            const adjCacheCreation = Math.max(0, state.cacheCreationInputTokens - (state.baseCacheCreationInputTokens ?? 0));
             const lastUsage: LastUsage = {
-              inputTokens: state.inputTokens,
-              outputTokens: state.outputTokens,
+              inputTokens: adjInput,
+              outputTokens: adjOutput,
               cacheReadInputTokens: state.cacheReadInputTokens,
-              cacheCreationInputTokens: state.cacheCreationInputTokens,
+              cacheCreationInputTokens: adjCacheCreation || undefined,
               contextWindow: state.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
               model: found.context.model || 'unknown',
               maxOutputTokens: state.maxOutputTokens,
@@ -774,6 +782,17 @@ export class StreamingManager {
       for (const [, state] of this.states) {
         if (state.isStreaming) {
           // VERIFIED: Codex sends CUMULATIVE TOTALS, not deltas (test-token-accumulation.ts)
+          // Capture baseline on first token update so we can compute deltas per turn
+          if (state.baseInputTokens === undefined) {
+            state.baseInputTokens = inputTokens;
+          }
+          if (state.baseOutputTokens === undefined) {
+            state.baseOutputTokens = outputTokens;
+          }
+          if (state.baseCacheCreationInputTokens === undefined && cacheCreationInputTokens !== undefined) {
+            state.baseCacheCreationInputTokens = cacheCreationInputTokens;
+          }
+
           state.inputTokens = inputTokens;
           state.outputTokens = outputTokens;
           if (cacheReadInputTokens !== undefined) {
@@ -861,7 +880,9 @@ export class StreamingManager {
       // Compute context usage - VERIFIED from Codex API:
       // total_tokens = input_tokens + output_tokens
       // (cached_input_tokens is a SUBSET of input_tokens, not additional)
-      const contextTokens = state.inputTokens + state.outputTokens;
+      const adjInput = Math.max(0, state.inputTokens - (state.baseInputTokens ?? 0));
+      const adjOutput = Math.max(0, state.outputTokens - (state.baseOutputTokens ?? 0));
+      const contextTokens = adjInput + adjOutput;
       const contextWindow = state.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
       const contextPercent =
         contextTokens > 0
@@ -884,6 +905,8 @@ export class StreamingManager {
 
       const includeFinalStats = state.status !== 'running';
       const hasTokenCounts = state.inputTokens > 0 || state.outputTokens > 0;
+      const inputTokensForStats = includeFinalStats && hasTokenCounts ? adjInput : undefined;
+      const outputTokensForStats = includeFinalStats && hasTokenCounts ? adjOutput : undefined;
 
       const blocks = buildActivityBlocks({
         activityText: activityText || ':gear: Starting...',
@@ -902,8 +925,8 @@ export class StreamingManager {
         // that Codex does NOT provide. See blocks.ts for details.
         // compactPercent,
         // tokensToCompact,
-        inputTokens: includeFinalStats && hasTokenCounts ? state.inputTokens : undefined,
-        outputTokens: includeFinalStats && hasTokenCounts ? state.outputTokens : undefined,
+        inputTokens: inputTokensForStats,
+        outputTokens: outputTokensForStats,
         costUsd: includeFinalStats ? state.costUsd : undefined,
         spinner,
       });
