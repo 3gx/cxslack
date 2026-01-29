@@ -37,6 +37,22 @@ export interface ActivityEntry {
   durationMs?: number;
   message?: string;
   charCount?: number;
+
+  // Result metrics (computed from input for Edit/Write, from output for Bash)
+  lineCount?: number;           // Read/Write/Bash: lines in result/content
+  matchCount?: number;          // Grep/Glob: number of matches/files (if available)
+  linesAdded?: number;          // Edit: lines in new_string
+  linesRemoved?: number;        // Edit: lines in old_string
+
+  // Tool output (only available for Bash commands via command:output events)
+  toolOutput?: string;               // Full output (up to 50KB)
+  toolOutputPreview?: string;        // First 300 chars for display
+  toolOutputTruncated?: boolean;     // True if output was truncated
+  toolIsError?: boolean;             // True if tool returned error (exit code != 0)
+  toolErrorMessage?: string;         // Error message if failed
+
+  // In-progress tracking for thinking
+  thinkingInProgress?: boolean;      // True while thinking is streaming
 }
 
 /**

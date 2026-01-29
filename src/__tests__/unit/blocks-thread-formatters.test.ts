@@ -14,6 +14,12 @@ import {
   formatThreadThinkingMessage,
   formatThreadResponseMessage,
   formatThreadErrorMessage,
+  formatToolDetails,
+  formatToolResultSummary,
+  formatOutputPreview,
+  normalizeToolName,
+  getToolEmoji,
+  formatThreadActivityEntry,
 } from '../../blocks.js';
 import type { ActivityEntry } from '../../activity-thread.js';
 
@@ -292,7 +298,7 @@ describe('formatThreadStartingMessage', () => {
 describe('formatThreadThinkingMessage', () => {
   it('formats thinking with duration', () => {
     const result = formatThreadThinkingMessage('Thinking content', 5000);
-    expect(result).toContain(':brain:');
+    expect(result).toContain(':bulb:');  // Changed from :brain: to match ccslack
     expect(result).toContain('Thinking');
     expect(result).toContain('5.0s');
   });
@@ -305,7 +311,7 @@ describe('formatThreadThinkingMessage', () => {
 
   it('works without duration', () => {
     const result = formatThreadThinkingMessage('Content');
-    expect(result).toContain(':brain:');
+    expect(result).toContain(':bulb:');  // Changed from :brain: to match ccslack
     expect(result).toContain('Thinking');
     expect(result).not.toContain('undefined');
   });
@@ -332,5 +338,291 @@ describe('formatThreadErrorMessage', () => {
     expect(result).toContain(':x:');
     expect(result).toContain('Error');
     expect(result).toContain('Connection failed');
+  });
+});
+
+// ============================================================================
+// NEW TESTS: Tool-specific formatting (ccslack parity)
+// ============================================================================
+
+describe('normalizeToolName', () => {
+  it('returns simple name unchanged', () => {
+    expect(normalizeToolName('Read')).toBe('Read');
+    expect(normalizeToolName('Edit')).toBe('Edit');
+  });
+
+  it('extracts name from MCP-style names', () => {
+    expect(normalizeToolName('mcp__claude-code__Read')).toBe('Read');
+    expect(normalizeToolName('mcp__server__ToolName')).toBe('ToolName');
+  });
+});
+
+describe('getToolEmoji', () => {
+  it('returns correct emoji for known tools', () => {
+    expect(getToolEmoji('Read')).toBe(':mag:');
+    expect(getToolEmoji('Edit')).toBe(':memo:');
+    expect(getToolEmoji('Bash')).toBe(':computer:');
+    expect(getToolEmoji('Task')).toBe(':robot_face:');
+  });
+
+  it('returns default emoji for unknown tools', () => {
+    expect(getToolEmoji('UnknownTool')).toBe(':gear:');
+  });
+});
+
+describe('formatToolInputSummary (tool-specific)', () => {
+  it('formats file path for Read/Edit/Write', () => {
+    expect(formatToolInputSummary('Read', { file_path: '/src/index.ts' })).toBe(' `/src/index.ts`');
+    expect(formatToolInputSummary('Edit', { file_path: '/long/path/to/file.ts' })).toContain('file.ts');
+    expect(formatToolInputSummary('Write', { file_path: '/config.json' })).toBe(' `/config.json`');
+  });
+
+  it('formats pattern for Grep/Glob', () => {
+    expect(formatToolInputSummary('Grep', { pattern: 'function.*test' })).toContain('"function.*test"');
+    expect(formatToolInputSummary('Glob', { pattern: '**/*.ts' })).toContain('**/*.ts');
+  });
+
+  it('formats command for Bash', () => {
+    expect(formatToolInputSummary('Bash', { command: 'npm test' })).toContain('npm test');
+  });
+
+  it('formats Task with subagent type and description', () => {
+    const result = formatToolInputSummary('Task', { subagent_type: 'Explore', description: 'Find tests' });
+    expect(result).toContain(':Explore');
+    expect(result).toContain('"Find tests"');
+  });
+
+  it('formats TodoWrite with status counts', () => {
+    const todos = [
+      { content: 'Task 1', status: 'completed', activeForm: 'Doing 1' },
+      { content: 'Task 2', status: 'in_progress', activeForm: 'Doing 2' },
+      { content: 'Task 3', status: 'pending', activeForm: 'Doing 3' },
+    ];
+    const result = formatToolInputSummary('TodoWrite', { todos });
+    expect(result).toContain('1✓');
+    expect(result).toContain('1→');
+    expect(result).toContain('1☐');
+  });
+
+  it('returns empty for AskUserQuestion', () => {
+    expect(formatToolInputSummary('AskUserQuestion', { question: 'What?' })).toBe('');
+  });
+
+  it('handles string input (legacy)', () => {
+    expect(formatToolInputSummary('Read', '/path/to/file.ts')).toContain('/path/to/file.ts');
+  });
+
+  it('truncates long paths', () => {
+    const longPath = '/very/long/path/to/some/deeply/nested/directory/structure/file.ts';
+    const result = formatToolInputSummary('Read', { file_path: longPath });
+    expect(result.length).toBeLessThan(50);
+    expect(result).toContain('file.ts');
+  });
+});
+
+describe('formatToolResultSummary', () => {
+  it('formats match count', () => {
+    const entry: ActivityEntry = { type: 'tool_complete', timestamp: Date.now(), matchCount: 5 };
+    expect(formatToolResultSummary(entry)).toBe(' → 5 matches');
+  });
+
+  it('formats single match', () => {
+    const entry: ActivityEntry = { type: 'tool_complete', timestamp: Date.now(), matchCount: 1 };
+    expect(formatToolResultSummary(entry)).toBe(' → 1 match');
+  });
+
+  it('formats line count', () => {
+    const entry: ActivityEntry = { type: 'tool_complete', timestamp: Date.now(), lineCount: 42 };
+    expect(formatToolResultSummary(entry)).toBe(' (42 lines)');
+  });
+
+  it('formats edit diff', () => {
+    const entry: ActivityEntry = { type: 'tool_complete', timestamp: Date.now(), linesAdded: 10, linesRemoved: 5 };
+    expect(formatToolResultSummary(entry)).toBe(' (+10/-5)');
+  });
+
+  it('returns empty for no metrics', () => {
+    const entry: ActivityEntry = { type: 'tool_complete', timestamp: Date.now() };
+    expect(formatToolResultSummary(entry)).toBe('');
+  });
+});
+
+describe('formatToolDetails (bullet points)', () => {
+  it('formats Edit with line changes', () => {
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Edit',
+      toolInput: { file_path: '/src/app.ts', old_string: 'old', new_string: 'new\nline' },
+      linesAdded: 2,
+      linesRemoved: 1,
+      durationMs: 1500,
+    };
+    const details = formatToolDetails(entry);
+    expect(details).toContain('Changed: +2/-1 lines');
+    expect(details).toContain('Duration: 1.5s');
+  });
+
+  it('formats Write with line count', () => {
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Write',
+      lineCount: 50,
+      durationMs: 200,
+    };
+    const details = formatToolDetails(entry);
+    expect(details).toContain('Wrote: 50 lines');
+  });
+
+  it('formats Bash with command and output', () => {
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Bash',
+      toolInput: { command: 'npm test' },
+      toolOutputPreview: 'Test passed',
+      durationMs: 5000,
+    };
+    const details = formatToolDetails(entry);
+    expect(details.some(d => d.includes('npm test'))).toBe(true);
+    expect(details.some(d => d.includes('Output:'))).toBe(true);
+    expect(details).toContain('Duration: 5.0s');
+  });
+
+  it('formats Grep with path and matches', () => {
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Grep',
+      toolInput: { pattern: 'test', path: '/src' },
+      matchCount: 15,
+    };
+    const details = formatToolDetails(entry);
+    expect(details.some(d => d.includes('Path:'))).toBe(true);
+    expect(details.some(d => d.includes('Found: 15 matches'))).toBe(true);
+  });
+
+  it('formats Task with subagent type', () => {
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Task',
+      toolInput: { subagent_type: 'Explore', description: 'Search codebase' },
+    };
+    const details = formatToolDetails(entry);
+    expect(details.some(d => d.includes('Type: Explore'))).toBe(true);
+    expect(details.some(d => d.includes('Task: Search codebase'))).toBe(true);
+  });
+
+  it('includes error message when tool failed', () => {
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Bash',
+      toolIsError: true,
+      toolErrorMessage: 'Command not found',
+    };
+    const details = formatToolDetails(entry);
+    expect(details.some(d => d.includes('Error:') && d.includes('Command not found'))).toBe(true);
+  });
+
+  it('returns only duration for AskUserQuestion', () => {
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'AskUserQuestion',
+      durationMs: 10000,
+    };
+    const details = formatToolDetails(entry);
+    expect(details).toEqual(['Duration: 10.0s']);
+  });
+});
+
+describe('formatOutputPreview', () => {
+  it('formats Bash output with backticks', () => {
+    const result = formatOutputPreview('Bash', 'npm test passed');
+    expect(result).toBe('`npm test passed`');
+  });
+
+  it('truncates long Bash output', () => {
+    const longOutput = 'A'.repeat(200);
+    const result = formatOutputPreview('Bash', longOutput);
+    expect(result.length).toBeLessThan(160);
+    expect(result).toContain('...');
+  });
+
+  it('formats Grep matches as list', () => {
+    const grepOutput = 'file1.ts:10:match1\nfile2.ts:20:match2\nfile3.ts:30:match3';
+    const result = formatOutputPreview('Grep', grepOutput);
+    expect(result).toContain('`file1.ts:10:match1`');
+    expect(result).toContain('`file2.ts:20:match2`');
+  });
+
+  it('handles empty output', () => {
+    expect(formatOutputPreview('Bash', '')).toBe('');
+    expect(formatOutputPreview('Bash', '   \n  ')).toBe('');
+  });
+
+  it('strips control characters', () => {
+    const result = formatOutputPreview('Bash', 'clean\x00output');
+    expect(result).not.toContain('\x00');
+  });
+});
+
+describe('formatThreadActivityEntry with metrics', () => {
+  it('formats tool_complete with bullet points', () => {
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Edit',
+      toolInput: { file_path: '/src/app.ts' },
+      linesAdded: 5,
+      linesRemoved: 3,
+      durationMs: 1000,
+    };
+    const result = formatThreadActivityEntry(entry);
+    expect(result).toContain(':white_check_mark:');
+    expect(result).toContain('Edit');
+    expect(result).toContain('• Changed: +5/-3 lines');
+    expect(result).toContain('• Duration: 1.0s');
+  });
+
+  it('formats thinking with bulb emoji and in-progress indicator', () => {
+    const entry: ActivityEntry = {
+      type: 'thinking',
+      timestamp: Date.now(),
+      charCount: 500,
+      thinkingInProgress: true,
+    };
+    const result = formatThreadActivityEntry(entry);
+    expect(result).toContain(':bulb:');
+    expect(result).toContain('Thinking...');
+    expect(result).toContain('500 chars');
+  });
+
+  it('formats generating with speech balloon emoji', () => {
+    const entry: ActivityEntry = {
+      type: 'generating',
+      timestamp: Date.now(),
+      charCount: 1000,
+      durationMs: 2000,
+    };
+    const result = formatThreadActivityEntry(entry);
+    expect(result).toContain(':speech_balloon:');
+    expect(result).toContain('Generating');
+    expect(result).toContain('1000 chars');
+  });
+
+  it('formats error with colon after Error', () => {
+    const entry: ActivityEntry = {
+      type: 'error',
+      timestamp: Date.now(),
+      message: 'Connection timeout',
+    };
+    const result = formatThreadActivityEntry(entry);
+    expect(result).toContain(':x:');
+    expect(result).toContain('*Error:*');
+    expect(result).toContain('Connection timeout');
   });
 });

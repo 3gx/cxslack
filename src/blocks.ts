@@ -410,6 +410,8 @@ export function buildActivityEntryBlocks(params: ActivityEntryBlockParams): Bloc
 }
 
 // Helper for mapping tool/thinking entries to block actions in thread activity
+// NOTE: Fork button should ONLY appear on the main activity/status panel (buildActivityBlocks),
+// NOT on individual per-entry thread posts. This matches ccslack behavior.
 export function buildActivityEntryActionParams(
   entry: import('./activity-thread.js').ActivityEntry,
   conversationKey: string,
@@ -417,8 +419,9 @@ export function buildActivityEntryActionParams(
   slackTs: string,
   includeAttachThinking: boolean
 ): ActivityEntryActionParams | undefined {
-  // Only show fork on entries tied to a turn index we can resume from
-  const includeFork = Number.isInteger(turnIndex) && turnIndex >= 0;
+  // Fork button is DISABLED on per-entry posts - it should only appear on the status panel
+  // This matches ccslack behavior where fork is only on the main activity message
+  const includeFork = false;
   const isThinking = entry.type === 'thinking';
   if (!includeFork && !(includeAttachThinking && isThinking)) {
     return undefined;
@@ -1507,36 +1510,270 @@ const THREAD_TOOL_EMOJI: Record<string, string> = {
   CommandExecution: ':computer:',
   FileRead: ':mag:',
   FileWrite: ':memo:',
+  TodoWrite: ':clipboard:',
+  WebSearch: ':mag:',
+  NotebookEdit: ':notebook:',
+  Skill: ':zap:',
+  AskUserQuestion: ':question:',
 };
+
+// ============================================================================
+// Tool Formatting Helpers (ported from ccslack)
+// ============================================================================
+
+function truncatePath(path: string, maxLen: number): string {
+  if (path.length <= maxLen) return path;
+  const parts = path.split('/');
+  if (parts.length <= 2) return path.slice(-maxLen);
+  // Keep last 2 segments
+  const lastTwo = parts.slice(-2).join('/');
+  return lastTwo.length <= maxLen ? lastTwo : '...' + path.slice(-(maxLen - 3));
+}
+
+function truncateText(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return text.slice(0, maxLen - 3) + '...';
+}
+
+function truncateUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const path = u.pathname.length > 20 ? u.pathname.slice(0, 17) + '...' : u.pathname;
+    return u.hostname + path;
+  } catch {
+    return truncateText(url, 35);
+  }
+}
+
+/**
+ * Normalize tool name for comparison.
+ * Handles MCP-style names like "mcp__claude-code__Read" -> "Read"
+ */
+export function normalizeToolName(toolName: string): string {
+  if (!toolName.includes('__')) return toolName;
+  return toolName.split('__').pop()!;
+}
 
 /**
  * Get formatted tool name with emoji.
  */
 export function formatToolName(tool: string): string {
-  const emoji = THREAD_TOOL_EMOJI[tool] || ':gear:';
-  return `${emoji} *${tool}*`;
+  const normalized = normalizeToolName(tool);
+  const emoji = THREAD_TOOL_EMOJI[normalized] || ':gear:';
+  return `${emoji} *${normalized}*`;
 }
 
 /**
- * Format tool input for display (truncated).
- * Handles both string and Record types.
+ * Get emoji for a tool.
  */
-export function formatToolInputSummary(tool: string, input?: string | Record<string, unknown>): string {
+export function getToolEmoji(tool: string): string {
+  const normalized = normalizeToolName(tool);
+  return THREAD_TOOL_EMOJI[normalized] || ':gear:';
+}
+
+/**
+ * Format tool input as compact inline summary for display.
+ * Returns a short string with the key parameter for each tool type.
+ * Ported from ccslack - battle-tested tool-specific formatting.
+ */
+export function formatToolInputSummary(toolName: string, input?: string | Record<string, unknown>): string {
   if (!input) return '';
 
-  // Convert Record to string representation for display
-  let displayStr: string;
+  // Handle string input (legacy format)
   if (typeof input === 'string') {
-    displayStr = input;
-  } else {
-    // For objects (like TodoWrite input), just show the tool name
-    // The actual todos are displayed separately via the todo list
-    return '';
+    const truncated = input.length > 80 ? input.slice(0, 77) + '...' : input;
+    return ` \`${truncated}\``;
   }
 
-  // Truncate to 80 chars max
-  const truncated = displayStr.length > 80 ? displayStr.slice(0, 77) + '...' : displayStr;
-  return ` \`${truncated}\``;
+  const tool = normalizeToolName(toolName).toLowerCase();
+
+  switch (tool) {
+    // Tools with special UI - show tool name only (no input details)
+    case 'askuserquestion':
+      return '';  // Has its own button UI
+
+    case 'read':
+    case 'edit':
+    case 'write':
+      return input.file_path ? ` \`${truncatePath(input.file_path as string, 40)}\`` : '';
+    case 'grep':
+      return input.pattern ? ` \`"${truncateText(input.pattern as string, 25)}"\`` : '';
+    case 'glob':
+      return input.pattern ? ` \`${truncateText(input.pattern as string, 30)}\`` : '';
+    case 'bash':
+    case 'commandexecution':
+      return input.command ? ` \`${truncateText(input.command as string, 35)}\`` : '';
+    case 'task':
+      const subtype = input.subagent_type ? `:${input.subagent_type}` : '';
+      const desc = input.description ? ` "${truncateText(input.description as string, 25)}"` : '';
+      return `${subtype}${desc}`;
+    case 'webfetch':
+      return input.url ? ` \`${truncateUrl(input.url as string)}\`` : '';
+    case 'websearch':
+      return input.query ? ` "${truncateText(input.query as string, 30)}"` : '';
+    case 'todowrite': {
+      const todoItems = Array.isArray(input.todos) ? input.todos.filter(isTodoItem) : [];
+      if (todoItems.length === 0) return '';
+      const completedCnt = todoItems.filter((t: TodoItem) => t.status === 'completed').length;
+      const inProgressCnt = todoItems.filter((t: TodoItem) => t.status === 'in_progress').length;
+      const pendingCnt = todoItems.filter((t: TodoItem) => t.status === 'pending').length;
+      // Build compact status: "3✓ 1→ 5☐" (omit zeros)
+      const parts: string[] = [];
+      if (completedCnt > 0) parts.push(`${completedCnt}✓`);
+      if (inProgressCnt > 0) parts.push(`${inProgressCnt}→`);
+      if (pendingCnt > 0) parts.push(`${pendingCnt}☐`);
+      return parts.length > 0 ? ` ${parts.join(' ')}` : '';
+    }
+    case 'notebookedit':
+      return input.notebook_path ? ` \`${truncatePath(input.notebook_path as string, 35)}\`` : '';
+    case 'skill':
+      return input.skill ? ` \`${input.skill}\`` : '';
+    default:
+      // Generic fallback: show first meaningful string parameter
+      const firstParam = Object.entries(input)
+        .find(([k, v]) => typeof v === 'string' && v.length > 0 && v.length < 50 && !k.startsWith('_'));
+      if (firstParam) {
+        return ` \`${truncateText(String(firstParam[1]), 30)}\``;
+      }
+      return '';
+  }
+}
+
+/**
+ * Format result metrics as inline summary for display.
+ * Shows line counts, match counts, or edit diff depending on tool type.
+ */
+export function formatToolResultSummary(entry: ActivityEntry): string {
+  if (entry.matchCount !== undefined) {
+    return ` → ${entry.matchCount} ${entry.matchCount === 1 ? 'match' : 'matches'}`;
+  }
+  if (entry.lineCount !== undefined) {
+    return ` (${entry.lineCount} lines)`;
+  }
+  if (entry.linesAdded !== undefined || entry.linesRemoved !== undefined) {
+    return ` (+${entry.linesAdded || 0}/-${entry.linesRemoved || 0})`;
+  }
+  return '';
+}
+
+/**
+ * Format tool output preview for display.
+ * Handles different tool types with appropriate formatting.
+ */
+export function formatOutputPreview(tool: string, preview: string): string {
+  const cleaned = preview.replace(/[\x00-\x1F\x7F]/g, '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return '';
+
+  const toolLower = normalizeToolName(tool).toLowerCase();
+  switch (toolLower) {
+    case 'bash':
+    case 'commandexecution':
+      return `\`${cleaned.slice(0, 150)}\`${cleaned.length > 150 ? '...' : ''}`;
+    case 'grep':
+    case 'glob':
+      const matches = preview.split('\n').filter(l => l.trim()).slice(0, 3);
+      return matches.length ? matches.map(m => `\`${m.slice(0, 50)}\``).join(', ') : 'No matches';
+    case 'read':
+      return `\`${cleaned.slice(0, 100)}\`${cleaned.length > 100 ? '...' : ''}`;
+    default:
+      return cleaned.length > 100 ? cleaned.slice(0, 100) + '...' : cleaned;
+  }
+}
+
+/**
+ * Format tool details as bullet points for thread display.
+ * Returns an array of detail lines to be prefixed with "• ".
+ * Ported from ccslack - comprehensive tool-specific details.
+ */
+export function formatToolDetails(entry: ActivityEntry): string[] {
+  const details: string[] = [];
+  const tool = normalizeToolName(entry.tool || '').toLowerCase();
+  const input = typeof entry.toolInput === 'object' ? entry.toolInput as Record<string, unknown> : undefined;
+
+  // Tools with special UI - show duration only
+  if (tool === 'askuserquestion') {
+    if (entry.durationMs !== undefined) {
+      details.push(`Duration: ${(entry.durationMs / 1000).toFixed(1)}s`);
+    }
+    return details;
+  }
+
+  if (tool === 'read' && entry.lineCount !== undefined) {
+    details.push(`Read: ${entry.lineCount} lines`);
+  }
+  if (tool === 'edit' && (entry.linesAdded !== undefined || entry.linesRemoved !== undefined)) {
+    details.push(`Changed: +${entry.linesAdded || 0}/-${entry.linesRemoved || 0} lines`);
+  }
+  if (tool === 'write' && entry.lineCount !== undefined) {
+    details.push(`Wrote: ${entry.lineCount} lines`);
+  }
+  if (tool === 'grep') {
+    if (input?.path) details.push(`Path: \`${input.path}\``);
+    if (entry.matchCount !== undefined) details.push(`Found: ${entry.matchCount} matches`);
+  }
+  if (tool === 'glob' && entry.matchCount !== undefined) {
+    details.push(`Found: ${entry.matchCount} files`);
+  }
+  if ((tool === 'bash' || tool === 'commandexecution') && input?.command) {
+    details.push(`Command: \`${truncateText(input.command as string, 60)}\``);
+  }
+  if (tool === 'task') {
+    if (input?.subagent_type) details.push(`Type: ${input.subagent_type}`);
+    if (input?.description) details.push(`Task: ${truncateText(input.description as string, 50)}`);
+  }
+  if (tool === 'websearch') {
+    if (input?.query) details.push(`Query: "${truncateText(input.query as string, 40)}"`);
+  }
+  if (tool === 'todowrite') {
+    const todoItems = Array.isArray(input?.todos) ? input.todos.filter(isTodoItem) : [];
+    if (todoItems.length > 0) {
+      const completedCnt = todoItems.filter((t: TodoItem) => t.status === 'completed').length;
+      const inProgressItems = todoItems.filter((t: TodoItem) => t.status === 'in_progress');
+      const pendingCnt = todoItems.filter((t: TodoItem) => t.status === 'pending').length;
+      const total = todoItems.length;
+
+      if (completedCnt === total) {
+        details.push(`All tasks completed`);
+      } else {
+        if (completedCnt > 0) details.push(`✓ ${completedCnt} completed`);
+        for (const t of inProgressItems) {
+          const text = t.activeForm || t.content;
+          const truncated = text.length > 40 ? text.slice(0, 37) + '...' : text;
+          details.push(`→ ${truncated}`);
+        }
+        if (pendingCnt > 0) details.push(`☐ ${pendingCnt} pending`);
+      }
+    }
+  }
+
+  // Generic fallback for unknown tools: show first 2 params
+  if (details.length === 0 && input) {
+    const params = Object.entries(input)
+      .filter(([k, v]) => !k.startsWith('_') && v !== undefined && v !== null)
+      .slice(0, 2);
+    for (const [key, value] of params) {
+      const displayValue = typeof value === 'string'
+        ? truncateText(value, 40)
+        : JSON.stringify(value).slice(0, 40);
+      details.push(`${key}: \`${displayValue}\``);
+    }
+  }
+
+  // Add output preview or error message before duration
+  if (entry.toolIsError) {
+    details.push(`:warning: Error: ${entry.toolErrorMessage?.slice(0, 100) || 'Unknown error'}`);
+  } else if (entry.toolOutputPreview) {
+    const outputPreview = formatOutputPreview(tool, entry.toolOutputPreview);
+    if (outputPreview) {
+      details.push(`Output: ${outputPreview}`);
+    }
+  }
+
+  if (entry.durationMs !== undefined) {
+    details.push(`Duration: ${(entry.durationMs / 1000).toFixed(1)}s`);
+  }
+
+  return details;
 }
 
 /**
@@ -1571,27 +1808,47 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
 }
 
 export function formatThreadActivityEntry(entry: ActivityEntry): string {
-  const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
-  const toolEmoji = entry.tool ? THREAD_TOOL_EMOJI[entry.tool] || ':gear:' : ':gear:';
+  const toolEmoji = entry.tool ? getToolEmoji(entry.tool) : ':gear:';
   const toolInput = entry.toolInput ? formatToolInputSummary(entry.tool || '', entry.toolInput) : '';
+  const resultSummary = formatToolResultSummary(entry);
 
   switch (entry.type) {
     case 'starting':
       return ':brain: *Analyzing request...*';
-    case 'thinking':
-      return `:brain: *Thinking*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+    case 'thinking': {
+      // Use :bulb: for thinking (matches ccslack)
+      const thinkingStatus = entry.thinkingInProgress ? '...' : '';
+      const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
+      return `:bulb: *Thinking${thinkingStatus}*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+    }
     case 'tool_start':
-      return `${toolEmoji} *${entry.tool}*${toolInput} [in progress]`;
-    case 'tool_complete':
-      return `:white_check_mark: *${entry.tool}*${toolInput}${duration}`;
-    case 'generating':
-      return `:pencil: *Generating*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+      return `${toolEmoji} *${normalizeToolName(entry.tool || '')}*${toolInput} [in progress]`;
+    case 'tool_complete': {
+      // Format with bullet point details
+      const lines: string[] = [];
+      const header = `:white_check_mark: *${normalizeToolName(entry.tool || '')}*${toolInput}${resultSummary}`;
+      lines.push(header);
+
+      // Add bullet point details
+      const details = formatToolDetails(entry);
+      if (details.length > 0) {
+        lines.push(...details.map(d => `• ${d}`));
+      }
+
+      return lines.join('\n');
+    }
+    case 'generating': {
+      const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
+      return `:speech_balloon: *Generating*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+    }
     case 'error':
-      return `:x: ${entry.message || 'Error'}`;
+      return `:x: *Error:* ${entry.message || 'Unknown error'}`;
     case 'aborted':
       return ':octagonal_sign: *Aborted by user*';
-    default:
+    default: {
+      const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
       return `${toolEmoji} ${entry.message || entry.type}${duration}`;
+    }
   }
 }
 
@@ -1605,11 +1862,12 @@ export function formatThreadStartingMessage(): string {
 /**
  * Format thinking message for thread.
  * Shows duration and character count.
+ * Uses :bulb: emoji (matches ccslack).
  */
 export function formatThreadThinkingMessage(content: string, durationMs?: number): string {
   const durationStr = durationMs ? ` [${(durationMs / 1000).toFixed(1)}s]` : '';
   const charStr = ` _[${content.length} chars]_`;
-  return `:brain: *Thinking*${durationStr}${charStr}`;
+  return `:bulb: *Thinking*${durationStr}${charStr}`;
 }
 
 /**

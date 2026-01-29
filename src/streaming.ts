@@ -166,8 +166,20 @@ interface StreamingState {
   thinkingStartTime: number;
   /** Whether thinking has completed (for display) */
   thinkingComplete: boolean;
+  /** Thinking message ts for in-place updates (ccslack parity) */
+  thinkingMessageTs?: string;
+  /** Last thinking message update time (rate limiting - 2s gap) */
+  lastThinkingUpdateTime: number;
   /** Track active tools by itemId */
-  activeTools: Map<string, { tool: string; input?: string; startTime: number }>;
+  activeTools: Map<string, {
+    tool: string;
+    input?: string;  // Display input (truncated command, file path, etc.)
+    toolInput?: string | Record<string, unknown>;  // Full structured input for metrics
+    startTime: number;
+    // Bash command output accumulation (via command:output events)
+    outputBuffer?: string;
+    exitCode?: number;
+  }>;
   /** The ONE activity message timestamp we update */
   activityMessageTs?: string;
   /** Spinner index for status updates */
@@ -285,6 +297,8 @@ export class StreamingManager {
       thinkingContent: '',
       thinkingStartTime: 0,
       thinkingComplete: false,
+      thinkingMessageTs: undefined,
+      lastThinkingUpdateTime: 0,
       activeTools: new Map(),
       activityMessageTs: context.messageTs, // REUSE initial message!
       spinnerIndex: 0,
@@ -737,9 +751,11 @@ export class StreamingManager {
           }
 
           // Track tool start (only actual tools now)
+          // Store both display input and full toolInput for metrics extraction
           state.activeTools.set(itemId, {
             tool: itemType,
             input: displayInput,
+            toolInput: rawToolInput || displayInput,  // Full input for metrics
             startTime: Date.now(),
           });
 
@@ -798,15 +814,71 @@ export class StreamingManager {
           if (toolInfo) {
             const durationMs = Date.now() - toolInfo.startTime;
 
-            // Add completion entry
-            this.activityManager.addEntry(key, {
+            // Extract metrics from toolInput (ported from ccslack)
+            const entry: ActivityEntry = {
               type: 'tool_complete',
               timestamp: Date.now(),
               tool: toolInfo.tool,
-              toolInput: toolInfo.input,
+              toolInput: toolInfo.toolInput || toolInfo.input,
               toolUseId: itemId,
               durationMs,
-            });
+            };
+
+            // Extract metrics based on tool type
+            const toolLower = (toolInfo.tool || '').toLowerCase();
+            const toolInput = typeof toolInfo.toolInput === 'object' ? toolInfo.toolInput as Record<string, unknown> : undefined;
+
+            // Edit: compute linesAdded/linesRemoved from input
+            if (toolLower === 'edit' && toolInput) {
+              const oldString = (toolInput.old_string as string) || '';
+              const newString = (toolInput.new_string as string) || '';
+              entry.linesRemoved = oldString.split('\n').length;
+              entry.linesAdded = newString.split('\n').length;
+            }
+
+            // Write: compute lineCount from content
+            if (toolLower === 'write' && toolInput) {
+              const content = (toolInput.content as string) || '';
+              entry.lineCount = content.split('\n').length;
+            }
+
+            // Bash/CommandExecution: store output and exit code
+            if ((toolLower === 'bash' || toolLower === 'commandexecution') && toolInfo.outputBuffer) {
+              const output = toolInfo.outputBuffer;
+              const MAX_PREVIEW = 300;
+
+              // Check for binary content
+              const isBinary = /[\x00-\x08\x0E-\x1A\x1C-\x1F]/.test(output.slice(0, 1000));
+              if (isBinary) {
+                entry.toolOutputPreview = '[Binary content]';
+              } else {
+                entry.toolOutput = output;
+                entry.toolOutputTruncated = output.length >= 50 * 1024;
+
+                // Strip ANSI codes for clean preview
+                const cleaned = output.replace(/\x1B\[[0-9;]*m/g, '');
+                if (cleaned.length === 0) {
+                  entry.toolOutputPreview = '[No output]';
+                } else {
+                  entry.toolOutputPreview = cleaned.slice(0, MAX_PREVIEW);
+                  if (cleaned.length > MAX_PREVIEW) {
+                    entry.toolOutputPreview += '...';
+                  }
+                }
+
+                // Line count from output
+                entry.lineCount = cleaned.split('\n').filter(l => l.length > 0).length;
+              }
+
+              // Exit code indicates error
+              if (toolInfo.exitCode !== undefined && toolInfo.exitCode !== 0) {
+                entry.toolIsError = true;
+                entry.toolErrorMessage = `Exit code ${toolInfo.exitCode}`;
+              }
+            }
+
+            // Add the entry with metrics
+            this.activityManager.addEntry(key, entry);
 
             state.activeTools.delete(itemId);
 
@@ -847,6 +919,40 @@ export class StreamingManager {
       }
     });
 
+    // Command output (Bash execution output streaming)
+    this.codex.on('command:output', ({ itemId, delta }) => {
+      for (const [, state] of this.states) {
+        if (state.isStreaming) {
+          const toolInfo = state.activeTools.get(itemId);
+          if (toolInfo) {
+            // Accumulate output (up to 50KB)
+            const MAX_OUTPUT = 50 * 1024;
+            const current = toolInfo.outputBuffer || '';
+            if (current.length < MAX_OUTPUT) {
+              toolInfo.outputBuffer = current + delta;
+              if (toolInfo.outputBuffer.length > MAX_OUTPUT) {
+                toolInfo.outputBuffer = toolInfo.outputBuffer.slice(0, MAX_OUTPUT);
+              }
+            }
+          }
+          break;
+        }
+      }
+    });
+
+    // Command completed (Bash execution finished with exit code)
+    this.codex.on('command:completed', ({ itemId, exitCode }) => {
+      for (const [, state] of this.states) {
+        if (state.isStreaming) {
+          const toolInfo = state.activeTools.get(itemId);
+          if (toolInfo) {
+            toolInfo.exitCode = exitCode;
+          }
+          break;
+        }
+      }
+    });
+
     // Item delta (streaming response text) - JUST ACCUMULATE, timer handles updates
     this.codex.on('item:delta', ({ itemId, delta }) => {
       for (const [key, state] of this.states) {
@@ -858,52 +964,81 @@ export class StreamingManager {
       }
     });
 
-    // Thinking delta (reasoning content) - JUST ACCUMULATE, timer handles updates
+    // Thinking delta (reasoning content) - IN-PLACE UPDATES like ccslack
+    // On first delta: post placeholder message, save ts
+    // On subsequent deltas: update in-place with rolling tail (rate-limited 2s)
     this.codex.on('thinking:delta', ({ content }) => {
       for (const [key, state] of this.states) {
         if (state.isStreaming) {
-          if (!state.thinkingStartTime) {
+          const context = this.contexts.get(key);
+          const isFirstDelta = !state.thinkingStartTime;
+
+          if (isFirstDelta) {
             state.thinkingStartTime = Date.now();
             // Add thinking entry (will be updated by timer)
             this.activityManager.addEntry(key, {
               type: 'thinking',
               timestamp: Date.now(),
+              thinkingInProgress: true,
             });
+
+            // Post placeholder to thread (ccslack parity)
+            if (context) {
+              const threadTs = state.threadParentTs || context.originalTs;
+              withSlackRetry(
+                () => this.slack.chat.postMessage({
+                  channel: context.channelId,
+                  thread_ts: threadTs,
+                  text: ':bulb: *Thinking...*',
+                }),
+                'thinking.placeholder'
+              ).then((result) => {
+                state.thinkingMessageTs = (result as any).ts;
+                console.log(`[streaming] Posted thinking placeholder: ${state.thinkingMessageTs}`);
+              }).catch((err) => {
+                console.error('[streaming] Failed to post thinking placeholder:', err);
+              });
+            }
           }
+
           state.thinkingContent += content;
-          // Update char count on latest thinking entry for display
+
+          // Update char count on latest thinking entry
           const entries = this.activityManager.getEntries(key);
           for (let i = entries.length - 1; i >= 0; i--) {
             if (entries[i].type === 'thinking') {
               entries[i].charCount = state.thinkingContent.length;
+              entries[i].thinkingInProgress = true;
               break;
             }
           }
-          // Post thinking batch to thread to make it visible
-          const context = this.contexts.get(key);
-          if (context) {
-            const ti = state.turnIndex ?? context.turnIndex ?? this.nextTurnIndex(key, context.threadTs);
-            flushActivityBatchToThread(
-              this.activityManager,
-              key,
-              this.slack,
-              context.channelId,
-              state.threadParentTs || context.originalTs,
-              {
-                force: false,
-                mapActivityTs: (ts) => {
-                  const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
-                  const messageTurnMap = threadSession?.messageTurnMap || {};
-                  messageTurnMap[ts] = context.turnId;
-                  saveThreadSession(context.channelId, context.threadTs || context.originalTs, {
-                    messageTurnMap,
-                    turnCounter: ti + 1,
-                  }).catch((err) => console.error('[streaming] Failed to save messageTurnMap:', err));
-                },
-                buildActions: (entry, slackTs) =>
-                  buildActivityEntryActionParams(entry, key, ti, slackTs || context.originalTs, true),
-              }
-            ).catch((err) => console.error('[streaming] Thread batch post failed:', err));
+
+          // Update thinking message in-place (rate-limited 2s gap)
+          const now = Date.now();
+          const THINKING_UPDATE_INTERVAL_MS = 2000;
+          if (state.thinkingMessageTs && context && now - state.lastThinkingUpdateTime >= THINKING_UPDATE_INTERVAL_MS) {
+            state.lastThinkingUpdateTime = now;
+            const elapsedSec = Math.round((now - state.thinkingStartTime) / 1000);
+            const charCount = state.thinkingContent.length;
+
+            // Extract tail with formatting preserved (last 500 chars)
+            const TAIL_SIZE = 500;
+            let preview = state.thinkingContent;
+            if (preview.length > TAIL_SIZE) {
+              preview = '...' + preview.slice(-TAIL_SIZE);
+            }
+
+            // Update in-place (fire-and-forget to avoid blocking)
+            withSlackRetry(
+              () => this.slack.chat.update({
+                channel: context.channelId,
+                ts: state.thinkingMessageTs!,
+                text: `:bulb: *Thinking...* [${elapsedSec}s] _${charCount} chars_\n> ${preview.split('\n').slice(0, 5).join('\n> ')}`,
+              }),
+              'thinking.update'
+            ).catch((err) => {
+              console.error('[streaming] Failed to update thinking message:', err);
+            });
           }
           break;
         }
