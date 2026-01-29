@@ -17,6 +17,7 @@ import {
   buildErrorBlocks,
   buildUnifiedStatusLine,
   buildAbortConfirmationModalView,
+  buildForkToChannelModalView,
   buildActivityBlocks,
   buildModelSelectionBlocks,
   buildReasoningSelectionBlocks,
@@ -549,6 +550,64 @@ describe('Block Kit Builders', () => {
 
       expect(modal.blocks).toHaveLength(1);
       expect(modal.blocks[0].text?.text).toContain('interrupt');
+    });
+  });
+
+  describe('buildForkToChannelModalView', () => {
+    const baseParams = {
+      sourceChannelId: 'C123',
+      sourceChannelName: 'general',
+      sourceMessageTs: '123.456',
+      sourceThreadTs: '789.012',
+      conversationKey: 'C123:789.012',
+      turnIndex: 3,
+    };
+
+    it('builds a modal with correct callback_id', () => {
+      const modal = buildForkToChannelModalView(baseParams);
+
+      expect(modal.type).toBe('modal');
+      expect(modal.callback_id).toBe('fork_to_channel_modal');
+    });
+
+    it('includes source params in private_metadata', () => {
+      const modal = buildForkToChannelModalView(baseParams);
+      const metadata = JSON.parse(modal.private_metadata);
+
+      expect(metadata.sourceChannelId).toBe('C123');
+      expect(metadata.sourceChannelName).toBe('general');
+      expect(metadata.turnIndex).toBe(3);
+      expect(metadata.conversationKey).toBe('C123:789.012');
+    });
+
+    it('pre-fills channel name with -fork suffix', () => {
+      const modal = buildForkToChannelModalView(baseParams);
+
+      // Find the input block
+      const inputBlock = modal.blocks.find((b) => b.type === 'input') as { element?: { initial_value?: string } };
+      expect(inputBlock).toBeDefined();
+      expect(inputBlock?.element?.initial_value).toBe('general-fork');
+    });
+
+    it('shows turn index in description', () => {
+      const modal = buildForkToChannelModalView(baseParams);
+
+      const sectionBlock = modal.blocks.find((b) => b.type === 'section');
+      expect(sectionBlock?.text?.text).toContain('turn 3');
+    });
+
+    it('has submit and close buttons', () => {
+      const modal = buildForkToChannelModalView(baseParams);
+
+      expect(modal.submit.text).toBe('Create Fork');
+      expect(modal.close.text).toBe('Cancel');
+    });
+
+    it('includes fork emoji in title/description', () => {
+      const modal = buildForkToChannelModalView(baseParams);
+
+      const sectionBlock = modal.blocks.find((b) => b.type === 'section');
+      expect(sectionBlock?.text?.text).toContain(':twisted_rightwards_arrows:');
     });
   });
 

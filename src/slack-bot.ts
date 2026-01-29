@@ -39,6 +39,7 @@ import {
   buildErrorBlocks,
   buildTextBlocks,
   buildAbortConfirmationModalView,
+  buildForkToChannelModalView,
   Block,
 } from './blocks.js';
 
@@ -264,6 +265,88 @@ function setupEventHandlers(): void {
     }
   });
 
+  // Handle fork-to-channel modal submission
+  app.view('fork_to_channel_modal', async ({ ack, view, client, body }) => {
+    // Get channel name from input
+    const channelNameInput = view.state?.values?.channel_name_block?.channel_name_input?.value;
+    if (!channelNameInput) {
+      await ack({
+        response_action: 'errors',
+        errors: { channel_name_block: 'Channel name is required' },
+      });
+      return;
+    }
+
+    // Validate channel name format (lowercase, numbers, hyphens only)
+    const normalizedName = channelNameInput.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    if (normalizedName.length < 1 || normalizedName.length > 80) {
+      await ack({
+        response_action: 'errors',
+        errors: { channel_name_block: 'Channel name must be 1-80 characters' },
+      });
+      return;
+    }
+
+    await ack();
+
+    // Parse metadata
+    const metadata = JSON.parse(view.private_metadata || '{}') as {
+      sourceChannelId: string;
+      sourceChannelName: string;
+      sourceMessageTs: string;
+      sourceThreadTs: string;
+      conversationKey: string;
+      turnIndex: number;
+    };
+
+    const userId = body.user.id;
+
+    try {
+      // Create the fork channel and session
+      const result = await createForkChannel({
+        channelName: normalizedName,
+        sourceChannelId: metadata.sourceChannelId,
+        sourceThreadTs: metadata.sourceThreadTs,
+        conversationKey: metadata.conversationKey,
+        turnIndex: metadata.turnIndex,
+        userId,
+        client,
+      });
+
+      // Update source message to show fork link
+      if (metadata.sourceMessageTs && metadata.sourceChannelId) {
+        try {
+          await client.chat.update({
+            channel: metadata.sourceChannelId,
+            ts: metadata.sourceMessageTs,
+            text: `:twisted_rightwards_arrows: Forked to <#${result.channelId}>`,
+            blocks: [
+              {
+                type: 'context',
+                elements: [
+                  {
+                    type: 'mrkdwn',
+                    text: `:twisted_rightwards_arrows: Forked at turn ${metadata.turnIndex} to <#${result.channelId}>`,
+                  },
+                ],
+              },
+            ],
+          });
+        } catch (updateError) {
+          console.warn('Failed to update source message after fork:', updateError);
+        }
+      }
+    } catch (error) {
+      console.error('Fork to channel failed:', error);
+      // Post ephemeral error to user
+      await client.chat.postEphemeral({
+        channel: metadata.sourceChannelId,
+        user: userId,
+        text: toUserMessage(error),
+      });
+    }
+  });
+
   // Handle button actions (approve/deny/abort/fork)
   app.action(/^(approve|deny|abort|fork)_/, async ({ action, ack, body, client }) => {
     await ack();
@@ -300,11 +383,35 @@ function setupEventHandlers(): void {
           }
         }
       } else if (actionId.startsWith('fork_')) {
-        // Fork action - handle thread forking
+        // Fork action - open modal for channel name input
         const value = (action as { value: string }).value;
-        const { turnIndex, conversationKey } = JSON.parse(value);
-        const messageTs = (body as { message?: { ts?: string } }).message?.ts;
-        await handleFork(conversationKey, turnIndex, channelId, messageTs);
+        const { turnIndex, slackTs, conversationKey } = JSON.parse(value);
+        const messageTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.ts;
+        const threadTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.thread_ts ?? messageTs;
+
+        // Get channel name for suggested fork channel name
+        const triggerBody = body as { trigger_id?: string };
+        if (triggerBody.trigger_id) {
+          let channelName = 'channel';
+          try {
+            const channelInfo = await client.conversations.info({ channel: channelId });
+            channelName = (channelInfo.channel as { name?: string })?.name ?? 'channel';
+          } catch {
+            // Use default name if channel info unavailable
+          }
+
+          await client.views.open({
+            trigger_id: triggerBody.trigger_id,
+            view: buildForkToChannelModalView({
+              sourceChannelId: channelId,
+              sourceChannelName: channelName,
+              sourceMessageTs: messageTs ?? '',
+              sourceThreadTs: threadTs ?? '',
+              conversationKey,
+              turnIndex,
+            }),
+          });
+        }
       }
     } catch (error) {
       console.error('Error handling action:', error);
@@ -715,7 +822,100 @@ async function handleUserMessage(
 }
 
 /**
- * Handle fork action.
+ * Create a fork channel with a forked Codex session.
+ */
+interface CreateForkChannelParams {
+  channelName: string;
+  sourceChannelId: string;
+  sourceThreadTs: string;
+  conversationKey: string;
+  turnIndex: number;
+  userId: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client: any; // Slack WebClient - using any for flexibility with Slack API types
+}
+
+interface CreateForkChannelResult {
+  channelId: string;
+  threadId: string;
+}
+
+async function createForkChannel(params: CreateForkChannelParams): Promise<CreateForkChannelResult> {
+  const { channelName, sourceChannelId, sourceThreadTs, conversationKey, turnIndex, userId, client } = params;
+
+  // Parse source conversation key to get source thread info
+  const parts = conversationKey.split(':');
+  const sourceConvChannelId = parts[0];
+  const sourceConvThreadTs = parts[1];
+
+  // Get source Codex thread ID
+  const sourceThreadId = getEffectiveThreadId(sourceConvChannelId, sourceConvThreadTs);
+  if (!sourceThreadId) {
+    throw new Error('Cannot fork: No active session found in source thread.');
+  }
+
+  // 1. Create new Slack channel
+  let createResult;
+  try {
+    createResult = await client.conversations.create({
+      name: channelName,
+      is_private: false,
+    });
+  } catch (error) {
+    const errMsg = (error as { data?: { error?: string } })?.data?.error;
+    if (errMsg === 'name_taken') {
+      throw new Error(`Channel name "${channelName}" is already taken. Please choose a different name.`);
+    } else if (errMsg === 'invalid_name_specials') {
+      throw new Error(`Channel name "${channelName}" contains invalid characters. Use only lowercase letters, numbers, and hyphens.`);
+    }
+    throw error;
+  }
+
+  if (!createResult.ok || !createResult.channel?.id) {
+    throw new Error(`Failed to create channel: ${createResult.error || 'Unknown error'}`);
+  }
+
+  const newChannelId = createResult.channel.id;
+
+  // 2. Invite user to the channel
+  try {
+    await client.conversations.invite({
+      channel: newChannelId,
+      users: userId,
+    });
+  } catch (error) {
+    // Ignore 'already_in_channel' error
+    const errMsg = (error as { data?: { error?: string } })?.data?.error;
+    if (errMsg !== 'already_in_channel') {
+      console.warn('Failed to invite user to fork channel:', error);
+    }
+  }
+
+  // 3. Fork the Codex session at the specified turn
+  const forkedThread = await codex.forkThread(sourceThreadId, turnIndex);
+
+  // 4. Save the forked session for the new channel
+  await saveSession(newChannelId, {
+    threadId: forkedThread.id,
+    forkedFrom: sourceThreadId,
+    forkedAtTurnIndex: turnIndex,
+  });
+
+  // 5. Post initial message in the new channel
+  const sourceLink = `<https://slack.com/archives/${sourceChannelId}/p${sourceThreadTs.replace('.', '')}|source conversation>`;
+  await client.chat.postMessage({
+    channel: newChannelId,
+    text: `:twisted_rightwards_arrows: Forked from ${sourceLink} at turn ${turnIndex}.\n\nThis channel continues from that point in the conversation. Send a message to continue.`,
+  });
+
+  return {
+    channelId: newChannelId,
+    threadId: forkedThread.id,
+  };
+}
+
+/**
+ * Handle fork action (legacy - forks in same thread, not new channel).
  */
 async function handleFork(
   sourceConversationKey: string,

@@ -78,6 +78,10 @@ export interface Session {
   updateRateSeconds?: number;
   /** Usage data from last query (for /status and /context) */
   lastUsage?: LastUsage;
+  /** Parent thread ID this channel was forked from (for fork-to-channel) */
+  forkedFrom?: string;
+  /** Turn index where fork happened (for point-in-time forking) */
+  forkedAtTurnIndex?: number;
 }
 
 /**

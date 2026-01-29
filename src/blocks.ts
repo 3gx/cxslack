@@ -1116,6 +1116,83 @@ export interface AbortConfirmationModalParams {
 }
 
 // ============================================================================
+// Fork to Channel Modal
+// ============================================================================
+
+export interface ForkToChannelModalParams {
+  sourceChannelId: string;
+  sourceChannelName: string;
+  sourceMessageTs: string;
+  sourceThreadTs: string;
+  conversationKey: string;
+  turnIndex: number;
+}
+
+/**
+ * Build a modal view for fork-to-channel.
+ * User can specify the new channel name (prefilled with {channelName}-fork).
+ */
+// Input block type for modals (uses singular 'element' not 'elements')
+interface InputBlock {
+  type: 'input';
+  block_id: string;
+  element: {
+    type: 'plain_text_input';
+    action_id: string;
+    placeholder?: { type: 'plain_text'; text: string };
+    initial_value?: string;
+    max_length?: number;
+  };
+  label: { type: 'plain_text'; text: string };
+  hint?: { type: 'plain_text'; text: string };
+}
+
+type ModalBlock = Block | InputBlock;
+
+export function buildForkToChannelModalView(params: ForkToChannelModalParams): {
+  type: 'modal';
+  callback_id: string;
+  private_metadata: string;
+  title: { type: 'plain_text'; text: string };
+  submit: { type: 'plain_text'; text: string };
+  close: { type: 'plain_text'; text: string };
+  blocks: ModalBlock[];
+} {
+  const suggestedName = `${params.sourceChannelName}-fork`;
+
+  return {
+    type: 'modal',
+    callback_id: 'fork_to_channel_modal',
+    private_metadata: JSON.stringify(params),
+    title: { type: 'plain_text', text: 'Fork to Channel' },
+    submit: { type: 'plain_text', text: 'Create Fork' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `:twisted_rightwards_arrows: *Fork conversation at turn ${params.turnIndex}*\n\nThis will create a new channel with a forked copy of the conversation up to this point.`,
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'channel_name_block',
+        element: {
+          type: 'plain_text_input',
+          action_id: 'channel_name_input',
+          placeholder: { type: 'plain_text', text: 'Enter channel name' },
+          initial_value: suggestedName,
+          max_length: 80,
+        },
+        label: { type: 'plain_text', text: 'New Channel Name' },
+        hint: { type: 'plain_text', text: 'Channel names can only contain lowercase letters, numbers, and hyphens.' },
+      },
+    ],
+  };
+}
+
+// ============================================================================
 // Activity Blocks
 // ============================================================================
 
