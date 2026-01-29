@@ -24,6 +24,7 @@ import {
   Block,
   DEFAULT_CONTEXT_WINDOW,
   computeAutoCompactThreshold,
+  buildActivityEntryBlocks,
 } from './blocks.js';
 import {
   markProcessingStart,
@@ -211,6 +212,7 @@ export class StreamingManager {
   private slack: WebClient;
   private codex: CodexClient;
   private approvalCallback?: (request: ApprovalRequest, context: StreamingContext) => void;
+  private turnCounters = new Map<string, number>(); // conversationKey -> turn index
   private activityManager = new ActivityThreadManager();
 
   constructor(slack: WebClient, codex: CodexClient) {

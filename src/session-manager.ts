@@ -117,6 +117,8 @@ export interface ThreadSession {
   messageTurnMap?: Record<string, string>;
   /** Message mapping: Slack ts -> Codex toolUseId (activity posts) */
   messageToolMap?: Record<string, string>;
+  /** Last thinking content (for attach-thinking action) */
+  lastThinkingContent?: string;
 }
 
 /**
@@ -290,6 +292,7 @@ export async function saveThreadSession(
       lastUsage: existingThread?.lastUsage,
       messageTurnMap: existingThread?.messageTurnMap,
       messageToolMap: existingThread?.messageToolMap,
+      lastThinkingContent: existingThread?.lastThinkingContent,
       ...session,
     };
 

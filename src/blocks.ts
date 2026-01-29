@@ -350,7 +350,65 @@ export function buildForkButton(params: ForkBlockParams): Block {
       },
     ],
   };
+
 }
+
+// ============================================================================
+// Activity Entry Blocks
+// ============================================================================
+
+export interface ActivityEntryActionParams {
+  conversationKey: string;
+  turnIndex: number;
+  slackTs: string;
+  includeFork?: boolean;
+  includeAttachThinking?: boolean;
+}
+
+export function buildActivityEntryActions(params: ActivityEntryActionParams): Block {
+  const { conversationKey, turnIndex, slackTs, includeFork = true, includeAttachThinking = true } = params;
+  const elements: any[] = [];
+  if (includeFork) {
+    elements.push({
+      type: 'button',
+      text: { type: 'plain_text', text: 'Fork here' },
+      action_id: `fork_${conversationKey}_${turnIndex}`,
+      value: JSON.stringify({ turnIndex, slackTs, conversationKey }),
+    });
+  }
+  if (includeAttachThinking) {
+    elements.push({
+      type: 'button',
+      text: { type: 'plain_text', text: 'Attach thinking' },
+      action_id: `attach_thinking_${slackTs}`,
+      value: JSON.stringify({ conversationKey, slackTs }),
+    });
+  }
+  return {
+    type: 'actions',
+    block_id: `activity_actions_${slackTs}`,
+    elements,
+  } as Block;
+}
+
+export interface ActivityEntryBlockParams {
+  text: string;
+  actions?: ActivityEntryActionParams;
+}
+
+export function buildActivityEntryBlocks(params: ActivityEntryBlockParams): Block[] {
+  const blocks: Block[] = [
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: params.text },
+    },
+  ];
+  if (params.actions) {
+    blocks.push(buildActivityEntryActions(params.actions));
+  }
+  return blocks;
+}
+
 
 // ============================================================================
 // Command Response Blocks
