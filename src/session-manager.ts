@@ -411,6 +411,66 @@ export function getTurnBySlackTs(channelId: string, slackTs: string): TurnInfo |
 // ============================================================================
 
 /**
+ * Delete all session data for a channel (main + all threads).
+ * Called when a Slack channel is deleted.
+ *
+ * Note: Does NOT delete Codex threads - only the bot's metadata mapping.
+ * Codex threads can still be resumed via /resume <thread-id> in another channel
+ * if someone has the thread ID.
+ */
+export async function deleteChannelSession(channelId: string): Promise<void> {
+  await sessionsMutex.runExclusive(() => {
+    const store = loadSessions();
+    const channelSession = store.channels[channelId];
+
+    if (!channelSession) {
+      console.log(`[channel-deleted] No session found for channel ${channelId}`);
+      return;
+    }
+
+    // Count what we're deleting for logging
+    const threadCount = channelSession.threads
+      ? Object.keys(channelSession.threads).length
+      : 0;
+    const previousCount = channelSession.previousThreadIds?.length ?? 0;
+
+    console.log(`[channel-deleted] Deleting sessions for channel ${channelId}:`);
+    console.log(`  - 1 main session (threadId: ${channelSession.threadId ?? 'none'})`);
+    if (previousCount > 0) {
+      console.log(`  - ${previousCount} previous thread(s) from /clear operations`);
+    }
+    if (threadCount > 0) {
+      console.log(`  - ${threadCount} Slack thread session(s)`);
+    }
+
+    // Log Codex thread IDs being orphaned (for auditing reference)
+    const orphanedThreadIds: string[] = [];
+    if (channelSession.threadId) {
+      orphanedThreadIds.push(channelSession.threadId);
+    }
+    if (channelSession.previousThreadIds) {
+      orphanedThreadIds.push(...channelSession.previousThreadIds.filter(Boolean));
+    }
+    if (channelSession.threads) {
+      Object.values(channelSession.threads).forEach((t) => {
+        if (t.threadId) orphanedThreadIds.push(t.threadId);
+      });
+    }
+    if (orphanedThreadIds.length > 0) {
+      console.log(
+        `  - Codex threads orphaned (NOT deleted, can be /resume'd): ${orphanedThreadIds.join(', ')}`
+      );
+    }
+
+    // Delete the channel entry entirely
+    delete store.channels[channelId];
+    saveSessions(store);
+
+    console.log(`[channel-deleted] ✓ Removed channel ${channelId} from sessions.json`);
+  });
+}
+
+/**
  * Clear the current session (for /clear command).
  * Preserves the thread ID in previousThreadIds for potential resume.
  */

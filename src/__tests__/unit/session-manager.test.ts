@@ -12,6 +12,7 @@ import {
   getThreadSession,
   saveThreadSession,
   clearSession,
+  deleteChannelSession,
   getEffectiveWorkingDir,
   getEffectiveApprovalPolicy,
   getEffectiveThreadId,
@@ -690,6 +691,342 @@ describe('Session Manager', () => {
       expect(writtenData.channels.C123.previousThreadIds).toContain('thread-100');
       expect(writtenData.channels.C123.lastUsage).toBeUndefined();
       expect(writtenData.channels.C123.turns).toEqual([]);
+    });
+  });
+
+  describe('deleteChannelSession', () => {
+    it('deletes main channel session', async () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: 'thread-abc',
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+            },
+          },
+        })
+      );
+      mockFs.writeFileSync.mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      await deleteChannelSession('C123');
+
+      const writtenData = JSON.parse(
+        mockFs.writeFileSync.mock.calls[0][1] as string
+      );
+
+      expect(writtenData.channels.C123).toBeUndefined();
+      expect(Object.keys(writtenData.channels)).toHaveLength(0);
+      consoleSpy.mockRestore();
+    });
+
+    it('deletes channel with thread sessions', async () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: 'thread-main',
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+              threads: {
+                '111.222': {
+                  threadId: 'thread-fork-1',
+                  forkedFrom: 'thread-main',
+                  workingDir: '/test',
+                  approvalPolicy: 'on-request',
+                  createdAt: 1000,
+                  lastActiveAt: 2000,
+                  pathConfigured: false,
+                  configuredPath: null,
+                  configuredBy: null,
+                  configuredAt: null,
+                },
+                '333.444': {
+                  threadId: 'thread-fork-2',
+                  forkedFrom: 'thread-main',
+                  workingDir: '/test',
+                  approvalPolicy: 'on-request',
+                  createdAt: 1000,
+                  lastActiveAt: 2000,
+                  pathConfigured: false,
+                  configuredPath: null,
+                  configuredBy: null,
+                  configuredAt: null,
+                },
+              },
+            },
+          },
+        })
+      );
+      mockFs.writeFileSync.mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      await deleteChannelSession('C123');
+
+      const writtenData = JSON.parse(
+        mockFs.writeFileSync.mock.calls[0][1] as string
+      );
+
+      expect(writtenData.channels.C123).toBeUndefined();
+      consoleSpy.mockRestore();
+    });
+
+    it('handles non-existent channel gracefully', async () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({ channels: {} })
+      );
+      mockFs.writeFileSync.mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      // Should not throw
+      await expect(deleteChannelSession('NONEXISTENT')).resolves.not.toThrow();
+
+      // Should NOT write to file (no changes needed)
+      expect(mockFs.writeFileSync).not.toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+
+    it('does not affect other channels', async () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: 'thread-1',
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+            },
+            C456: {
+              threadId: 'thread-2',
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+            },
+          },
+        })
+      );
+      mockFs.writeFileSync.mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      await deleteChannelSession('C123');
+
+      const writtenData = JSON.parse(
+        mockFs.writeFileSync.mock.calls[0][1] as string
+      );
+
+      expect(writtenData.channels.C123).toBeUndefined();
+      expect(writtenData.channels.C456).toBeDefined();
+      expect(writtenData.channels.C456.threadId).toBe('thread-2');
+      consoleSpy.mockRestore();
+    });
+
+    it('handles channel with previousThreadIds from /clear', async () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: 'thread-current',
+              previousThreadIds: ['thread-old-1', 'thread-old-2'],
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+            },
+          },
+        })
+      );
+      mockFs.writeFileSync.mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      await deleteChannelSession('C123');
+
+      const writtenData = JSON.parse(
+        mockFs.writeFileSync.mock.calls[0][1] as string
+      );
+
+      expect(writtenData.channels.C123).toBeUndefined();
+      consoleSpy.mockRestore();
+    });
+
+    it('handles channel with null threadId', async () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: null,
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+            },
+          },
+        })
+      );
+      mockFs.writeFileSync.mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      await expect(deleteChannelSession('C123')).resolves.not.toThrow();
+
+      const writtenData = JSON.parse(
+        mockFs.writeFileSync.mock.calls[0][1] as string
+      );
+
+      expect(writtenData.channels.C123).toBeUndefined();
+      consoleSpy.mockRestore();
+    });
+
+    it('logs orphaned Codex thread IDs for auditing', async () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: 'thread-main',
+              previousThreadIds: ['thread-old'],
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+              threads: {
+                '111.222': {
+                  threadId: 'thread-fork',
+                  forkedFrom: 'thread-main',
+                  workingDir: '/test',
+                  approvalPolicy: 'on-request',
+                  createdAt: 1000,
+                  lastActiveAt: 2000,
+                  pathConfigured: false,
+                  configuredPath: null,
+                  configuredBy: null,
+                  configuredAt: null,
+                },
+              },
+            },
+          },
+        })
+      );
+      mockFs.writeFileSync.mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      await deleteChannelSession('C123');
+
+      // Check that orphaned thread IDs were logged
+      const logCalls = consoleSpy.mock.calls.map(call => call[0]);
+      const orphanedLog = logCalls.find(log =>
+        typeof log === 'string' && log.includes('orphaned')
+      );
+      expect(orphanedLog).toBeDefined();
+      expect(orphanedLog).toContain('thread-main');
+      expect(orphanedLog).toContain('thread-old');
+      expect(orphanedLog).toContain('thread-fork');
+
+      consoleSpy.mockRestore();
+    });
+
+    it('handles complex channel with main + previous + threads', async () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: 'thread-current',
+              previousThreadIds: ['thread-v1', 'thread-v2'],
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: true,
+              configuredPath: '/configured',
+              configuredBy: 'U123',
+              configuredAt: 1500,
+              turns: [
+                { turnId: 't1', turnIndex: 0, slackTs: '1' },
+                { turnId: 't2', turnIndex: 1, slackTs: '2' },
+              ],
+              threads: {
+                '111.222': {
+                  threadId: 'thread-fork-1',
+                  forkedFrom: 'thread-current',
+                  workingDir: '/test',
+                  approvalPolicy: 'on-request',
+                  createdAt: 1000,
+                  lastActiveAt: 2000,
+                  pathConfigured: true,
+                  configuredPath: '/configured',
+                  configuredBy: 'U123',
+                  configuredAt: 1500,
+                },
+                '333.444': {
+                  threadId: 'thread-fork-2',
+                  forkedFrom: 'thread-current',
+                  workingDir: '/test',
+                  approvalPolicy: 'on-request',
+                  createdAt: 1000,
+                  lastActiveAt: 2000,
+                  pathConfigured: true,
+                  configuredPath: '/configured',
+                  configuredBy: 'U123',
+                  configuredAt: 1500,
+                },
+              },
+            },
+          },
+        })
+      );
+      mockFs.writeFileSync.mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      await deleteChannelSession('C123');
+
+      const writtenData = JSON.parse(
+        mockFs.writeFileSync.mock.calls[0][1] as string
+      );
+
+      // Everything should be gone
+      expect(writtenData.channels.C123).toBeUndefined();
+      expect(Object.keys(writtenData.channels)).toHaveLength(0);
+      consoleSpy.mockRestore();
     });
   });
 });

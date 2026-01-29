@@ -28,6 +28,7 @@ import {
   getEffectiveApprovalPolicy,
   getEffectiveThreadId,
   recordTurn,
+  deleteChannelSession,
 } from './session-manager.js';
 import {
   buildActivityBlocks,
@@ -629,6 +630,22 @@ function setupEventHandlers(): void {
       text: 'Model selection cancelled',
       blocks: buildModelPickerCancelledBlocks(),
     });
+  });
+
+  // Handle channel deletion - clean up all sessions for this channel
+  app.event('channel_deleted', async ({ event }) => {
+    try {
+      console.log(`\n${'='.repeat(60)}`);
+      console.log(`[channel-deleted] Channel deleted: ${event.channel}`);
+      console.log(`${'='.repeat(60)}`);
+
+      await deleteChannelSession(event.channel);
+
+      console.log(`${'='.repeat(60)}\n`);
+    } catch (error) {
+      console.error('[channel-deleted] Error handling channel deletion:', error);
+      // Don't throw - cleanup failure shouldn't crash the bot
+    }
   });
 }
 
