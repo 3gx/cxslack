@@ -1009,7 +1009,6 @@ export interface UnifiedStatusLineParams {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   sessionId?: string;
-  currentActivity?: string;
   contextPercent?: number;
   contextTokens?: number;
   contextWindow?: number;
@@ -1028,7 +1027,7 @@ export interface UnifiedStatusLineParams {
 /**
  * Build a unified status line showing policy, model, session, and stats.
  * Line 1: policy | model [reason] | session
- * Line 2: activity | ctx/compact | tokens | cost | duration (only when available)
+ * Line 2: ctx | tokens | cost | duration (only when available)
  */
 export function buildUnifiedStatusLine(params: UnifiedStatusLineParams): string {
   const line1Parts: string[] = [];
@@ -1043,10 +1042,6 @@ export function buildUnifiedStatusLine(params: UnifiedStatusLineParams): string 
   line1Parts.push(params.approvalPolicy);
   line1Parts.push(modelWithReasoning);
   line1Parts.push(sessionLabel);
-
-  if (params.currentActivity) {
-    line2Parts.push(params.currentActivity);
-  }
 
   // Show context usage: "X% left, Y used / Z"
   // Uses only verified data from Codex (contextWindow is sent via model_context_window)
@@ -1208,7 +1203,6 @@ export interface ActivityBlockParams {
   conversationKey: string;
   elapsedMs: number;
   entries?: ActivityEntry[]; // For todo extraction
-  currentActivity?: string;
   approvalPolicy: ApprovalPolicy;
   model?: string;
   reasoningEffort?: ReasoningEffort;
@@ -1239,7 +1233,6 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
     conversationKey,
     elapsedMs,
     entries,
-    currentActivity,
     approvalPolicy,
     model,
     reasoningEffort,
@@ -1308,7 +1301,6 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
           model,
           reasoningEffort,
           sessionId,
-          currentActivity,
           contextPercent,
           contextTokens,
           contextWindow,

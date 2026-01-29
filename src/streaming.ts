@@ -1105,14 +1105,6 @@ export class StreamingManager {
       state.spinnerIndex = (state.spinnerIndex + 1) % STATUS_SPINNER_FRAMES.length;
       const spinner = STATUS_SPINNER_FRAMES[state.spinnerIndex];
 
-      // Current activity label for status line
-      const currentActivity =
-        state.thinkingContent && !state.thinkingComplete
-          ? ':brain: Thinking'
-          : state.text
-            ? ':memo: Generating'
-            : undefined;
-
       // Compute context usage - VERIFIED from Codex API:
       // total_tokens = input_tokens + output_tokens
       // (cached_input_tokens is a SUBSET of input_tokens, not additional)
@@ -1156,7 +1148,6 @@ export class StreamingManager {
         model: context.model,
         reasoningEffort: context.reasoningEffort,
         sessionId: context.threadId,
-        currentActivity,
         contextPercent,
         contextTokens: contextTokens > 0 ? contextTokens : undefined,
         contextWindow,

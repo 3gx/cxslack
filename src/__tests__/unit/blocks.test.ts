@@ -503,6 +503,74 @@ describe('Block Kit Builders', () => {
 
       expect(line).toContain('0/100');
     });
+
+    it('does not include activity labels in status line', () => {
+      // Status line should only show metadata (policy, model, session, ctx, tokens, cost, duration)
+      // Activity labels like "Generating" or "Thinking" belong in the activity list, not the status line
+      const line = buildUnifiedStatusLine({
+        approvalPolicy: 'on-request',
+        model: 'codex-mini',
+        reasoningEffort: 'high',
+        sessionId: 'thread-123',
+        contextPercent: 50,
+        contextTokens: 100000,
+        contextWindow: 200000,
+        inputTokens: 5000,
+        outputTokens: 1000,
+        costUsd: 0.10,
+        durationMs: 10000,
+      });
+
+      // Verify no activity labels
+      expect(line).not.toContain('Generating');
+      expect(line).not.toContain('Thinking');
+      expect(line).not.toContain(':memo:');
+      expect(line).not.toContain(':brain:');
+
+      // Verify expected format: line 1 has policy|model|session, line 2 has ctx|tokens|cost|duration
+      const lines = line.split('\n');
+      expect(lines.length).toBe(2);
+      expect(lines[0]).toContain('on-request');
+      expect(lines[0]).toContain('codex-mini [high]');
+      expect(lines[0]).toContain('thread-123');
+      expect(lines[1]).toContain('50% left');
+      expect(lines[1]).toContain('5.0k/1.0k');
+      expect(lines[1]).toContain('$0.10');
+      expect(lines[1]).toContain('10.0s');
+    });
+
+    it('status line format: policy | model [reasoning] | session on line 1', () => {
+      const line = buildUnifiedStatusLine({
+        approvalPolicy: 'auto-edit',
+        model: 'gpt-5.2-codex',
+        reasoningEffort: 'xhigh',
+        sessionId: 'abc123',
+      });
+
+      const lines = line.split('\n');
+      // Line 1 should have exact format: _policy | model [reasoning] | session_
+      expect(lines[0]).toBe('_auto-edit | gpt-5.2-codex [xhigh] | abc123_');
+    });
+
+    it('status line format: ctx | tokens | cost | duration on line 2 (no activity)', () => {
+      const line = buildUnifiedStatusLine({
+        approvalPolicy: 'on-request',
+        contextPercent: 25,
+        contextTokens: 50000,
+        contextWindow: 200000,
+        inputTokens: 10000,
+        outputTokens: 500,
+        costUsd: 0.05,
+        durationMs: 5000,
+      });
+
+      const lines = line.split('\n');
+      expect(lines.length).toBe(2);
+      // Line 2 starts with ctx info, NOT an activity label
+      // Format: _75% left, 50.0k / 200.0k | 10.0k/500 | $0.05 | 5.0s_
+      expect(lines[1]).toMatch(/^_\d+% left/); // Must start with underscore + percent
+      expect(lines[1]).not.toMatch(/^_:[a-z]+:/); // Must NOT start with emoji
+    });
   });
 
   describe('buildAbortConfirmationModalView', () => {
