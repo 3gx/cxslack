@@ -703,9 +703,20 @@ export class CodexClient extends EventEmitter {
         break;
 
       // Token usage events
+      // Verified schema from `codex app-server generate-ts`:
+      // TokenCountEvent = { info: TokenUsageInfo | null, rate_limits: RateLimitSnapshot | null }
+      // TokenUsageInfo = { total_token_usage, last_token_usage, model_context_window: number | null }
+      // TokenUsage = { input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens, total_tokens }
       case 'thread/tokenUsage/updated':
       case 'codex/event/token_count': {
         const p = params as {
+          // New schema structure (verified)
+          info?: {
+            total_token_usage?: { input_tokens?: number; output_tokens?: number; cached_input_tokens?: number };
+            last_token_usage?: { input_tokens?: number; output_tokens?: number; cached_input_tokens?: number };
+            model_context_window?: number | null;
+          };
+          // Legacy flat structure (keep for backwards compat)
           inputTokens?: number;
           outputTokens?: number;
           input_tokens?: number;
@@ -723,17 +734,26 @@ export class CodexClient extends EventEmitter {
           totalCostUsd?: number;
           total_cost_usd?: number;
         };
+
+        // Extract from new schema structure first, fallback to legacy flat fields
+        const totalUsage = p.info?.total_token_usage;
+        const inputTokens = totalUsage?.input_tokens ?? p.inputTokens ?? p.input_tokens ?? 0;
+        const outputTokens = totalUsage?.output_tokens ?? p.outputTokens ?? p.output_tokens ?? 0;
+        const cacheReadInputTokens = totalUsage?.cached_input_tokens ?? p.cacheReadInputTokens ?? p.cache_read_input_tokens;
+        // model_context_window is in info, not at top level
+        const contextWindow = p.info?.model_context_window ?? p.contextWindow ?? p.context_window;
+
         const costUsd =
           p.costUsd ??
           p.cost_usd ??
           p.totalCostUsd ??
           p.total_cost_usd;
         this.emit('tokens:updated', {
-          inputTokens: p.inputTokens ?? p.input_tokens ?? 0,
-          outputTokens: p.outputTokens ?? p.output_tokens ?? 0,
-          contextWindow: p.contextWindow ?? p.context_window,
+          inputTokens,
+          outputTokens,
+          contextWindow: contextWindow ?? undefined,
           maxOutputTokens: p.maxOutputTokens ?? p.max_output_tokens,
-          cacheReadInputTokens: p.cacheReadInputTokens ?? p.cache_read_input_tokens,
+          cacheReadInputTokens,
           cacheCreationInputTokens: p.cacheCreationInputTokens ?? p.cache_creation_input_tokens,
           costUsd,
         });
