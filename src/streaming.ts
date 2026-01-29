@@ -962,22 +962,8 @@ export class StreamingManager {
         }
       } catch (error) {
         console.error('Error updating activity message:', error);
-        // Fallback: post new message if update fails
-        try {
-          const result = await withSlackRetry(
-            () =>
-              this.slack.chat.postMessage({
-                channel: context.channelId,
-                thread_ts: threadTs,
-                blocks,
-                text: fallbackText,
-              }),
-            'activity.fallback'
-          );
-          state.activityMessageTs = result.ts as string;
-        } catch (fallbackError) {
-          console.error('Fallback post also failed:', fallbackError);
-        }
+        // To avoid duplicate activity posts, do not post a new message when an update fails.
+        // We rely on the existing message; if it's missing, the next cycle will retry update.
       }
 
       // Trim entries if too many (memory management)
