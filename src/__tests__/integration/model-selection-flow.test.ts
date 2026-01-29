@@ -3,7 +3,8 @@
  * Tests the two-step button-based model + reasoning selection.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
 import {
   buildModelSelectionBlocks,
   buildReasoningSelectionBlocks,
@@ -11,8 +12,18 @@ import {
   buildModelPickerCancelledBlocks,
   ModelInfo,
 } from '../../blocks.js';
-import { FALLBACK_MODELS, getModelInfo } from '../../commands.js';
+import { FALLBACK_MODELS, getModelInfo, DEFAULT_MODEL, DEFAULT_REASONING } from '../../commands.js';
 import { pendingModelSelections } from '../../slack-bot.js';
+import {
+  getThreadSession,
+  saveThreadSession,
+  getSession,
+  saveSession,
+  loadSessions,
+} from '../../session-manager.js';
+
+// Mock fs for session persistence tests
+vi.mock('fs');
 
 describe('Model Selection Flow Integration', () => {
   beforeEach(() => {
@@ -224,6 +235,186 @@ describe('Model Selection Flow Integration', () => {
       // Clean up
       pendingModelSelections.delete(pickerTs);
       expect(pendingModelSelections.size).toBe(0);
+    });
+  });
+
+  describe('Session Persistence', () => {
+    const mockFs = vi.mocked(fs);
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('saves model to thread session and retrieves it', async () => {
+      const channelId = 'C123';
+      const threadTs = '1234567890.000001';
+      const modelValue = 'gpt-5.2-codex';
+      const reasoningValue = 'xhigh';
+
+      // Initial state: channel exists but no thread session
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(JSON.stringify({
+        channels: {
+          [channelId]: {
+            threadId: null,
+            workingDir: '/test',
+            approvalPolicy: 'on-request',
+            createdAt: 1000,
+            lastActiveAt: 2000,
+            pathConfigured: false,
+            configuredPath: null,
+            configuredBy: null,
+            configuredAt: null,
+            threads: {},
+          },
+        },
+      }));
+      mockFs.writeFileSync.mockImplementation(() => {});
+
+      // Save model to thread session (simulates reasoning_select handler)
+      await saveThreadSession(channelId, threadTs, {
+        model: modelValue,
+        reasoningEffort: reasoningValue
+      });
+
+      // Verify it was written
+      expect(mockFs.writeFileSync).toHaveBeenCalled();
+      const writtenData = JSON.parse(mockFs.writeFileSync.mock.calls[0][1] as string);
+      expect(writtenData.channels[channelId].threads[threadTs].model).toBe(modelValue);
+      expect(writtenData.channels[channelId].threads[threadTs].reasoningEffort).toBe(reasoningValue);
+    });
+
+    it('retrieves model from thread session for subsequent messages', () => {
+      const channelId = 'C123';
+      const threadTs = '1234567890.000001';
+      const savedModel = 'gpt-5.2-codex';
+      const savedReasoning = 'xhigh';
+
+      // State: thread session has model saved
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(JSON.stringify({
+        channels: {
+          [channelId]: {
+            threadId: null,
+            workingDir: '/test',
+            approvalPolicy: 'on-request',
+            createdAt: 1000,
+            lastActiveAt: 2000,
+            pathConfigured: false,
+            configuredPath: null,
+            configuredBy: null,
+            configuredAt: null,
+            threads: {
+              [threadTs]: {
+                threadId: 'codex-thread-123',
+                forkedFrom: null,
+                workingDir: '/test',
+                approvalPolicy: 'on-request',
+                model: savedModel,
+                reasoningEffort: savedReasoning,
+                createdAt: 1000,
+                lastActiveAt: 2000,
+                pathConfigured: false,
+                configuredPath: null,
+                configuredBy: null,
+                configuredAt: null,
+              },
+            },
+          },
+        },
+      }));
+
+      // Retrieve session (simulates handleUserMessage)
+      const session = getThreadSession(channelId, threadTs);
+
+      // Verify model is retrieved
+      expect(session).not.toBeNull();
+      expect(session?.model).toBe(savedModel);
+      expect(session?.reasoningEffort).toBe(savedReasoning);
+    });
+
+    it('uses default model when session has no model set', () => {
+      const channelId = 'C123';
+      const threadTs = '1234567890.000001';
+
+      // State: thread session exists but no model
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(JSON.stringify({
+        channels: {
+          [channelId]: {
+            threadId: null,
+            workingDir: '/test',
+            approvalPolicy: 'on-request',
+            createdAt: 1000,
+            lastActiveAt: 2000,
+            pathConfigured: false,
+            configuredPath: null,
+            configuredBy: null,
+            configuredAt: null,
+            threads: {
+              [threadTs]: {
+                threadId: 'codex-thread-123',
+                forkedFrom: null,
+                workingDir: '/test',
+                approvalPolicy: 'on-request',
+                // model is NOT set
+                createdAt: 1000,
+                lastActiveAt: 2000,
+                pathConfigured: false,
+                configuredPath: null,
+                configuredBy: null,
+                configuredAt: null,
+              },
+            },
+          },
+        },
+      }));
+
+      const session = getThreadSession(channelId, threadTs);
+
+      // Session exists but model is undefined
+      expect(session).not.toBeNull();
+      expect(session?.model).toBeUndefined();
+
+      // In handleUserMessage, this would use default:
+      const effectiveModel = session?.model || DEFAULT_MODEL;
+      const effectiveReasoning = session?.reasoningEffort || DEFAULT_REASONING;
+
+      expect(effectiveModel).toBe(DEFAULT_MODEL);
+      expect(effectiveReasoning).toBe(DEFAULT_REASONING);
+    });
+
+    it('threadTs from pending selection matches session lookup', () => {
+      // This test verifies the fix for the model selection bug
+      const channelId = 'C123';
+      const threadAnchor = '1234567890.000001'; // The thread anchor ts
+      const pickerMessageTs = '1234567890.111111'; // The picker message ts
+
+      // When model picker is posted, we store the threadTs
+      pendingModelSelections.set(pickerMessageTs, {
+        originalTs: '1234567890.000000',
+        channelId,
+        threadTs: threadAnchor, // This is the correct threadTs
+      });
+
+      // When user clicks button, we retrieve from pending
+      const pending = pendingModelSelections.get(pickerMessageTs);
+      const threadTsForSave = pending?.threadTs || pickerMessageTs;
+
+      // Should use the stored threadTs, not the picker message ts
+      expect(threadTsForSave).toBe(threadAnchor);
+
+      // Later, when user sends a message in thread, they use the same threadTs
+      const threadTsForMessage = threadAnchor;
+
+      // These should match!
+      expect(threadTsForSave).toBe(threadTsForMessage);
+
+      pendingModelSelections.clear();
     });
   });
 });

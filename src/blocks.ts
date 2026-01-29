@@ -881,10 +881,10 @@ export function buildUnifiedStatusLine(params: UnifiedStatusLineParams): string 
   const line1Parts: string[] = [];
   const line2Parts: string[] = [];
 
-  const modelLabel = params.model ? params.model : 'default';
-  const modelWithReasoning = params.reasoningEffort
-    ? `${modelLabel} [${params.reasoningEffort}]`
-    : modelLabel;
+  // Default to gpt-5.2-codex with xhigh reasoning when not explicitly set
+  const modelLabel = params.model || 'gpt-5.2-codex';
+  const reasoningLabel = params.reasoningEffort || 'xhigh';
+  const modelWithReasoning = `${modelLabel} [${reasoningLabel}]`;
   const sessionLabel = params.sessionId || 'n/a';
 
   line1Parts.push(params.approvalPolicy);

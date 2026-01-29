@@ -322,6 +322,189 @@ describe('Session Manager', () => {
     });
   });
 
+  describe('Thread Session Model Persistence', () => {
+    it('saves model to thread session', async () => {
+      // Initial state with channel but no thread session
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: null,
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+              threads: {},
+            },
+          },
+        })
+      );
+      mockFs.writeFileSync.mockImplementation(() => {});
+
+      await saveThreadSession('C123', '1234.5678', { model: 'gpt-5.2-codex' });
+
+      const writtenData = JSON.parse(
+        mockFs.writeFileSync.mock.calls[0][1] as string
+      );
+
+      expect(writtenData.channels.C123.threads['1234.5678'].model).toBe('gpt-5.2-codex');
+    });
+
+    it('retrieves model from thread session', () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: null,
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+              threads: {
+                '1234.5678': {
+                  threadId: 'codex-thread-id',
+                  forkedFrom: null,
+                  workingDir: '/test',
+                  approvalPolicy: 'on-request',
+                  model: 'gpt-5.2-codex',
+                  reasoningEffort: 'high',
+                  createdAt: 1000,
+                  lastActiveAt: 2000,
+                  pathConfigured: false,
+                  configuredPath: null,
+                  configuredBy: null,
+                  configuredAt: null,
+                },
+              },
+            },
+          },
+        })
+      );
+
+      const session = getThreadSession('C123', '1234.5678');
+      expect(session?.model).toBe('gpt-5.2-codex');
+      expect(session?.reasoningEffort).toBe('high');
+    });
+
+    it('preserves model when updating other thread session fields', async () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: null,
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+              threads: {
+                '1234.5678': {
+                  threadId: 'codex-thread-id',
+                  forkedFrom: null,
+                  workingDir: '/test',
+                  approvalPolicy: 'on-request',
+                  model: 'gpt-5.2-codex',
+                  reasoningEffort: 'high',
+                  createdAt: 1000,
+                  lastActiveAt: 2000,
+                  pathConfigured: false,
+                  configuredPath: null,
+                  configuredBy: null,
+                  configuredAt: null,
+                },
+              },
+            },
+          },
+        })
+      );
+      mockFs.writeFileSync.mockImplementation(() => {});
+
+      // Update only lastActiveAt, model should be preserved
+      await saveThreadSession('C123', '1234.5678', { lastActiveAt: 3000 });
+
+      const writtenData = JSON.parse(
+        mockFs.writeFileSync.mock.calls[0][1] as string
+      );
+
+      expect(writtenData.channels.C123.threads['1234.5678'].model).toBe('gpt-5.2-codex');
+      expect(writtenData.channels.C123.threads['1234.5678'].reasoningEffort).toBe('high');
+      expect(writtenData.channels.C123.threads['1234.5678'].lastActiveAt).toBe(3000);
+    });
+
+    it('thread session inherits model from channel session when not set', async () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: null,
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              model: 'channel-model',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+              threads: {},
+            },
+          },
+        })
+      );
+      mockFs.writeFileSync.mockImplementation(() => {});
+
+      // Create new thread session without specifying model
+      await saveThreadSession('C123', '1234.5678', { threadId: 'codex-thread-id' });
+
+      const writtenData = JSON.parse(
+        mockFs.writeFileSync.mock.calls[0][1] as string
+      );
+
+      // Should inherit model from channel
+      expect(writtenData.channels.C123.threads['1234.5678'].model).toBe('channel-model');
+    });
+
+    it('returns null for non-existent thread session', () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: null,
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+              threads: {},
+            },
+          },
+        })
+      );
+
+      const session = getThreadSession('C123', 'nonexistent.thread');
+      expect(session).toBeNull();
+    });
+  });
+
   describe('clearSession', () => {
     it('moves threadId to previousThreadIds', async () => {
       mockFs.existsSync.mockReturnValue(true);

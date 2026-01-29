@@ -479,13 +479,16 @@ describe('Block Kit Builders', () => {
       expect(line.trimEnd().endsWith('_')).toBe(true);
     });
 
-    it('omits missing optional fields', () => {
+    it('uses defaults when model/reasoning not set', () => {
       const line = buildUnifiedStatusLine({
         approvalPolicy: 'never',
       });
 
       expect(line).toContain('never');
-      expect(line).toContain('default');
+      // Default model: gpt-5.2-codex with xhigh reasoning
+      expect(line).toContain('gpt-5.2-codex');
+      expect(line).toContain('[xhigh]');
+      // Session shows 'n/a' when not set
       expect(line).toContain('n/a');
     });
 

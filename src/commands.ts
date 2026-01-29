@@ -38,6 +38,13 @@ import {
 import fs from 'fs';
 
 /**
+ * Default model and reasoning when not explicitly set.
+ */
+export const DEFAULT_MODEL = 'gpt-5.2-codex';
+export const DEFAULT_MODEL_DISPLAY = 'GPT-5.2 Codex';
+export const DEFAULT_REASONING: ReasoningEffort = 'xhigh';
+
+/**
  * Fallback model list when server doesn't provide models.
  * Uses ModelInfo format for consistency with button-based UI.
  */

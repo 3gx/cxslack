@@ -15,6 +15,8 @@ import {
   parseCommand,
   FALLBACK_MODELS,
   getModelInfo,
+  DEFAULT_MODEL,
+  DEFAULT_REASONING,
 } from './commands.js';
 import {
   getSession,
@@ -175,6 +177,15 @@ function setupEventHandlers(): void {
     const messageTs: string = event.ts;
     // Always reply in a thread: use existing thread or create new one under user's message
     const replyThreadTs = threadTs ?? messageTs;
+
+    // Reject @bot mentions in threads - only main channel allowed
+    if (threadTs) {
+      await say({
+        thread_ts: replyThreadTs,
+        text: '❌ @bot can only be mentioned in the main channel, not in threads.',
+      });
+      return;
+    }
 
     try {
       const userId: string = event.user || '';
@@ -363,11 +374,14 @@ function setupEventHandlers(): void {
     const channelId = body.channel?.id;
     const messageTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.ts;
     if (!channelId || !messageTs) return;
-    const threadTs =
-      (body as { message?: { ts?: string; thread_ts?: string } }).message?.thread_ts ??
+
+    // Use stored threadTs from pending selection (more reliable than message.thread_ts)
+    const pending = pendingModelSelections.get(messageTs);
+    const threadTs = pending?.threadTs ||
+      (body as { message?: { ts?: string; thread_ts?: string } }).message?.thread_ts ||
       messageTs;
 
-    console.log(`[model] Model button clicked: ${modelValue} for channel: ${channelId}`);
+    console.log(`[model] Model button clicked: ${modelValue} for channel: ${channelId}, thread: ${threadTs}`);
 
     const conversationKey = makeConversationKey(channelId, threadTs);
     if (streamingManager.isStreaming(conversationKey)) {
@@ -427,14 +441,14 @@ function setupEventHandlers(): void {
     const channelId = body.channel?.id;
     const messageTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.ts;
     if (!channelId || !messageTs) return;
-    const threadTs =
-      (body as { message?: { ts?: string; thread_ts?: string } }).message?.thread_ts ??
+
+    // Use stored threadTs from pending selection (more reliable than message.thread_ts)
+    const pending = pendingModelSelections.get(messageTs);
+    const threadTs = pending?.threadTs ||
+      (body as { message?: { ts?: string; thread_ts?: string } }).message?.thread_ts ||
       messageTs;
 
-    console.log(`[model] Reasoning selected: ${reasoningValue} for model: ${modelValue}`);
-
-    // Remove emojis from original message
-    const pending = pendingModelSelections.get(messageTs);
+    console.log(`[model] Reasoning selected: ${reasoningValue} for model: ${modelValue}, thread: ${threadTs}`);
     if (pending) {
       try {
         await client.reactions.remove({ channel: pending.channelId, timestamp: pending.originalTs, name: 'question' });
@@ -466,7 +480,12 @@ function setupEventHandlers(): void {
 
     // Save both model and reasoning to session
     const reasoningEffort = reasoningValue === 'medium' ? undefined : (reasoningValue as ReasoningEffort);
+    console.log(`[model] Saving to session: channel=${channelId}, thread=${threadTs}, model=${modelValue}, reasoning=${reasoningEffort}`);
     await saveThreadSession(channelId, threadTs, { model: modelValue, reasoningEffort });
+
+    // Verify save worked
+    const savedSession = getThreadSession(channelId, threadTs);
+    console.log(`[model] Verified saved session: model=${savedSession?.model}, reasoning=${savedSession?.reasoningEffort}`);
 
     // Get model info for display name
     const modelInfo = getModelInfo(modelValue);
@@ -590,6 +609,7 @@ async function handleUserMessage(
 
   // Get session info - always use thread session since all conversations are in threads
   const session = getThreadSession(channelId, postingThreadTs) ?? getSession(channelId);
+  console.log(`[message] Session lookup: channel=${channelId}, thread=${postingThreadTs}, model=${session?.model}, reasoning=${session?.reasoningEffort}`);
 
   // Start or resume thread
   if (!threadId) {
@@ -622,6 +642,10 @@ async function handleUserMessage(
     await codex.resumeThread(threadId);
   }
 
+  // Use defaults when model/reasoning not explicitly set
+  const effectiveModel = session?.model || DEFAULT_MODEL;
+  const effectiveReasoning = session?.reasoningEffort || DEFAULT_REASONING;
+
   // Post initial "processing" message IN THE THREAD using activity format
   const initialResult = await app.client.chat.postMessage({
     channel: channelId,
@@ -632,8 +656,8 @@ async function handleUserMessage(
       conversationKey,
       elapsedMs: 0,
       approvalPolicy,
-      model: session?.model,
-      reasoningEffort: session?.reasoningEffort,
+      model: effectiveModel,
+      reasoningEffort: effectiveReasoning,
       sessionId: threadId,
       spinner: '\u25D0',
     }),
@@ -655,8 +679,8 @@ async function handleUserMessage(
     turnId: '', // Will be set when turn starts
     approvalPolicy,
     updateRateMs: (session?.updateRateSeconds ?? 3) * 1000,
-    model: session?.model,
-    reasoningEffort: session?.reasoningEffort,
+    model: effectiveModel,
+    reasoningEffort: effectiveReasoning,
     startTime: Date.now(),
   };
 
@@ -666,8 +690,8 @@ async function handleUserMessage(
   const input: TurnContent[] = [{ type: 'text', text }];
   const turnId = await codex.startTurn(threadId, input, {
     approvalPolicy,
-    reasoningEffort: session?.reasoningEffort,
-    model: session?.model,
+    reasoningEffort: effectiveReasoning,
+    model: effectiveModel,
   });
 
   // Update context with turn ID
