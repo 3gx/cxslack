@@ -702,60 +702,50 @@ export class CodexClient extends EventEmitter {
         } as ApprovalRequest);
         break;
 
-      // Token usage events
-      // Verified schema from `codex app-server generate-ts`:
-      // TokenCountEvent = { info: TokenUsageInfo | null, rate_limits: RateLimitSnapshot | null }
-      // TokenUsageInfo = { total_token_usage, last_token_usage, model_context_window: number | null }
-      // TokenUsage = { input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens, total_tokens }
+      // Token usage events - VERIFIED via test-token-event.ts capturing actual server responses:
+      //
+      // codex/event/token_count structure:
+      //   params.msg.info.total_token_usage.{input_tokens, cached_input_tokens, output_tokens}
+      //   params.msg.info.model_context_window
+      //
+      // thread/tokenUsage/updated structure:
+      //   params.tokenUsage.total.{inputTokens, cachedInputTokens, outputTokens} (camelCase!)
+      //   params.tokenUsage.modelContextWindow
       case 'thread/tokenUsage/updated':
       case 'codex/event/token_count': {
         const p = params as {
-          // New schema structure (verified)
-          info?: {
-            total_token_usage?: { input_tokens?: number; output_tokens?: number; cached_input_tokens?: number };
-            last_token_usage?: { input_tokens?: number; output_tokens?: number; cached_input_tokens?: number };
-            model_context_window?: number | null;
+          // codex/event/token_count: wrapped in msg
+          msg?: {
+            info?: {
+              total_token_usage?: { input_tokens?: number; output_tokens?: number; cached_input_tokens?: number };
+              model_context_window?: number | null;
+            };
           };
-          // Legacy flat structure (keep for backwards compat)
-          inputTokens?: number;
-          outputTokens?: number;
-          input_tokens?: number;
-          output_tokens?: number;
-          contextWindow?: number;
-          context_window?: number;
-          maxOutputTokens?: number;
-          max_output_tokens?: number;
-          cacheReadInputTokens?: number;
-          cache_read_input_tokens?: number;
-          cacheCreationInputTokens?: number;
-          cache_creation_input_tokens?: number;
-          costUsd?: number;
-          cost_usd?: number;
-          totalCostUsd?: number;
-          total_cost_usd?: number;
+          // thread/tokenUsage/updated: direct tokenUsage (camelCase)
+          tokenUsage?: {
+            total?: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; totalTokens?: number };
+            modelContextWindow?: number;
+          };
         };
 
-        // Extract from new schema structure first, fallback to legacy flat fields
-        const totalUsage = p.info?.total_token_usage;
-        const inputTokens = totalUsage?.input_tokens ?? p.inputTokens ?? p.input_tokens ?? 0;
-        const outputTokens = totalUsage?.output_tokens ?? p.outputTokens ?? p.output_tokens ?? 0;
-        const cacheReadInputTokens = totalUsage?.cached_input_tokens ?? p.cacheReadInputTokens ?? p.cache_read_input_tokens;
-        // model_context_window is in info, not at top level
-        const contextWindow = p.info?.model_context_window ?? p.contextWindow ?? p.context_window;
+        // Extract from codex/event/token_count (msg.info, snake_case)
+        const msgInfo = p.msg?.info;
+        const msgUsage = msgInfo?.total_token_usage;
 
-        const costUsd =
-          p.costUsd ??
-          p.cost_usd ??
-          p.totalCostUsd ??
-          p.total_cost_usd;
+        // Extract from thread/tokenUsage/updated (tokenUsage, camelCase)
+        const threadUsage = p.tokenUsage?.total;
+
+        // Merge both sources
+        const inputTokens = msgUsage?.input_tokens ?? threadUsage?.inputTokens ?? 0;
+        const outputTokens = msgUsage?.output_tokens ?? threadUsage?.outputTokens ?? 0;
+        const cacheReadInputTokens = msgUsage?.cached_input_tokens ?? threadUsage?.cachedInputTokens;
+        const contextWindow = msgInfo?.model_context_window ?? p.tokenUsage?.modelContextWindow;
+
         this.emit('tokens:updated', {
           inputTokens,
           outputTokens,
           contextWindow: contextWindow ?? undefined,
-          maxOutputTokens: p.maxOutputTokens ?? p.max_output_tokens,
           cacheReadInputTokens,
-          cacheCreationInputTokens: p.cacheCreationInputTokens ?? p.cache_creation_input_tokens,
-          costUsd,
         });
         break;
       }
