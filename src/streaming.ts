@@ -922,8 +922,8 @@ export class StreamingManager {
     });
 
     // Thinking started - Codex detected a Reasoning item started
-    // NOTE: We only track timing here. The actual thread message is posted by
-    // postThinkingToThread on turn completion (avoids duplicate messages).
+    // Add activity entry HERE with early timestamp so it appears in correct chronological order.
+    // The actual thread message is posted by postThinkingToThread on turn completion.
     this.codex.on('thinking:started', ({ itemId }) => {
       console.log(`[streaming] thinking:started itemId=${itemId}`);
       for (const [key, state] of this.states) {
@@ -932,8 +932,12 @@ export class StreamingManager {
           if (isFirstThinking) {
             state.thinkingStartTime = Date.now();
             state.thinkingItemId = itemId;
-            // Activity entry is added by thinking:delta when content arrives
-            // No thread message here - postThinkingToThread handles it on completion
+            // Add activity entry with EARLY timestamp (when reasoning actually starts)
+            this.activityManager.addEntry(key, {
+              type: 'thinking',
+              timestamp: Date.now(),
+              thinkingInProgress: true,
+            });
           }
           break;
         }

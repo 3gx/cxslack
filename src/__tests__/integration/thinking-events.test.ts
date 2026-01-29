@@ -7,8 +7,9 @@
  * - We receive item/started and item/completed for Reasoning type items
  *
  * DESIGN DECISION:
- * - thinking:started/complete only track timing - NO thread messages
- * - thinking:delta accumulates content and adds activity entry
+ * - thinking:started adds activity entry with EARLY timestamp (correct chronological order)
+ * - thinking:delta accumulates content and updates char count (fallback adds entry if first)
+ * - thinking:complete updates duration on activity entry
  * - postThinkingToThread posts full content on turn completion
  * - This avoids duplicate messages in the thread
  */
@@ -56,25 +57,75 @@ describe('Thinking/Reasoning Events', () => {
     streaming = new StreamingManager(slack, codex as unknown as CodexClient);
   });
 
-  it('thinking:started tracks timing but does NOT post thread messages', async () => {
+  it('thinking:started adds activity entry with early timestamp', async () => {
     const context = createContext();
     streaming.startStreaming(context);
     const conversationKey = makeConversationKey(context.channelId, context.threadTs);
 
+    const activityManager = (streaming as any).activityManager;
     const state = (streaming as any).states.get(conversationKey);
+
+    const beforeTime = Date.now();
 
     // Emit thinking:started (simulating Reasoning item started)
     codex.emit('thinking:started', { itemId: 'reasoning-item-123' });
 
-    // Wait a bit
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const afterTime = Date.now();
 
     // Should have set thinkingStartTime
     expect(state.thinkingStartTime).toBeGreaterThan(0);
     expect(state.thinkingItemId).toBe('reasoning-item-123');
 
-    // Should NOT have posted any messages (postThinkingToThread handles that on completion)
+    // Should have added activity entry with early timestamp
+    const entries = activityManager.getEntries(conversationKey);
+    const thinkingEntry = entries.find((e: any) => e.type === 'thinking');
+    expect(thinkingEntry).toBeDefined();
+    expect(thinkingEntry?.thinkingInProgress).toBe(true);
+    expect(thinkingEntry?.timestamp).toBeGreaterThanOrEqual(beforeTime);
+    expect(thinkingEntry?.timestamp).toBeLessThanOrEqual(afterTime);
+
+    // Should NOT have posted any thread messages
     expect(slack.chat.postMessage).not.toHaveBeenCalled();
+
+    streaming.stopStreaming(conversationKey);
+  });
+
+  it('thinking:started before thinking:delta - entry has early timestamp, no duplicates', async () => {
+    const context = createContext();
+    streaming.startStreaming(context);
+    const conversationKey = makeConversationKey(context.channelId, context.threadTs);
+
+    const activityManager = (streaming as any).activityManager;
+    const state = (streaming as any).states.get(conversationKey);
+
+    const earlyTime = Date.now();
+
+    // Emit thinking:started first - this adds entry with EARLY timestamp
+    codex.emit('thinking:started', { itemId: 'reasoning-123' });
+    const entryTimestamp = state.thinkingStartTime;
+    expect(entryTimestamp).toBeGreaterThanOrEqual(earlyTime);
+
+    // Simulate some time passing (tools running)
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const lateTime = Date.now();
+
+    // Then emit thinking:delta - should NOT add duplicate entry
+    codex.emit('thinking:delta', { content: 'Some reasoning content...' });
+
+    // Should have accumulated content
+    expect(state.thinkingContent).toBe('Some reasoning content...');
+
+    // Should have exactly ONE activity entry (from thinking:started)
+    const entries = activityManager.getEntries(conversationKey);
+    const thinkingEntries = entries.filter((e: any) => e.type === 'thinking');
+    expect(thinkingEntries).toHaveLength(1);
+
+    // Entry should have EARLY timestamp (from thinking:started), not late timestamp
+    expect(thinkingEntries[0].timestamp).toBe(entryTimestamp);
+    expect(thinkingEntries[0].timestamp).toBeLessThan(lateTime);
+
+    // Entry should have updated char count from thinking:delta
+    expect(thinkingEntries[0].charCount).toBe(25);
 
     streaming.stopStreaming(conversationKey);
   });
@@ -87,14 +138,13 @@ describe('Thinking/Reasoning Events', () => {
     const activityManager = (streaming as any).activityManager;
     const state = (streaming as any).states.get(conversationKey);
 
-    // Simulate thinking:delta adding an activity entry
-    activityManager.addEntry(conversationKey, {
-      type: 'thinking',
-      timestamp: Date.now(),
-      thinkingInProgress: true,
-    });
-    state.thinkingStartTime = Date.now() - 5000;
-    state.thinkingItemId = 'reasoning-item-789';
+    // Emit thinking:started to create entry
+    codex.emit('thinking:started', { itemId: 'reasoning-item-789' });
+
+    // Verify entry exists and is in progress
+    let entries = activityManager.getEntries(conversationKey);
+    let thinkingEntry = entries.find((e: any) => e.type === 'thinking');
+    expect(thinkingEntry?.thinkingInProgress).toBe(true);
 
     // Emit thinking:complete
     codex.emit('thinking:complete', { itemId: 'reasoning-item-789', durationMs: 5000 });
@@ -103,18 +153,15 @@ describe('Thinking/Reasoning Events', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     // Should have updated the activity entry
-    const entries = activityManager.getEntries(conversationKey);
-    const thinkingEntry = entries.find((e: any) => e.type === 'thinking');
+    entries = activityManager.getEntries(conversationKey);
+    thinkingEntry = entries.find((e: any) => e.type === 'thinking');
     expect(thinkingEntry?.thinkingInProgress).toBe(false);
     expect(thinkingEntry?.durationMs).toBe(5000);
-
-    // Note: chat.update may be called for the activity panel (timer-based updates)
-    // but thinking:complete does NOT post separate thinking messages
 
     streaming.stopStreaming(conversationKey);
   });
 
-  it('thinking:delta adds activity entry and accumulates content', async () => {
+  it('thinking:delta adds activity entry as fallback if thinking:started did not fire', async () => {
     const context = createContext();
     streaming.startStreaming(context);
     const conversationKey = makeConversationKey(context.channelId, context.threadTs);
@@ -122,14 +169,14 @@ describe('Thinking/Reasoning Events', () => {
     const activityManager = (streaming as any).activityManager;
     const state = (streaming as any).states.get(conversationKey);
 
-    // Emit thinking:delta
+    // Emit thinking:delta WITHOUT thinking:started first (edge case)
     codex.emit('thinking:delta', { content: 'This is some reasoning content...' });
 
     // Should have set thinkingStartTime and accumulated content
     expect(state.thinkingStartTime).toBeGreaterThan(0);
     expect(state.thinkingContent).toBe('This is some reasoning content...');
 
-    // Should have added activity entry
+    // Should have added activity entry (fallback behavior)
     const entries = activityManager.getEntries(conversationKey);
     const thinkingEntry = entries.find((e: any) => e.type === 'thinking');
     expect(thinkingEntry).toBeDefined();
@@ -150,6 +197,9 @@ describe('Thinking/Reasoning Events', () => {
     const activityManager = (streaming as any).activityManager;
     const state = (streaming as any).states.get(conversationKey);
 
+    // Emit thinking:started first
+    codex.emit('thinking:started', { itemId: 'reasoning-multi' });
+
     // Emit multiple deltas
     codex.emit('thinking:delta', { content: 'First part. ' });
     codex.emit('thinking:delta', { content: 'Second part. ' });
@@ -158,7 +208,7 @@ describe('Thinking/Reasoning Events', () => {
     // Should have accumulated all content
     expect(state.thinkingContent).toBe('First part. Second part. Third part.');
 
-    // Should have only ONE activity entry (not three)
+    // Should have only ONE activity entry (not four)
     const entries = activityManager.getEntries(conversationKey);
     const thinkingEntries = entries.filter((e: any) => e.type === 'thinking');
     expect(thinkingEntries).toHaveLength(1);
@@ -167,30 +217,43 @@ describe('Thinking/Reasoning Events', () => {
     streaming.stopStreaming(conversationKey);
   });
 
-  it('thinking:started before thinking:delta prevents duplicate entries', async () => {
+  it('activity entry timestamp is early even when content arrives late', async () => {
     const context = createContext();
     streaming.startStreaming(context);
     const conversationKey = makeConversationKey(context.channelId, context.threadTs);
 
     const activityManager = (streaming as any).activityManager;
-    const state = (streaming as any).states.get(conversationKey);
 
-    // Emit thinking:started first (sets thinkingStartTime)
-    codex.emit('thinking:started', { itemId: 'reasoning-123' });
-    expect(state.thinkingStartTime).toBeGreaterThan(0);
+    // Record time before thinking starts
+    const beforeThinkingTime = Date.now();
 
-    // Then emit thinking:delta - should NOT add duplicate entry
-    // because thinkingStartTime is already set
-    codex.emit('thinking:delta', { content: 'Some content' });
+    // Emit thinking:started - entry created with early timestamp
+    codex.emit('thinking:started', { itemId: 'reasoning-timing' });
 
-    // Should have only accumulated content, not added entry
-    expect(state.thinkingContent).toBe('Some content');
+    // Simulate tools running (100ms delay)
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
-    // No activity entry should exist (thinking:started doesn't add one,
-    // and thinking:delta sees thinkingStartTime already set)
+    // Add a tool entry (simulating tool activity during reasoning)
+    activityManager.addEntry(conversationKey, {
+      type: 'tool',
+      timestamp: Date.now(), // This has LATER timestamp
+      tool: 'bash',
+    });
+
+    const afterToolsTime = Date.now();
+
+    // Now thinking content arrives (late)
+    codex.emit('thinking:delta', { content: 'Late arriving content' });
+
+    // Get all entries
     const entries = activityManager.getEntries(conversationKey);
-    const thinkingEntries = entries.filter((e: any) => e.type === 'thinking');
-    expect(thinkingEntries).toHaveLength(0);
+    const thinkingEntry = entries.find((e: any) => e.type === 'thinking');
+    const toolEntry = entries.find((e: any) => e.type === 'tool');
+
+    // Thinking entry should have EARLY timestamp (before tools)
+    expect(thinkingEntry?.timestamp).toBeLessThan(toolEntry?.timestamp);
+    expect(thinkingEntry?.timestamp).toBeGreaterThanOrEqual(beforeThinkingTime);
+    expect(thinkingEntry?.timestamp).toBeLessThan(afterToolsTime);
 
     streaming.stopStreaming(conversationKey);
   });
