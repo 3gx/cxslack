@@ -674,6 +674,11 @@ export class CodexClient extends EventEmitter {
     const params = notification.params || {};
     const method = notification.method;
 
+    // DEBUG: Log thinking-related notifications
+    if (method.includes('reason') || method.includes('think')) {
+      console.log(`[codex-client] Thinking notification: ${method}`, JSON.stringify(params).slice(0, 200));
+    }
+
     // Handle both old-style (turn/*, item/*) and new-style (codex/event/*) notifications
     switch (method) {
       // Task/Turn lifecycle
@@ -1008,11 +1013,21 @@ export class CodexClient extends EventEmitter {
       case 'codex/event/agent_message':
       case 'codex/event/agent_reasoning':
       case 'codex/event/agent_reasoning_section_break':
-      case 'item/reasoning/summaryPartAdded':
-      case 'item/reasoning/summaryTextDelta':
       case 'codex/event/turn_aborted':
         // These are informational - no action needed
         break;
+
+      // Reasoning summary events - these contain the actual thinking content!
+      case 'item/reasoning/summaryPartAdded':
+      case 'item/reasoning/summaryTextDelta': {
+        const p = params as Record<string, unknown>;
+        const text = (p.text || p.delta || p.content || p.part || '') as string;
+        if (text) {
+          console.log(`[codex-client] Reasoning summary: ${method}`, text.slice(0, 100));
+          this.emit('thinking:delta', { content: text });
+        }
+        break;
+      }
 
       default:
         // Unknown notification - log but don't crash
