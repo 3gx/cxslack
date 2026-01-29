@@ -229,6 +229,29 @@ export class StreamingManager {
   startStreaming(context: StreamingContext): void {
     const key = makeConversationKey(context.channelId, context.threadTs);
 
+    // CRITICAL: Clean up any existing state for this key to prevent:
+    // 1. Orphaned timers that keep running
+    // 2. State corruption from overlapping contexts
+    // 3. Wrong emoji removal when turn:completed arrives for old turn
+    const existingState = this.states.get(key);
+    if (existingState) {
+      console.log(`[streaming] Cleaning up existing state for ${key} before starting new turn`);
+      if (existingState.updateTimer) {
+        clearInterval(existingState.updateTimer);
+      }
+      if (existingState.pendingAbortTimeout) {
+        clearTimeout(existingState.pendingAbortTimeout);
+      }
+      // Remove emoji from OLD message if still present (best effort)
+      const existingContext = this.contexts.get(key);
+      if (existingContext) {
+        removeProcessingEmoji(this.slack, existingContext.channelId, existingContext.originalTs)
+          .catch(() => { /* ignore - may already be removed */ });
+      }
+    }
+    cleanupMutex(key);
+    this.activityManager.clearEntries(key);
+
     // Create state - REUSE initial message as activity message
     const state: StreamingState = {
       text: '',
@@ -261,9 +284,6 @@ export class StreamingManager {
 
     this.contexts.set(key, context);
     this.states.set(key, state);
-
-    // Clear any previous activity entries
-    this.activityManager.clearEntries(key);
 
     // Add "Analyzing request..." entry
     this.activityManager.addEntry(key, {

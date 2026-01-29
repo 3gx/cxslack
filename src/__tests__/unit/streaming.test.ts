@@ -332,3 +332,179 @@ describe('StreamingManager clearTimer', () => {
     expect(timer).toBeNull();
   });
 });
+
+// Test state cleanup when starting new turn on existing key
+// This tests the fix for the race condition where:
+// 1. First query starts streaming
+// 2. Second query starts on same Slack thread before first completes
+// 3. Old timer must be cleared to prevent orphaned timers
+// 4. Old emoji must be removed to prevent stuck :eyes:
+describe('StreamingManager State Cleanup on Overwrite', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('old timer is cleared when new streaming starts on same key', () => {
+    const states = new Map<string, { updateTimer: ReturnType<typeof setInterval> | null }>();
+    const callback1 = vi.fn();
+    const callback2 = vi.fn();
+    const key = 'C123:456.789';
+
+    // First streaming starts
+    states.set(key, { updateTimer: setInterval(callback1, 500) });
+
+    vi.advanceTimersByTime(1000);
+    expect(callback1).toHaveBeenCalledTimes(2);
+
+    // Second streaming starts - MUST clean up old timer first
+    const existingState = states.get(key);
+    if (existingState?.updateTimer) {
+      clearInterval(existingState.updateTimer);
+    }
+    states.set(key, { updateTimer: setInterval(callback2, 500) });
+
+    vi.advanceTimersByTime(1000);
+    // callback1 should NOT have been called again (timer was cleared)
+    expect(callback1).toHaveBeenCalledTimes(2);
+    // callback2 should have been called for new timer
+    expect(callback2).toHaveBeenCalledTimes(2);
+
+    // Cleanup
+    const finalState = states.get(key);
+    if (finalState?.updateTimer) {
+      clearInterval(finalState.updateTimer);
+    }
+  });
+
+  it('orphaned timer keeps running if NOT cleaned up (demonstrates bug)', () => {
+    const states = new Map<string, { updateTimer: ReturnType<typeof setInterval> | null }>();
+    const callback1 = vi.fn();
+    const callback2 = vi.fn();
+    const key = 'C123:456.789';
+
+    // First streaming starts
+    const timer1 = setInterval(callback1, 500);
+    states.set(key, { updateTimer: timer1 });
+
+    vi.advanceTimersByTime(1000);
+    expect(callback1).toHaveBeenCalledTimes(2);
+
+    // BUG: Second streaming starts WITHOUT cleaning up old timer
+    // This is the bug we fixed - the old timer keeps running!
+    states.set(key, { updateTimer: setInterval(callback2, 500) });
+
+    vi.advanceTimersByTime(1000);
+    // BOTH callbacks get called - this is the bug!
+    expect(callback1).toHaveBeenCalledTimes(4); // Still running!
+    expect(callback2).toHaveBeenCalledTimes(2);
+
+    // Cleanup both timers
+    clearInterval(timer1);
+    const finalState = states.get(key);
+    if (finalState?.updateTimer) {
+      clearInterval(finalState.updateTimer);
+    }
+  });
+
+  it('contexts map correctly stores originalTs for emoji removal', () => {
+    interface TestContext {
+      channelId: string;
+      originalTs: string;
+      threadId: string;
+    }
+
+    const contexts = new Map<string, TestContext>();
+    const key = 'C123:456.789';
+
+    // First query - originalTs points to first user message
+    contexts.set(key, {
+      channelId: 'C123',
+      originalTs: '111.111',
+      threadId: 'codex-thread-A',
+    });
+
+    // When turn:completed arrives, we look up by threadId
+    const findByThreadId = (threadId: string): TestContext | undefined => {
+      for (const ctx of contexts.values()) {
+        if (ctx.threadId === threadId) return ctx;
+      }
+      return undefined;
+    };
+
+    // Before overwrite - finds correct originalTs
+    expect(findByThreadId('codex-thread-A')?.originalTs).toBe('111.111');
+
+    // Second query - OVERWRITES with new originalTs
+    // But uses SAME codex threadId (resumed session)
+    contexts.set(key, {
+      channelId: 'C123',
+      originalTs: '222.222', // Different message!
+      threadId: 'codex-thread-A', // Same codex session
+    });
+
+    // After overwrite - finds WRONG originalTs!
+    // This is the bug: first query's turn:completed would remove emoji from wrong message
+    expect(findByThreadId('codex-thread-A')?.originalTs).toBe('222.222');
+    // The :eyes: on '111.111' would never be removed!
+  });
+
+  it('proper cleanup removes emoji from old message before overwriting', async () => {
+    interface TestContext {
+      channelId: string;
+      originalTs: string;
+      threadId: string;
+    }
+
+    const contexts = new Map<string, TestContext>();
+    const states = new Map<string, { updateTimer: ReturnType<typeof setInterval> | null }>();
+    const removedEmojis: string[] = [];
+    const key = 'C123:456.789';
+
+    // Mock emoji removal
+    const removeProcessingEmoji = async (channelId: string, ts: string) => {
+      removedEmojis.push(ts);
+    };
+
+    // First query starts
+    contexts.set(key, {
+      channelId: 'C123',
+      originalTs: '111.111',
+      threadId: 'codex-thread-A',
+    });
+    states.set(key, { updateTimer: setInterval(() => {}, 500) });
+
+    // Second query starts - WITH proper cleanup
+    const existingState = states.get(key);
+    if (existingState) {
+      if (existingState.updateTimer) {
+        clearInterval(existingState.updateTimer);
+      }
+      const existingContext = contexts.get(key);
+      if (existingContext) {
+        // Remove emoji from OLD message before overwriting
+        await removeProcessingEmoji(existingContext.channelId, existingContext.originalTs);
+      }
+    }
+
+    // Now overwrite with new context
+    contexts.set(key, {
+      channelId: 'C123',
+      originalTs: '222.222',
+      threadId: 'codex-thread-A',
+    });
+    states.set(key, { updateTimer: setInterval(() => {}, 500) });
+
+    // Verify emoji was removed from OLD message
+    expect(removedEmojis).toContain('111.111');
+
+    // Cleanup
+    const finalState = states.get(key);
+    if (finalState?.updateTimer) {
+      clearInterval(finalState.updateTimer);
+    }
+  });
+});
