@@ -534,13 +534,13 @@ export class StreamingManager {
 
           // Save lastUsage to BOTH channel and thread sessions for /status command
           // (Channel session is needed when /status is called from main channel @bot mentions)
-          if (status === 'completed' && state.contextWindow) {
+          if (status === 'completed') {
             const lastUsage: LastUsage = {
               inputTokens: state.inputTokens,
               outputTokens: state.outputTokens,
               cacheReadInputTokens: state.cacheReadInputTokens,
               cacheCreationInputTokens: state.cacheCreationInputTokens,
-              contextWindow: state.contextWindow,
+              contextWindow: state.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
               model: found.context.model || 'unknown',
               maxOutputTokens: state.maxOutputTokens,
             };
