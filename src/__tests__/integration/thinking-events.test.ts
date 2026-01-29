@@ -5,7 +5,12 @@
  * - Codex ENCRYPTS thinking content in the `encrypted_content` field
  * - We can only detect WHEN thinking happens, not WHAT is being thought
  * - We receive item/started and item/completed for Reasoning type items
- * - The thinking:started and thinking:complete events are used to show "Thinking..." activity
+ *
+ * DESIGN DECISION:
+ * - thinking:started/complete only track timing - NO thread messages
+ * - thinking:delta accumulates content and adds activity entry
+ * - postThinkingToThread posts full content on turn completion
+ * - This avoids duplicate messages in the thread
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -51,148 +56,141 @@ describe('Thinking/Reasoning Events', () => {
     streaming = new StreamingManager(slack, codex as unknown as CodexClient);
   });
 
-  it('thinking:started posts placeholder message to thread', async () => {
+  it('thinking:started tracks timing but does NOT post thread messages', async () => {
     const context = createContext();
     streaming.startStreaming(context);
+    const conversationKey = makeConversationKey(context.channelId, context.threadTs);
+
+    const state = (streaming as any).states.get(conversationKey);
 
     // Emit thinking:started (simulating Reasoning item started)
     codex.emit('thinking:started', { itemId: 'reasoning-item-123' });
 
-    // Wait for async postMessage
+    // Wait a bit
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    // Should have posted a thinking placeholder
-    expect(slack.chat.postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        channel: 'C123',
-        thread_ts: '123.456',
-        text: ':brain: _Thinking..._',
-      })
-    );
+    // Should have set thinkingStartTime
+    expect(state.thinkingStartTime).toBeGreaterThan(0);
+    expect(state.thinkingItemId).toBe('reasoning-item-123');
 
-    streaming.stopStreaming(makeConversationKey(context.channelId, context.threadTs));
-  });
-
-  it('thinking:started adds thinking entry to activity', async () => {
-    const context = createContext();
-    streaming.startStreaming(context);
-    const conversationKey = makeConversationKey(context.channelId, context.threadTs);
-
-    // Get activity manager
-    const activityManager = (streaming as any).activityManager;
-
-    // Emit thinking:started
-    codex.emit('thinking:started', { itemId: 'reasoning-item-456' });
-
-    // Check activity entries
-    const entries = activityManager.getEntries(conversationKey);
-    const thinkingEntry = entries.find((e: any) => e.type === 'thinking');
-
-    expect(thinkingEntry).toBeDefined();
-    expect(thinkingEntry?.thinkingInProgress).toBe(true);
+    // Should NOT have posted any messages (postThinkingToThread handles that on completion)
+    expect(slack.chat.postMessage).not.toHaveBeenCalled();
 
     streaming.stopStreaming(conversationKey);
   });
 
-  it('thinking:complete updates message with duration', async () => {
+  it('thinking:complete updates activity entry duration', async () => {
     const context = createContext();
     streaming.startStreaming(context);
     const conversationKey = makeConversationKey(context.channelId, context.threadTs);
 
-    // Manually set state as if thinking:started was emitted
+    const activityManager = (streaming as any).activityManager;
     const state = (streaming as any).states.get(conversationKey);
-    state.thinkingStartTime = Date.now() - 5000; // 5 seconds ago
+
+    // Simulate thinking:delta adding an activity entry
+    activityManager.addEntry(conversationKey, {
+      type: 'thinking',
+      timestamp: Date.now(),
+      thinkingInProgress: true,
+    });
+    state.thinkingStartTime = Date.now() - 5000;
     state.thinkingItemId = 'reasoning-item-789';
-    state.thinkingMessageTs = 'thinking.msg.ts';
 
     // Emit thinking:complete
     codex.emit('thinking:complete', { itemId: 'reasoning-item-789', durationMs: 5000 });
 
-    // Wait for async update
+    // Wait for processing
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    // Should have updated the thinking message
-    expect(slack.chat.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        channel: 'C123',
-        ts: 'thinking.msg.ts',
-        text: expect.stringContaining(':brain: _Thinking complete_'),
-      })
-    );
+    // Should have updated the activity entry
+    const entries = activityManager.getEntries(conversationKey);
+    const thinkingEntry = entries.find((e: any) => e.type === 'thinking');
+    expect(thinkingEntry?.thinkingInProgress).toBe(false);
+    expect(thinkingEntry?.durationMs).toBe(5000);
+
+    // Note: chat.update may be called for the activity panel (timer-based updates)
+    // but thinking:complete does NOT post separate thinking messages
 
     streaming.stopStreaming(conversationKey);
   });
 
-  it('thinking:complete marks activity entry as not in progress', async () => {
+  it('thinking:delta adds activity entry and accumulates content', async () => {
     const context = createContext();
     streaming.startStreaming(context);
     const conversationKey = makeConversationKey(context.channelId, context.threadTs);
 
     const activityManager = (streaming as any).activityManager;
-
-    // Emit thinking:started first
-    codex.emit('thinking:started', { itemId: 'reasoning-item-101' });
-
-    // Verify in progress
-    let entries = activityManager.getEntries(conversationKey);
-    let thinkingEntry = entries.find((e: any) => e.type === 'thinking');
-    expect(thinkingEntry?.thinkingInProgress).toBe(true);
-
-    // Emit thinking:complete
-    codex.emit('thinking:complete', { itemId: 'reasoning-item-101', durationMs: 3000 });
-
-    // Wait for processing
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    // Verify not in progress and has duration
-    entries = activityManager.getEntries(conversationKey);
-    thinkingEntry = entries.find((e: any) => e.type === 'thinking');
-    expect(thinkingEntry?.thinkingInProgress).toBe(false);
-    expect(thinkingEntry?.durationMs).toBe(3000);
-
-    streaming.stopStreaming(conversationKey);
-  });
-
-  it('thinking:delta still works if Codex sends content (future-proofing)', async () => {
-    const context = createContext();
-    streaming.startStreaming(context);
-    const conversationKey = makeConversationKey(context.channelId, context.threadTs);
-
     const state = (streaming as any).states.get(conversationKey);
 
-    // Emit thinking:delta (rare, but possible if Codex changes behavior)
+    // Emit thinking:delta
     codex.emit('thinking:delta', { content: 'This is some reasoning content...' });
 
     // Should have set thinkingStartTime and accumulated content
     expect(state.thinkingStartTime).toBeGreaterThan(0);
     expect(state.thinkingContent).toBe('This is some reasoning content...');
 
+    // Should have added activity entry
+    const entries = activityManager.getEntries(conversationKey);
+    const thinkingEntry = entries.find((e: any) => e.type === 'thinking');
+    expect(thinkingEntry).toBeDefined();
+    expect(thinkingEntry?.thinkingInProgress).toBe(true);
+    expect(thinkingEntry?.charCount).toBe(33);
+
+    // Should NOT have posted thread messages
+    expect(slack.chat.postMessage).not.toHaveBeenCalled();
+
     streaming.stopStreaming(conversationKey);
   });
 
-  it('encrypted thinking content shows appropriate message', async () => {
+  it('thinking:delta accumulates content across multiple calls', async () => {
     const context = createContext();
     streaming.startStreaming(context);
     const conversationKey = makeConversationKey(context.channelId, context.threadTs);
 
-    // Setup state for complete event (no content accumulated = encrypted)
+    const activityManager = (streaming as any).activityManager;
     const state = (streaming as any).states.get(conversationKey);
-    state.thinkingStartTime = Date.now() - 2000;
-    state.thinkingItemId = 'reasoning-encrypted';
-    state.thinkingMessageTs = 'thinking.msg.ts';
-    state.thinkingContent = ''; // No content received (encrypted)
 
-    // Emit thinking:complete
-    codex.emit('thinking:complete', { itemId: 'reasoning-encrypted', durationMs: 2000 });
+    // Emit multiple deltas
+    codex.emit('thinking:delta', { content: 'First part. ' });
+    codex.emit('thinking:delta', { content: 'Second part. ' });
+    codex.emit('thinking:delta', { content: 'Third part.' });
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Should have accumulated all content
+    expect(state.thinkingContent).toBe('First part. Second part. Third part.');
 
-    // Should show "(content encrypted)" message
-    expect(slack.chat.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: expect.stringContaining('_(content encrypted)_'),
-      })
-    );
+    // Should have only ONE activity entry (not three)
+    const entries = activityManager.getEntries(conversationKey);
+    const thinkingEntries = entries.filter((e: any) => e.type === 'thinking');
+    expect(thinkingEntries).toHaveLength(1);
+    expect(thinkingEntries[0].charCount).toBe(36);
+
+    streaming.stopStreaming(conversationKey);
+  });
+
+  it('thinking:started before thinking:delta prevents duplicate entries', async () => {
+    const context = createContext();
+    streaming.startStreaming(context);
+    const conversationKey = makeConversationKey(context.channelId, context.threadTs);
+
+    const activityManager = (streaming as any).activityManager;
+    const state = (streaming as any).states.get(conversationKey);
+
+    // Emit thinking:started first (sets thinkingStartTime)
+    codex.emit('thinking:started', { itemId: 'reasoning-123' });
+    expect(state.thinkingStartTime).toBeGreaterThan(0);
+
+    // Then emit thinking:delta - should NOT add duplicate entry
+    // because thinkingStartTime is already set
+    codex.emit('thinking:delta', { content: 'Some content' });
+
+    // Should have only accumulated content, not added entry
+    expect(state.thinkingContent).toBe('Some content');
+
+    // No activity entry should exist (thinking:started doesn't add one,
+    // and thinking:delta sees thinkingStartTime already set)
+    const entries = activityManager.getEntries(conversationKey);
+    const thinkingEntries = entries.filter((e: any) => e.type === 'thinking');
+    expect(thinkingEntries).toHaveLength(0);
 
     streaming.stopStreaming(conversationKey);
   });

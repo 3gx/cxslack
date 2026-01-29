@@ -627,7 +627,8 @@ export class StreamingManager {
                 }).catch((err) => console.error('[streaming] Failed to save messageTurn/Tool map (final):', err));
               },
               buildActions: (entry, slackTs) => {
-                return buildActivityEntryActionParams(entry, found.key, found.context.turnId, slackTs || state.activityMessageTs || originalTs, true);
+                // includeAttachThinking=false: full thinking content is posted by postThinkingToThread
+                return buildActivityEntryActionParams(entry, found.key, found.context.turnId, slackTs || state.activityMessageTs || originalTs, false);
               },
             }
           ).catch((err) => console.error('[streaming] Final batch flush failed:', err));
@@ -752,7 +753,8 @@ export class StreamingManager {
                   }).catch((err) => console.error('[streaming] Failed to save message maps:', err));
                 },
                 buildActions: (entry, slackTs) =>
-                  buildActivityEntryActionParams(entry, key, context.turnId, slackTs || context.originalTs, true),
+                  // includeAttachThinking=false: full thinking content is posted by postThinkingToThread
+                  buildActivityEntryActionParams(entry, key, context.turnId, slackTs || context.originalTs, false),
               }
             ).catch((err) => console.error('[streaming] Thread batch post failed:', err));
           }
@@ -861,7 +863,8 @@ export class StreamingManager {
                     }).catch((err) => console.error('[streaming] Failed to save message maps:', err));
                   },
                   buildActions: (entry, slackTs) =>
-                    buildActivityEntryActionParams(entry, key, context.turnId, slackTs || context.originalTs, true),
+                    // includeAttachThinking=false: full thinking content is posted by postThinkingToThread
+                    buildActivityEntryActionParams(entry, key, context.turnId, slackTs || context.originalTs, false),
                 }
               ).catch((err) => {
                 console.error('[streaming] Thread batch post failed:', err);
@@ -919,43 +922,18 @@ export class StreamingManager {
     });
 
     // Thinking started - Codex detected a Reasoning item started
-    // NOTE: Codex encrypts thinking content, so we only know WHEN thinking happens,
-    // not WHAT is being thought. We use this to show "Thinking..." in activity.
+    // NOTE: We only track timing here. The actual thread message is posted by
+    // postThinkingToThread on turn completion (avoids duplicate messages).
     this.codex.on('thinking:started', ({ itemId }) => {
       console.log(`[streaming] thinking:started itemId=${itemId}`);
       for (const [key, state] of this.states) {
         if (state.isStreaming) {
-          const context = this.contexts.get(key);
           const isFirstThinking = !state.thinkingStartTime;
-
           if (isFirstThinking) {
             state.thinkingStartTime = Date.now();
             state.thinkingItemId = itemId;
-
-            // Add thinking entry to activity (content will be empty but shows "Thinking...")
-            this.activityManager.addEntry(key, {
-              type: 'thinking',
-              timestamp: Date.now(),
-              thinkingInProgress: true,
-            });
-
-            // Post placeholder to thread (ccslack parity)
-            if (context) {
-              const threadTs = state.threadParentTs || context.originalTs;
-              withSlackRetry(
-                () => this.slack.chat.postMessage({
-                  channel: context.channelId,
-                  thread_ts: threadTs,
-                  text: ':brain: _Thinking..._',
-                }),
-                'thinking.placeholder'
-              ).then((result) => {
-                state.thinkingMessageTs = (result as any).ts;
-                console.log(`[streaming] Posted thinking placeholder: ${state.thinkingMessageTs}`);
-              }).catch((err) => {
-                console.error('[streaming] Failed to post thinking placeholder:', err);
-              });
-            }
+            // Activity entry is added by thinking:delta when content arrives
+            // No thread message here - postThinkingToThread handles it on completion
           }
           break;
         }
@@ -963,12 +941,11 @@ export class StreamingManager {
     });
 
     // Thinking complete - Codex Reasoning item finished
+    // Only updates activity entry duration - no thread messages (postThinkingToThread handles that)
     this.codex.on('thinking:complete', ({ itemId, durationMs }) => {
       console.log(`[streaming] thinking:complete itemId=${itemId} durationMs=${durationMs}`);
       for (const [key, state] of this.states) {
         if (state.isStreaming && (state.thinkingItemId === itemId || state.thinkingStartTime)) {
-          const context = this.contexts.get(key);
-
           // Mark thinking as complete in activity entries
           const entries = this.activityManager.getEntries(key);
           for (let i = entries.length - 1; i >= 0; i--) {
@@ -978,27 +955,6 @@ export class StreamingManager {
               break;
             }
           }
-
-          // Update thread message to show thinking completed
-          if (state.thinkingMessageTs && context) {
-            const durationSec = Math.round(durationMs / 1000);
-            const charCount = state.thinkingContent?.length || 0;
-            const summaryText = charCount > 0
-              ? `:brain: _Thinking complete_ [${durationSec}s] _${charCount} chars_`
-              : `:brain: _Thinking complete_ [${durationSec}s] _(content encrypted)_`;
-
-            withSlackRetry(
-              () => this.slack.chat.update({
-                channel: context.channelId,
-                ts: state.thinkingMessageTs!,
-                text: summaryText,
-              }),
-              'thinking.complete'
-            ).catch((err) => {
-              console.error('[streaming] Failed to update thinking complete message:', err);
-            });
-          }
-
           // Reset for next thinking block
           state.thinkingItemId = undefined;
           break;
@@ -1006,42 +962,22 @@ export class StreamingManager {
       }
     });
 
-    // Thinking delta (reasoning content) - IN-PLACE UPDATES like ccslack
-    // NOTE: This rarely fires since Codex encrypts thinking content.
-    // On first delta: post placeholder message, save ts
-    // On subsequent deltas: update in-place with rolling tail (rate-limited 2s)
+    // Thinking delta (reasoning content) - accumulate content only
+    // NOTE: No thread messages here - postThinkingToThread handles posting on turn completion.
+    // This handler just accumulates content and updates activity entry char counts.
     this.codex.on('thinking:delta', ({ content }) => {
       for (const [key, state] of this.states) {
         if (state.isStreaming) {
-          const context = this.contexts.get(key);
           const isFirstDelta = !state.thinkingStartTime;
 
           if (isFirstDelta) {
             state.thinkingStartTime = Date.now();
-            // Add thinking entry (will be updated by timer)
+            // Add thinking entry to activity (will be updated with char count)
             this.activityManager.addEntry(key, {
               type: 'thinking',
               timestamp: Date.now(),
               thinkingInProgress: true,
             });
-
-            // Post placeholder to thread (ccslack parity)
-            if (context) {
-              const threadTs = state.threadParentTs || context.originalTs;
-              withSlackRetry(
-                () => this.slack.chat.postMessage({
-                  channel: context.channelId,
-                  thread_ts: threadTs,
-                  text: ':bulb: *Thinking...*',
-                }),
-                'thinking.placeholder'
-              ).then((result) => {
-                state.thinkingMessageTs = (result as any).ts;
-                console.log(`[streaming] Posted thinking placeholder: ${state.thinkingMessageTs}`);
-              }).catch((err) => {
-                console.error('[streaming] Failed to post thinking placeholder:', err);
-              });
-            }
           }
 
           state.thinkingContent += content;
@@ -1054,34 +990,6 @@ export class StreamingManager {
               entries[i].thinkingInProgress = true;
               break;
             }
-          }
-
-          // Update thinking message in-place (rate-limited 2s gap)
-          const now = Date.now();
-          const THINKING_UPDATE_INTERVAL_MS = 2000;
-          if (state.thinkingMessageTs && context && now - state.lastThinkingUpdateTime >= THINKING_UPDATE_INTERVAL_MS) {
-            state.lastThinkingUpdateTime = now;
-            const elapsedSec = Math.round((now - state.thinkingStartTime) / 1000);
-            const charCount = state.thinkingContent.length;
-
-            // Extract tail with formatting preserved (last 500 chars)
-            const TAIL_SIZE = 500;
-            let preview = state.thinkingContent;
-            if (preview.length > TAIL_SIZE) {
-              preview = '...' + preview.slice(-TAIL_SIZE);
-            }
-
-            // Update in-place (fire-and-forget to avoid blocking)
-            withSlackRetry(
-              () => this.slack.chat.update({
-                channel: context.channelId,
-                ts: state.thinkingMessageTs!,
-                text: `:bulb: *Thinking...* [${elapsedSec}s] _${charCount} chars_\n> ${preview.split('\n').slice(0, 5).join('\n> ')}`,
-              }),
-              'thinking.update'
-            ).catch((err) => {
-              console.error('[streaming] Failed to update thinking message:', err);
-            });
           }
           break;
         }
