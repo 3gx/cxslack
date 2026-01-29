@@ -229,13 +229,24 @@ describe.skipIf(SKIP_LIVE)('Codex Thread Fork', { timeout: 120000 }, () => {
     notifications.length = 0;
 
     // 3. Fork at turn index 1 (should have 42 and 99, but NOT 777)
-    // Codex doesn't support turnIndex directly - must use fork + rollback
+    // ROBUST: Get actual turn count from Codex (source of truth) - not hardcoded!
+    // This is what production code does - handles CLI usage, /resume elsewhere, etc.
     const forkTurnIndex = 1;
-    const totalTurns = 3;
-    const turnsToRollback = totalTurns - (forkTurnIndex + 1); // 3 - 2 = 1 turn to drop
-    console.log(`\nForking at turn index ${forkTurnIndex} (total turns: ${totalTurns}, rollback: ${turnsToRollback})...`);
 
-    // Step 1: Fork the thread (creates full copy)
+    // Step 1: Query Codex for actual turn count (source of truth)
+    console.log('\nQuerying Codex for actual turn count (thread/read with includeTurns)...');
+    const readResult = await rpc<{ thread: ThreadInfo & { turns?: Array<{ id: string }> } }>('thread/read', {
+      threadId: originalThreadId,
+      includeTurns: true,
+    });
+    const totalTurns = readResult.thread.turns?.length ?? 0;
+    console.log(`Codex reports ${totalTurns} turns in source thread`);
+    expect(totalTurns).toBe(3); // Verify we created 3 turns
+
+    const turnsToRollback = totalTurns - (forkTurnIndex + 1);
+    console.log(`Forking at turn index ${forkTurnIndex} (total turns: ${totalTurns}, rollback: ${turnsToRollback})...`);
+
+    // Step 2: Fork the thread (creates full copy)
     const forkResult = await rpc<{ thread: ThreadInfo }>('thread/fork', {
       threadId: originalThreadId,
     });
@@ -246,7 +257,7 @@ describe.skipIf(SKIP_LIVE)('Codex Thread Fork', { timeout: 120000 }, () => {
     expect(forkedThread.id).not.toBe(originalThreadId);
     console.log(`Forked thread: ${forkedThread.id}`);
 
-    // Step 2: Rollback the forked thread to the desired point
+    // Step 3: Rollback the forked thread to the desired point
     if (turnsToRollback > 0) {
       console.log(`Rolling back ${turnsToRollback} turns...`);
       await rpc('thread/rollback', {
@@ -335,6 +346,51 @@ describe.skipIf(SKIP_LIVE)('Codex Thread Fork', { timeout: 120000 }, () => {
     expect(has42).toBe(true);
     expect(has99).toBe(true);
     expect(has777).toBe(false); // CRITICAL: Must NOT include content after fork point
+
+    console.log('==========================================\n');
+  });
+
+  it('thread/read with includeTurns returns actual turn count (robust fork)', async () => {
+    // Clear notifications
+    notifications.length = 0;
+
+    console.log('\n=== Thread Read Turn Count Test (Robust Fork) ===');
+
+    // 1. Start original thread
+    const threadResult = await rpc<{ thread: ThreadInfo }>('thread/start', {
+      workingDirectory: process.cwd(),
+    });
+    const originalThreadId = threadResult.thread.id;
+    expect(originalThreadId).toBeDefined();
+    console.log(`Thread: ${originalThreadId}`);
+
+    // 2. Send multiple turns
+    for (let i = 0; i < 3; i++) {
+      notifications.length = 0;
+      await rpc('turn/start', {
+        threadId: originalThreadId,
+        input: [{ type: 'text', text: `Turn ${i}: Say "turn ${i} done" and nothing else.` }],
+      });
+      const complete = await waitForTurnComplete();
+      expect(complete).toBe(true);
+      console.log(`Turn ${i} completed`);
+    }
+
+    // 3. Read thread with includeTurns to get actual turn count from Codex (source of truth)
+    console.log('\nReading thread with includeTurns=true...');
+    const readResult = await rpc<{ thread: ThreadInfo & { turns?: Array<{ id: string }> } }>('thread/read', {
+      threadId: originalThreadId,
+      includeTurns: true,
+    });
+
+    const turns = readResult.thread.turns;
+    expect(turns).toBeDefined();
+    console.log(`Codex reports ${turns?.length} turns`);
+
+    // CRITICAL: Codex is the source of truth for turn count
+    // This is what makes fork robust - even if user used CLI, /resumed elsewhere, etc.
+    expect(turns?.length).toBe(3);
+    console.log('✓ VERIFIED: thread/read returns correct turn count from Codex (source of truth)');
 
     console.log('==========================================\n');
   });

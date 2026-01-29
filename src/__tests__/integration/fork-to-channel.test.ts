@@ -224,4 +224,88 @@ describe('Fork to Channel Flow', () => {
       expect(sourceLink).toBe('<https://slack.com/archives/C123/p456789|source conversation>');
     });
   });
+
+  describe('Point-in-Time Fork Calculation', () => {
+    // This tests the rollback calculation logic used when forking at a specific turn
+    // Formula: turnsToRollback = totalTurns - (turnIndex + 1)
+    function calculateRollback(turnIndex: number, totalTurns: number): number {
+      const turnsToKeep = turnIndex + 1;
+      return totalTurns - turnsToKeep;
+    }
+
+    it('fork at turn 0 of 3 drops 2 turns', () => {
+      // Thread: [turn0, turn1, turn2] - fork at turn0 keeps only turn0
+      expect(calculateRollback(0, 3)).toBe(2);
+    });
+
+    it('fork at turn 1 of 3 drops 1 turn', () => {
+      // Thread: [turn0, turn1, turn2] - fork at turn1 keeps turn0,turn1
+      expect(calculateRollback(1, 3)).toBe(1);
+    });
+
+    it('fork at turn 2 of 3 drops 0 turns (full copy)', () => {
+      // Thread: [turn0, turn1, turn2] - fork at turn2 keeps all turns
+      expect(calculateRollback(2, 3)).toBe(0);
+    });
+
+    it('fork at turn 0 of 1 drops 0 turns', () => {
+      // Single turn thread
+      expect(calculateRollback(0, 1)).toBe(0);
+    });
+
+    it('fork at turn 5 of 20 drops 14 turns', () => {
+      // Large thread: keep turns 0-5 (6 turns), drop 14
+      expect(calculateRollback(5, 20)).toBe(14);
+    });
+
+    it('fork at turn 9 of 10 drops 0 turns (fork at last turn)', () => {
+      // Fork at last turn is equivalent to full copy
+      expect(calculateRollback(9, 10)).toBe(0);
+    });
+  });
+
+  describe('Fork Metadata in Session', () => {
+    it('preserves turnIndex in modal private_metadata', () => {
+      // Verify the modal correctly stores turnIndex for use in fork
+      const modal = buildForkToChannelModalView({
+        sourceChannelId: 'C123456',
+        sourceChannelName: 'general',
+        sourceMessageTs: '123.456',
+        sourceThreadTs: '789.012',
+        conversationKey: 'C123456:789.012',
+        turnIndex: 7,
+      });
+
+      const metadata = JSON.parse(modal.private_metadata);
+      expect(metadata.turnIndex).toBe(7);
+    });
+
+    it('handles turn 0 (fork at first turn)', () => {
+      const modal = buildForkToChannelModalView({
+        sourceChannelId: 'C123456',
+        sourceChannelName: 'general',
+        sourceMessageTs: '123.456',
+        sourceThreadTs: '789.012',
+        conversationKey: 'C123456:789.012',
+        turnIndex: 0,
+      });
+
+      const metadata = JSON.parse(modal.private_metadata);
+      expect(metadata.turnIndex).toBe(0);
+    });
+
+    it('modal description mentions correct turn number', () => {
+      const modal = buildForkToChannelModalView({
+        sourceChannelId: 'C123456',
+        sourceChannelName: 'general',
+        sourceMessageTs: '123.456',
+        sourceThreadTs: '789.012',
+        conversationKey: 'C123456:789.012',
+        turnIndex: 0,
+      });
+
+      const sectionBlock = modal.blocks.find((b) => b.type === 'section');
+      expect(sectionBlock?.text?.text).toContain('turn 0');
+    });
+  });
 });

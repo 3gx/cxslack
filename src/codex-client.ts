@@ -414,6 +414,41 @@ export class CodexClient extends EventEmitter {
   }
 
   /**
+   * Read thread information from Codex.
+   * This is the source of truth for thread state, including turn count.
+   *
+   * @param threadId - The thread to read
+   * @param includeTurns - Whether to include turn history (default: false)
+   * @returns Thread info with optional turns array
+   */
+  async readThread(
+    threadId: string,
+    includeTurns = false
+  ): Promise<{ thread: ThreadInfo; turns?: Array<{ id: string }> }> {
+    const result = await this.rpc<{
+      thread: ThreadInfo & { turns?: Array<{ id: string }> };
+    }>('thread/read', {
+      threadId,
+      includeTurns,
+    });
+    return {
+      thread: result.thread,
+      turns: result.thread.turns,
+    };
+  }
+
+  /**
+   * Get the number of turns in a thread from Codex (source of truth).
+   *
+   * @param threadId - The thread to query
+   * @returns The number of turns in the thread
+   */
+  async getThreadTurnCount(threadId: string): Promise<number> {
+    const { turns } = await this.readThread(threadId, true);
+    return turns?.length ?? 0;
+  }
+
+  /**
    * Fork a thread (creates a full copy).
    * Note: Codex thread/fork does NOT support turnIndex parameter.
    * For point-in-time forking, use forkThread + rollbackThread.
@@ -427,16 +462,27 @@ export class CodexClient extends EventEmitter {
    * Fork a thread at a specific turn index (point-in-time fork).
    * This forks the thread, then rolls back to keep only turns up to turnIndex.
    *
+   * ROBUST: Gets the actual turn count from Codex (source of truth), not our tracking.
+   * This handles cases where user continued in CLI, /resumed elsewhere, etc.
+   *
    * @param threadId - The thread to fork
    * @param turnIndex - The turn index to fork at (0-based, inclusive)
-   * @param totalTurns - Total number of turns in the original thread
    * @returns The forked thread info
    */
   async forkThreadAtTurn(
     threadId: string,
-    turnIndex: number,
-    totalTurns: number
+    turnIndex: number
   ): Promise<ThreadInfo> {
+    // Get ACTUAL turn count from Codex (source of truth)
+    // This is robust against CLI usage, /resume elsewhere, bot restarts, etc.
+    const totalTurns = await this.getThreadTurnCount(threadId);
+    console.log(`[fork] Codex reports ${totalTurns} turns in source thread, forking at turn ${turnIndex}`);
+
+    // Validate turnIndex is within bounds
+    if (turnIndex < 0 || turnIndex >= totalTurns) {
+      throw new Error(`Invalid turnIndex ${turnIndex}: thread has ${totalTurns} turns (0-${totalTurns - 1})`);
+    }
+
     // First, create a full fork
     const forkedThread = await this.forkThread(threadId);
 
@@ -444,6 +490,8 @@ export class CodexClient extends EventEmitter {
     // If we have turns [0, 1, 2] and want to fork at turn 0, we keep 1 turn and drop 2
     const turnsToKeep = turnIndex + 1;
     const turnsToRollback = totalTurns - turnsToKeep;
+
+    console.log(`[fork] Keeping ${turnsToKeep} turns, rolling back ${turnsToRollback} turns`);
 
     if (turnsToRollback > 0) {
       // Rollback the forked thread to the desired point

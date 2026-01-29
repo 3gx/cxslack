@@ -331,3 +331,231 @@ describe('CodexClient Token Events', () => {
     });
   });
 });
+
+describe('CodexClient Point-in-Time Fork', () => {
+  describe('rollbackThread validation', () => {
+    it('rejects numTurns < 1', async () => {
+      const client = new CodexClient({ requestTimeout: 10 });
+      // Mock the process to avoid "not connected" error - just test the validation
+      (client as any).process = { stdin: { write: vi.fn() } };
+      (client as any).initialized = true;
+
+      await expect(client.rollbackThread('thread-1', 0)).rejects.toThrow('numTurns must be >= 1');
+      await expect(client.rollbackThread('thread-1', -1)).rejects.toThrow('numTurns must be >= 1');
+    });
+
+    it('accepts numTurns >= 1', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      const rpcSpy = vi.spyOn(client, 'rpc').mockResolvedValue({ thread: { id: 'thread-1' } });
+
+      await client.rollbackThread('thread-1', 1);
+
+      expect(rpcSpy).toHaveBeenCalledWith('thread/rollback', {
+        threadId: 'thread-1',
+        numTurns: 1,
+      });
+    });
+
+    it('passes correct RPC params for rollback', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      const rpcSpy = vi.spyOn(client, 'rpc').mockResolvedValue({ thread: { id: 'thread-1' } });
+
+      await client.rollbackThread('thread-xyz', 5);
+
+      expect(rpcSpy).toHaveBeenCalledWith('thread/rollback', {
+        threadId: 'thread-xyz',
+        numTurns: 5,
+      });
+    });
+  });
+
+  describe('readThread and getThreadTurnCount', () => {
+    it('readThread calls thread/read with includeTurns', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      const rpcSpy = vi.spyOn(client, 'rpc').mockResolvedValue({
+        thread: {
+          id: 'thread-123',
+          workingDirectory: '/test',
+          createdAt: new Date().toISOString(),
+          turns: [{ id: 't1' }, { id: 't2' }, { id: 't3' }],
+        },
+      });
+
+      const result = await client.readThread('thread-123', true);
+
+      expect(rpcSpy).toHaveBeenCalledWith('thread/read', { threadId: 'thread-123', includeTurns: true });
+      expect(result.turns).toHaveLength(3);
+    });
+
+    it('getThreadTurnCount returns correct count', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      vi.spyOn(client, 'readThread').mockResolvedValue({
+        thread: { id: 'thread-123', workingDirectory: '/test', createdAt: new Date().toISOString() },
+        turns: [{ id: 't1' }, { id: 't2' }, { id: 't3' }, { id: 't4' }, { id: 't5' }],
+      });
+
+      const count = await client.getThreadTurnCount('thread-123');
+
+      expect(count).toBe(5);
+    });
+
+    it('getThreadTurnCount returns 0 for empty turns', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      vi.spyOn(client, 'readThread').mockResolvedValue({
+        thread: { id: 'thread-123', workingDirectory: '/test', createdAt: new Date().toISOString() },
+        turns: undefined,
+      });
+
+      const count = await client.getThreadTurnCount('thread-123');
+
+      expect(count).toBe(0);
+    });
+  });
+
+  describe('forkThreadAtTurn calculation', () => {
+    it('gets turn count from Codex and calculates correct rollback for turn 0 of 3', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      // Mock getThreadTurnCount to return 3 turns (source of truth from Codex)
+      vi.spyOn(client, 'getThreadTurnCount').mockResolvedValue(3);
+      const forkSpy = vi.spyOn(client, 'forkThread').mockResolvedValue({
+        id: 'forked-thread',
+        workingDirectory: '/test',
+        createdAt: new Date().toISOString(),
+      });
+      const rollbackSpy = vi.spyOn(client, 'rollbackThread').mockResolvedValue();
+
+      // Fork at turn 0, Codex says 3 turns → keep 1 turn, rollback 2
+      await client.forkThreadAtTurn('source-thread', 0);
+
+      expect(forkSpy).toHaveBeenCalledWith('source-thread');
+      expect(rollbackSpy).toHaveBeenCalledWith('forked-thread', 2);
+    });
+
+    it('gets turn count from Codex and calculates correct rollback for turn 1 of 3', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      vi.spyOn(client, 'getThreadTurnCount').mockResolvedValue(3);
+      const forkSpy = vi.spyOn(client, 'forkThread').mockResolvedValue({
+        id: 'forked-thread',
+        workingDirectory: '/test',
+        createdAt: new Date().toISOString(),
+      });
+      const rollbackSpy = vi.spyOn(client, 'rollbackThread').mockResolvedValue();
+
+      // Fork at turn 1, Codex says 3 turns → keep 2 turns, rollback 1
+      await client.forkThreadAtTurn('source-thread', 1);
+
+      expect(forkSpy).toHaveBeenCalledWith('source-thread');
+      expect(rollbackSpy).toHaveBeenCalledWith('forked-thread', 1);
+    });
+
+    it('skips rollback when fork at last turn', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      vi.spyOn(client, 'getThreadTurnCount').mockResolvedValue(3);
+      const forkSpy = vi.spyOn(client, 'forkThread').mockResolvedValue({
+        id: 'forked-thread',
+        workingDirectory: '/test',
+        createdAt: new Date().toISOString(),
+      });
+      const rollbackSpy = vi.spyOn(client, 'rollbackThread').mockResolvedValue();
+
+      // Fork at turn 2, Codex says 3 turns → keep 3 turns, rollback 0 (skip)
+      await client.forkThreadAtTurn('source-thread', 2);
+
+      expect(forkSpy).toHaveBeenCalledWith('source-thread');
+      expect(rollbackSpy).not.toHaveBeenCalled();
+    });
+
+    it('handles single-turn thread (fork at turn 0 of 1)', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      vi.spyOn(client, 'getThreadTurnCount').mockResolvedValue(1);
+      const forkSpy = vi.spyOn(client, 'forkThread').mockResolvedValue({
+        id: 'forked-thread',
+        workingDirectory: '/test',
+        createdAt: new Date().toISOString(),
+      });
+      const rollbackSpy = vi.spyOn(client, 'rollbackThread').mockResolvedValue();
+
+      // Fork at turn 0, Codex says 1 turn → keep 1 turn, rollback 0 (skip)
+      await client.forkThreadAtTurn('source-thread', 0);
+
+      expect(forkSpy).toHaveBeenCalledWith('source-thread');
+      expect(rollbackSpy).not.toHaveBeenCalled();
+    });
+
+    it('calculates correct rollback for large thread', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      vi.spyOn(client, 'getThreadTurnCount').mockResolvedValue(20);
+      const forkSpy = vi.spyOn(client, 'forkThread').mockResolvedValue({
+        id: 'forked-thread',
+        workingDirectory: '/test',
+        createdAt: new Date().toISOString(),
+      });
+      const rollbackSpy = vi.spyOn(client, 'rollbackThread').mockResolvedValue();
+
+      // Fork at turn 5, Codex says 20 turns → keep 6 turns, rollback 14
+      await client.forkThreadAtTurn('source-thread', 5);
+
+      expect(forkSpy).toHaveBeenCalledWith('source-thread');
+      expect(rollbackSpy).toHaveBeenCalledWith('forked-thread', 14);
+    });
+
+    it('returns forked thread info', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      const expectedThread = {
+        id: 'forked-thread-123',
+        workingDirectory: '/test/path',
+        createdAt: '2024-01-01T00:00:00Z',
+      };
+      vi.spyOn(client, 'getThreadTurnCount').mockResolvedValue(3);
+      vi.spyOn(client, 'forkThread').mockResolvedValue(expectedThread);
+      vi.spyOn(client, 'rollbackThread').mockResolvedValue();
+
+      const result = await client.forkThreadAtTurn('source-thread', 0);
+
+      expect(result).toEqual(expectedThread);
+    });
+
+    it('rejects invalid turnIndex (negative)', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      vi.spyOn(client, 'getThreadTurnCount').mockResolvedValue(3);
+
+      await expect(client.forkThreadAtTurn('source-thread', -1))
+        .rejects.toThrow('Invalid turnIndex -1: thread has 3 turns (0-2)');
+    });
+
+    it('rejects invalid turnIndex (out of bounds)', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      vi.spyOn(client, 'getThreadTurnCount').mockResolvedValue(3);
+
+      await expect(client.forkThreadAtTurn('source-thread', 5))
+        .rejects.toThrow('Invalid turnIndex 5: thread has 3 turns (0-2)');
+    });
+  });
+
+  describe('forkThread RPC', () => {
+    it('calls thread/fork with correct params', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      const rpcSpy = vi.spyOn(client, 'rpc').mockResolvedValue({
+        thread: { id: 'new-fork', workingDirectory: '/test', createdAt: new Date().toISOString() },
+      });
+
+      await client.forkThread('source-thread-abc');
+
+      expect(rpcSpy).toHaveBeenCalledWith('thread/fork', { threadId: 'source-thread-abc' });
+    });
+
+    it('returns thread info from RPC response', async () => {
+      const client = new CodexClient({ requestTimeout: 100 });
+      const expectedThread = {
+        id: 'new-fork-xyz',
+        workingDirectory: '/working/dir',
+        createdAt: '2024-06-15T12:00:00Z',
+      };
+      vi.spyOn(client, 'rpc').mockResolvedValue({ thread: expectedThread });
+
+      const result = await client.forkThread('source-thread');
+
+      expect(result).toEqual(expectedThread);
+    });
+  });
+});
