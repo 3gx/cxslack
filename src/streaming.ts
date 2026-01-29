@@ -25,6 +25,7 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   computeAutoCompactThreshold,
   buildActivityEntryBlocks,
+  buildForkButton,
 } from './blocks.js';
 import {
   markProcessingStart,
@@ -1078,6 +1079,8 @@ export class StreamingManager {
         outputTokens: outputTokensForStats,
         costUsd: includeFinalStats ? state.costUsd : undefined,
         spinner,
+        forkTurnIndex: state.turnIndex ?? context.turnIndex,
+        forkSlackTs: state.activityMessageTs || threadTs,
       });
 
       const fallbackText = activityText || 'Processing...';

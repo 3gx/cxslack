@@ -1128,6 +1128,8 @@ export interface ActivityBlockParams {
   outputTokens?: number;
   costUsd?: number;
   spinner?: string;
+  forkTurnIndex?: number;
+  forkSlackTs?: string;
 }
 
 /**
@@ -1240,6 +1242,17 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
         },
       ],
     });
+  }
+
+  // Fork button on main activity/status panel (matches ccslack UX)
+  if (params.forkTurnIndex !== undefined && params.forkSlackTs) {
+    blocks.push(
+      buildForkButton({
+        turnIndex: params.forkTurnIndex,
+        slackTs: params.forkSlackTs,
+        conversationKey,
+      })
+    );
   }
 
   return blocks;
