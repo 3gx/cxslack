@@ -727,10 +727,15 @@ async function handleUserMessage(
     if (threadTs) {
       const result = await getOrCreateThreadSession(channelId, postingThreadTs);
       if (result.isNewFork && result.session.forkedFrom) {
-        // Fork the Codex thread
-        const forkedThread = await codex.forkThread(
+        // Fork the Codex thread at the specified turn
+        const forkTurnIndex = result.session.forkedAtTurnIndex ?? 0;
+        // Get total turns from parent session if available
+        const parentSession = getSession(channelId);
+        const totalTurns = (parentSession as { turnCounter?: number })?.turnCounter ?? (forkTurnIndex + 1);
+        const forkedThread = await codex.forkThreadAtTurn(
           result.session.forkedFrom,
-          result.session.forkedAtTurnIndex
+          forkTurnIndex,
+          totalTurns
         );
         threadId = forkedThread.id;
         await saveThreadSession(channelId, postingThreadTs, { threadId });
@@ -848,11 +853,16 @@ async function createForkChannel(params: CreateForkChannelParams): Promise<Creat
   const sourceConvChannelId = parts[0];
   const sourceConvThreadTs = parts[1];
 
-  // Get source Codex thread ID
+  // Get source Codex thread ID and turn count
   const sourceThreadId = getEffectiveThreadId(sourceConvChannelId, sourceConvThreadTs);
   if (!sourceThreadId) {
     throw new Error('Cannot fork: No active session found in source thread.');
   }
+
+  // Get total turn count from source session for point-in-time fork calculation
+  const sourceSession = getThreadSession(sourceConvChannelId, sourceConvThreadTs);
+  const totalTurns = sourceSession?.turnCounter ?? (turnIndex + 1);
+  console.log(`[fork] Source thread has ${totalTurns} turns, forking at turn ${turnIndex}`);
 
   // 1. Create new Slack channel
   let createResult;
@@ -891,8 +901,8 @@ async function createForkChannel(params: CreateForkChannelParams): Promise<Creat
     }
   }
 
-  // 3. Fork the Codex session at the specified turn
-  const forkedThread = await codex.forkThread(sourceThreadId, turnIndex);
+  // 3. Fork the Codex session at the specified turn (using fork + rollback)
+  const forkedThread = await codex.forkThreadAtTurn(sourceThreadId, turnIndex, totalTurns);
 
   // 4. Save the forked session for the new channel
   await saveSession(newChannelId, {
@@ -928,7 +938,7 @@ async function handleFork(
   const sourceChannelId = parts[0];
   const sourceThreadTs = parts[1];
 
-  // Get source thread ID
+  // Get source thread ID and turn count
   const sourceThreadId = getEffectiveThreadId(sourceChannelId, sourceThreadTs);
   if (!sourceThreadId) {
     await app.client.chat.postMessage({
@@ -938,8 +948,12 @@ async function handleFork(
     return;
   }
 
-  // Fork the Codex thread
-  const forkedThread = await codex.forkThread(sourceThreadId, turnIndex);
+  // Get total turn count from source session
+  const sourceSession = getThreadSession(sourceChannelId, sourceThreadTs);
+  const totalTurns = sourceSession?.turnCounter ?? (turnIndex + 1);
+
+  // Fork the Codex thread at the specified turn (using fork + rollback)
+  const forkedThread = await codex.forkThreadAtTurn(sourceThreadId, turnIndex, totalTurns);
 
   // Create new thread in Slack
   const forkResult = await app.client.chat.postMessage({

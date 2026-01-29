@@ -414,15 +414,59 @@ export class CodexClient extends EventEmitter {
   }
 
   /**
-   * Fork a thread at a specific turn index.
+   * Fork a thread (creates a full copy).
+   * Note: Codex thread/fork does NOT support turnIndex parameter.
+   * For point-in-time forking, use forkThread + rollbackThread.
    */
-  async forkThread(threadId: string, turnIndex?: number): Promise<ThreadInfo> {
-    const params: Record<string, unknown> = { threadId };
-    if (turnIndex !== undefined) {
-      params.turnIndex = turnIndex;
-    }
-    const result = await this.rpc<{ thread: ThreadInfo }>('thread/fork', params);
+  async forkThread(threadId: string): Promise<ThreadInfo> {
+    const result = await this.rpc<{ thread: ThreadInfo }>('thread/fork', { threadId });
     return result.thread;
+  }
+
+  /**
+   * Fork a thread at a specific turn index (point-in-time fork).
+   * This forks the thread, then rolls back to keep only turns up to turnIndex.
+   *
+   * @param threadId - The thread to fork
+   * @param turnIndex - The turn index to fork at (0-based, inclusive)
+   * @param totalTurns - Total number of turns in the original thread
+   * @returns The forked thread info
+   */
+  async forkThreadAtTurn(
+    threadId: string,
+    turnIndex: number,
+    totalTurns: number
+  ): Promise<ThreadInfo> {
+    // First, create a full fork
+    const forkedThread = await this.forkThread(threadId);
+
+    // Calculate how many turns to rollback
+    // If we have turns [0, 1, 2] and want to fork at turn 0, we keep 1 turn and drop 2
+    const turnsToKeep = turnIndex + 1;
+    const turnsToRollback = totalTurns - turnsToKeep;
+
+    if (turnsToRollback > 0) {
+      // Rollback the forked thread to the desired point
+      await this.rollbackThread(forkedThread.id, turnsToRollback);
+    }
+
+    return forkedThread;
+  }
+
+  /**
+   * Rollback a thread by dropping turns from the end.
+   *
+   * @param threadId - The thread to rollback
+   * @param numTurns - Number of turns to drop from the end (must be >= 1)
+   */
+  async rollbackThread(threadId: string, numTurns: number): Promise<void> {
+    if (numTurns < 1) {
+      throw new Error('numTurns must be >= 1');
+    }
+    await this.rpc<{ thread: ThreadInfo }>('thread/rollback', {
+      threadId,
+      numTurns,
+    });
   }
 
   /**

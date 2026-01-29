@@ -183,7 +183,7 @@ describe.skipIf(SKIP_LIVE)('Codex Thread Fork', { timeout: 120000 }, () => {
     console.log('==========================================\n');
   });
 
-  it('thread/fork at specific turn index (fork-in-point)', async () => {
+  it('thread/fork turnIndex semantics investigation', async () => {
     // Clear notifications
     notifications.length = 0;
 
@@ -229,45 +229,112 @@ describe.skipIf(SKIP_LIVE)('Codex Thread Fork', { timeout: 120000 }, () => {
     notifications.length = 0;
 
     // 3. Fork at turn index 1 (should have 42 and 99, but NOT 777)
+    // Codex doesn't support turnIndex directly - must use fork + rollback
     const forkTurnIndex = 1;
-    console.log(`\nForking at turn index ${forkTurnIndex}...`);
+    const totalTurns = 3;
+    const turnsToRollback = totalTurns - (forkTurnIndex + 1); // 3 - 2 = 1 turn to drop
+    console.log(`\nForking at turn index ${forkTurnIndex} (total turns: ${totalTurns}, rollback: ${turnsToRollback})...`);
 
+    // Step 1: Fork the thread (creates full copy)
     const forkResult = await rpc<{ thread: ThreadInfo }>('thread/fork', {
       threadId: originalThreadId,
-      turnIndex: forkTurnIndex,
     });
 
     const forkedThread = forkResult.thread;
     expect(forkedThread).toBeDefined();
     expect(forkedThread.id).toBeDefined();
     expect(forkedThread.id).not.toBe(originalThreadId);
-
     console.log(`Forked thread: ${forkedThread.id}`);
-    console.log(`Fork metadata: forkedFrom=${forkedThread.forkedFrom}, forkedAtTurnIndex=${forkedThread.forkedAtTurnIndex}`);
 
-    // Verify fork-at-turn metadata if available
+    // Step 2: Rollback the forked thread to the desired point
+    if (turnsToRollback > 0) {
+      console.log(`Rolling back ${turnsToRollback} turns...`);
+      await rpc('thread/rollback', {
+        threadId: forkedThread.id,
+        numTurns: turnsToRollback,
+      });
+      console.log('Rollback complete');
+    }
+
+    console.log(`Fork metadata: forkedFrom=${forkedThread.forkedFrom}`);
+
+    // Verify fork metadata
     if (forkedThread.forkedFrom !== undefined) {
       expect(forkedThread.forkedFrom).toBe(originalThreadId);
       console.log('✓ VERIFIED: forkedFrom matches original thread');
     }
 
-    if (forkedThread.forkedAtTurnIndex !== undefined) {
-      expect(forkedThread.forkedAtTurnIndex).toBe(forkTurnIndex);
-      console.log(`✓ VERIFIED: forkedAtTurnIndex is ${forkTurnIndex}`);
-    } else {
-      console.log('Note: forkedAtTurnIndex not returned in thread info');
-    }
-
-    // 4. Verify forked thread is functional
+    // 4. Verify forked thread content - CRITICAL: must NOT include 777
     notifications.length = 0;
     await rpc('turn/start', {
       threadId: forkedThread.id,
-      input: [{ type: 'text', text: 'What numbers do you remember? List them.' }],
+      input: [{ type: 'text', text: 'What numbers do you remember? List them all.' }],
     });
 
     const forkTurnComplete = await waitForTurnComplete();
     expect(forkTurnComplete).toBe(true);
-    console.log('✓ VERIFIED: Fork-at-point thread accepts queries');
+
+    // Capture the assistant's response text
+    console.log(`\nAll notifications received: ${notifications.length}`);
+    const textNotifications = notifications.filter(
+      (n) => n.method === 'codex/event/text' || n.method === 'turn/text' || n.method === 'codex/event/message_delta'
+    );
+    console.log(`Text-like notifications: ${textNotifications.length}`);
+
+    // Try multiple ways to extract text
+    let responseText = '';
+    for (const n of notifications) {
+      const params = n.params as Record<string, unknown>;
+      if (params.text) responseText += params.text;
+      if (params.msg && typeof params.msg === 'object') {
+        const msg = params.msg as Record<string, unknown>;
+        if (msg.text) responseText += msg.text;
+        if (msg.content) responseText += String(msg.content);
+      }
+      if (params.delta && typeof params.delta === 'object') {
+        const delta = params.delta as Record<string, unknown>;
+        if (delta.text) responseText += delta.text;
+      }
+      // Also try content_block_delta format
+      if (n.method === 'codex/event/message_delta' || n.method === 'message/delta') {
+        console.log(`Delta notification: ${JSON.stringify(params).slice(0, 200)}`);
+      }
+    }
+
+    // Also look for completion notifications
+    const completionNotifications = notifications.filter(
+      (n) => n.method === 'turn/completed' || n.method === 'codex/event/task_complete'
+    );
+    for (const cn of completionNotifications) {
+      console.log(`Completion: ${JSON.stringify(cn.params).slice(0, 500)}`);
+    }
+
+    console.log(`\nForked thread response: "${responseText}"`);
+    console.log('\n=== CONTENT VERIFICATION ===');
+
+    // Fork at turn 1 should include:
+    // - Turn 0: remembered 42
+    // - Turn 1: remembered 99
+    // Should NOT include Turn 2: 777
+
+    const has42 = responseText.includes('42');
+    const has99 = responseText.includes('99');
+    const has777 = responseText.includes('777');
+
+    console.log(`Contains 42: ${has42} (expected: true)`);
+    console.log(`Contains 99: ${has99} (expected: true)`);
+    console.log(`Contains 777: ${has777} (expected: false - should NOT be in fork at turn 1)`);
+
+    if (!has777) {
+      console.log('✓ VERIFIED: Fork-at-point correctly excludes turn 2 content (777)');
+    } else {
+      console.log('✗ FAILED: Fork includes turn 2 content (777) - point-in-time fork NOT working!');
+    }
+
+    // These are the critical assertions
+    expect(has42).toBe(true);
+    expect(has99).toBe(true);
+    expect(has777).toBe(false); // CRITICAL: Must NOT include content after fork point
 
     console.log('==========================================\n');
   });
