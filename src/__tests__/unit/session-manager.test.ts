@@ -505,6 +505,155 @@ describe('Session Manager', () => {
     });
   });
 
+  describe('getEffectiveThreadId - Channel Fallback', () => {
+    it('falls back to channel session when thread session has no threadId', () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: 'channel-codex-thread',
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+              threads: {
+                '1111.0000': {
+                  threadId: null, // Thread exists but has no threadId
+                  forkedFrom: null,
+                  workingDir: '/test',
+                  approvalPolicy: 'on-request',
+                  createdAt: 1000,
+                  lastActiveAt: 2000,
+                  pathConfigured: false,
+                  configuredPath: null,
+                  configuredBy: null,
+                  configuredAt: null,
+                },
+              },
+            },
+          },
+        })
+      );
+
+      // Should fallback to channel threadId
+      const threadId = getEffectiveThreadId('C123', '1111.0000');
+      expect(threadId).toBe('channel-codex-thread');
+    });
+
+    it('falls back to channel session when thread session does not exist', () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: 'channel-codex-thread',
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+              threads: {},
+            },
+          },
+        })
+      );
+
+      // Thread session doesn't exist at all, should fallback to channel
+      const threadId = getEffectiveThreadId('C123', '2222.0000');
+      expect(threadId).toBe('channel-codex-thread');
+    });
+
+    it('uses thread session threadId when available', () => {
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: 'channel-codex-thread',
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+              threads: {
+                '1111.0000': {
+                  threadId: 'thread-specific-codex-thread',
+                  forkedFrom: null,
+                  workingDir: '/test',
+                  approvalPolicy: 'on-request',
+                  createdAt: 1000,
+                  lastActiveAt: 2000,
+                  pathConfigured: false,
+                  configuredPath: null,
+                  configuredBy: null,
+                  configuredAt: null,
+                },
+              },
+            },
+          },
+        })
+      );
+
+      // Should use thread-specific threadId
+      const threadId = getEffectiveThreadId('C123', '1111.0000');
+      expect(threadId).toBe('thread-specific-codex-thread');
+    });
+
+    it('allows multiple main channel mentions to share same Codex thread', () => {
+      // This tests the main channel session persistence fix:
+      // First @bot from main channel saves threadId to channel session
+      // Second @bot from main channel (different ts) finds it via fallback
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockReturnValue(
+        JSON.stringify({
+          channels: {
+            C123: {
+              threadId: 'shared-codex-thread', // Saved by first @bot
+              workingDir: '/test',
+              approvalPolicy: 'on-request',
+              createdAt: 1000,
+              lastActiveAt: 2000,
+              pathConfigured: false,
+              configuredPath: null,
+              configuredBy: null,
+              configuredAt: null,
+              threads: {
+                '1111.0000': {
+                  // First @bot created this thread session
+                  threadId: 'shared-codex-thread',
+                  forkedFrom: null,
+                  workingDir: '/test',
+                  approvalPolicy: 'on-request',
+                  createdAt: 1000,
+                  lastActiveAt: 2000,
+                  pathConfigured: false,
+                  configuredPath: null,
+                  configuredBy: null,
+                  configuredAt: null,
+                },
+              },
+            },
+          },
+        })
+      );
+
+      // Second @bot has different ts, but should find the same Codex thread via fallback
+      const threadId = getEffectiveThreadId('C123', '2222.0000');
+      expect(threadId).toBe('shared-codex-thread');
+    });
+  });
+
   describe('clearSession', () => {
     it('moves threadId to previousThreadIds', async () => {
       mockFs.existsSync.mockReturnValue(true);

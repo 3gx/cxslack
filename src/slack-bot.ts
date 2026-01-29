@@ -178,15 +178,6 @@ function setupEventHandlers(): void {
     // Always reply in a thread: use existing thread or create new one under user's message
     const replyThreadTs = threadTs ?? messageTs;
 
-    // Reject @bot mentions in threads - only main channel allowed
-    if (threadTs) {
-      await say({
-        thread_ts: replyThreadTs,
-        text: '❌ @bot can only be mentioned in the main channel, not in threads.',
-      });
-      return;
-    }
-
     try {
       const userId: string = event.user || '';
       const botUserId = (await client.auth.test()).user_id as string;
@@ -609,10 +600,11 @@ async function handleUserMessage(
 
   // Get session info - always use thread session since all conversations are in threads
   const session = getThreadSession(channelId, postingThreadTs) ?? getSession(channelId);
-  console.log(`[message] Session lookup: channel=${channelId}, thread=${postingThreadTs}, model=${session?.model}, reasoning=${session?.reasoningEffort}`);
+  console.log(`[message] Session lookup: channel=${channelId}, slackThread=${postingThreadTs}, codexThread=${threadId}, model=${session?.model}, reasoning=${session?.reasoningEffort}`);
 
   // Start or resume thread
   if (!threadId) {
+    console.log(`[message] No existing Codex thread, will create new one`);
     // Check if this is a Slack thread that needs forking (only for existing threads, not new anchors)
     if (threadTs) {
       const result = await getOrCreateThreadSession(channelId, postingThreadTs);
@@ -632,14 +624,19 @@ async function handleUserMessage(
       }
     } else {
       // New conversation from main channel mention - start new Codex thread
-      // Session is keyed by the anchor message ts (postingThreadTs = messageTs in this case)
+      // Save to BOTH channel session (for subsequent main channel mentions)
+      // and thread session (for this specific thread anchor)
       const newThread = await codex.startThread(workingDir);
       threadId = newThread.id;
+      await saveSession(channelId, { threadId });
       await saveThreadSession(channelId, postingThreadTs, { threadId });
     }
   } else {
     // Resume existing thread
+    console.log(`[message] Resuming existing Codex thread: ${threadId}`);
     await codex.resumeThread(threadId);
+    // Ensure this thread anchor also has the threadId saved
+    await saveThreadSession(channelId, postingThreadTs, { threadId });
   }
 
   // Use defaults when model/reasoning not explicitly set
