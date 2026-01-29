@@ -32,7 +32,7 @@ import {
   markAborted as markAbortedEmoji,
 } from './emoji-reactions.js';
 import { isAborted, clearAborted } from './abort-tracker.js';
-import { saveSession, saveThreadSession, LastUsage } from './session-manager.js';
+import { saveSession, saveThreadSession, getThreadSession, LastUsage } from './session-manager.js';
 import {
   ActivityThreadManager,
   ActivityEntry,
@@ -301,10 +301,10 @@ export class StreamingManager {
       console.error('Failed to add processing emoji:', err);
     });
 
-    // Integration point 1: Post starting message to thread
-    postStartingToThread(this.slack, context.channelId, context.originalTs).catch((err) => {
-      console.error('[activity-thread] Failed to post starting:', err);
-    });
+      // Integration point 1: Post starting message to thread
+      postStartingToThread(this.slack, context.channelId, context.originalTs).catch((err) => {
+        console.error('[activity-thread] Failed to post starting:', err);
+      });
 
     // Start timer AFTER state is set - uses context.updateRateMs (from /update-rate command)
     state.updateTimer = setInterval(() => {
@@ -598,7 +598,15 @@ export class StreamingManager {
             this.slack,
             channelId,
             state.threadParentTs || originalTs,
-            true // force
+            true, // force
+            (ts) => {
+              // Map final batch message to turnId for actions/updates
+              const threadSession = getThreadSession(channelId, state.threadParentTs || originalTs);
+              const messageTurnMap = threadSession?.messageTurnMap || {};
+              messageTurnMap[ts] = found.context.turnId;
+              saveThreadSession(channelId, state.threadParentTs || originalTs, { messageTurnMap })
+                .catch((err) => console.error('[streaming] Failed to save messageTurnMap (final):', err));
+            }
           ).catch((err) => console.error('[streaming] Final batch flush failed:', err));
 
           // Integration point 3: Post thinking to thread when thinking completes
@@ -696,6 +704,26 @@ export class StreamingManager {
             toolInput: toolInputValue,
             toolUseId: itemId,
           });
+
+          const context = this.contexts.get(key);
+          if (context) {
+            flushActivityBatchToThread(
+              this.activityManager,
+              key,
+              this.slack,
+              context.channelId,
+              state.threadParentTs || context.originalTs,
+              false,
+              (ts) => {
+                const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
+                const messageToolMap = threadSession?.messageToolMap || {};
+                messageToolMap[ts] = itemId;
+                saveThreadSession(context.channelId, context.threadTs || context.originalTs, { messageToolMap })
+                  .catch((err) => console.error('[streaming] Failed to save messageToolMap:', err));
+              }
+            ).catch((err) => console.error('[streaming] Thread batch post failed:', err));
+          }
+
           break;
         }
       }
@@ -729,7 +757,15 @@ export class StreamingManager {
                 key,
                 this.slack,
                 context.channelId,
-                state.threadParentTs || context.originalTs
+                state.threadParentTs || context.originalTs,
+                false,
+                (ts) => {
+                  const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
+                  const messageToolMap = threadSession?.messageToolMap || {};
+                  messageToolMap[ts] = itemId;
+                  saveThreadSession(context.channelId, context.threadTs || context.originalTs, { messageToolMap })
+                    .catch((err) => console.error('[streaming] Failed to save messageToolMap:', err));
+                }
               ).catch((err) => {
                 console.error('[streaming] Thread batch post failed:', err);
               });
@@ -764,6 +800,33 @@ export class StreamingManager {
             });
           }
           state.thinkingContent += content;
+          // Update char count on latest thinking entry for display
+          const entries = this.activityManager.getEntries(key);
+          for (let i = entries.length - 1; i >= 0; i--) {
+            if (entries[i].type === 'thinking') {
+              entries[i].charCount = state.thinkingContent.length;
+              break;
+            }
+          }
+          // Post thinking batch to thread to make it visible
+          const context = this.contexts.get(key);
+          if (context) {
+            flushActivityBatchToThread(
+              this.activityManager,
+              key,
+              this.slack,
+              context.channelId,
+              state.threadParentTs || context.originalTs,
+              false,
+              (ts) => {
+                const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
+                const messageTurnMap = threadSession?.messageTurnMap || {};
+                messageTurnMap[ts] = context.turnId;
+                saveThreadSession(context.channelId, context.threadTs || context.originalTs, { messageTurnMap })
+                  .catch((err) => console.error('[streaming] Failed to save messageTurnMap:', err));
+              }
+            ).catch((err) => console.error('[streaming] Thread batch post failed:', err));
+          }
           break;
         }
       }
@@ -877,6 +940,14 @@ export class StreamingManager {
       state.spinnerIndex = (state.spinnerIndex + 1) % STATUS_SPINNER_FRAMES.length;
       const spinner = STATUS_SPINNER_FRAMES[state.spinnerIndex];
 
+      // Current activity label for status line
+      const currentActivity =
+        state.thinkingContent && !state.thinkingComplete
+          ? ':brain: Thinking'
+          : state.text
+            ? ':memo: Generating'
+            : undefined;
+
       // Compute context usage - VERIFIED from Codex API:
       // total_tokens = input_tokens + output_tokens
       // (cached_input_tokens is a SUBSET of input_tokens, not additional)
@@ -918,6 +989,7 @@ export class StreamingManager {
         model: context.model,
         reasoningEffort: context.reasoningEffort,
         sessionId: context.threadId,
+        currentActivity,
         contextPercent,
         contextTokens: contextTokens > 0 ? contextTokens : undefined,
         contextWindow,
@@ -959,6 +1031,13 @@ export class StreamingManager {
             'activity.post'
           );
           state.activityMessageTs = result.ts as string;
+          // Map activity message to turnId for future updates/actions
+          if (context.threadTs) {
+            const existing = getThreadSession(context.channelId, context.threadTs);
+            const messageTurnMap = existing?.messageTurnMap || {};
+            messageTurnMap[state.activityMessageTs] = context.turnId;
+            await saveThreadSession(context.channelId, context.threadTs, { messageTurnMap });
+          }
         }
       } catch (error) {
         console.error('Error updating activity message:', error);

@@ -912,6 +912,7 @@ export interface UnifiedStatusLineParams {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   sessionId?: string;
+  currentActivity?: string;
   contextPercent?: number;
   contextTokens?: number;
   contextWindow?: number;
@@ -930,7 +931,7 @@ export interface UnifiedStatusLineParams {
 /**
  * Build a unified status line showing policy, model, session, and stats.
  * Line 1: policy | model [reason] | session
- * Line 2: ctx/compact | tokens | cost | duration (only when available)
+ * Line 2: activity | ctx/compact | tokens | cost | duration (only when available)
  */
 export function buildUnifiedStatusLine(params: UnifiedStatusLineParams): string {
   const line1Parts: string[] = [];
@@ -945,6 +946,10 @@ export function buildUnifiedStatusLine(params: UnifiedStatusLineParams): string 
   line1Parts.push(params.approvalPolicy);
   line1Parts.push(modelWithReasoning);
   line1Parts.push(sessionLabel);
+
+  if (params.currentActivity) {
+    line2Parts.push(params.currentActivity);
+  }
 
   // Show context usage: "X% left, Y used / Z"
   // Uses only verified data from Codex (contextWindow is sent via model_context_window)
@@ -990,6 +995,25 @@ export function buildUnifiedStatusLine(params: UnifiedStatusLineParams): string 
 }
 
 // ============================================================================
+// Todo Extraction (simple, conservative)
+// ============================================================================
+
+const TODO_PATTERN = /^\s*[-*]\s*\[\s?\]\s*(.+)$/;
+
+export function extractTodosFromText(text: string, maxItems = 5): string[] {
+  const lines = text.split(/\r?\n/);
+  const todos: string[] = [];
+  for (const line of lines) {
+    const match = line.match(TODO_PATTERN);
+    if (match && match[1].trim()) {
+      todos.push(match[1].trim());
+      if (todos.length >= maxItems) break;
+    }
+  }
+  return todos;
+}
+
+// ============================================================================
 // Abort Confirmation Modal
 // ============================================================================
 
@@ -1009,6 +1033,7 @@ export interface ActivityBlockParams {
   conversationKey: string;
   elapsedMs: number;
   entries?: ActivityEntry[]; // For todo extraction
+  currentActivity?: string;
   approvalPolicy: ApprovalPolicy;
   model?: string;
   reasoningEffort?: ReasoningEffort;
@@ -1036,6 +1061,7 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
     conversationKey,
     elapsedMs,
     entries,
+    currentActivity,
     approvalPolicy,
     model,
     reasoningEffort,
@@ -1060,6 +1086,14 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
     const todoText = formatTodoListDisplay(todos);
     if (todoText) {
       displayText = todoText + '\n────\n';
+    }
+  }
+  // Append inline todos from final text (simple) when no extracted todos
+  if (!displayText && activityText && status !== 'running') {
+    const inlineTodos = extractTodosFromText(activityText);
+    if (inlineTodos.length > 0) {
+      const todoLines = inlineTodos.map(t => `- [ ] ${t}`).join('\n');
+      displayText = `*Todo*\n${todoLines}\n────\n`;
     }
   }
   displayText += activityText || ':gear: Starting...';
@@ -1096,6 +1130,7 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
           model,
           reasoningEffort,
           sessionId,
+          currentActivity,
           contextPercent,
           contextTokens,
           contextWindow,

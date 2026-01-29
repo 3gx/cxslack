@@ -113,6 +113,10 @@ export interface ThreadSession {
   previousThreadIds?: string[];
   /** Usage data from last query (for /status and /context) */
   lastUsage?: LastUsage;
+  /** Message mapping: Slack ts -> Codex turnId */
+  messageTurnMap?: Record<string, string>;
+  /** Message mapping: Slack ts -> Codex toolUseId (activity posts) */
+  messageToolMap?: Record<string, string>;
 }
 
 /**
@@ -208,6 +212,7 @@ export async function saveSession(channelId: string, session: Partial<Session>):
       threads: existing?.threads,
       turns: existing?.turns,
       lastUsage: existing?.lastUsage,
+      // message mappings only apply at thread level; no-op here
       ...session,
     };
     saveSessions(store);
@@ -283,6 +288,8 @@ export async function saveThreadSession(
       configuredAt: existingThread?.configuredAt ?? mainChannel.configuredAt,
       updateRateSeconds: existingThread?.updateRateSeconds ?? mainChannel.updateRateSeconds,
       lastUsage: existingThread?.lastUsage,
+      messageTurnMap: existingThread?.messageTurnMap,
+      messageToolMap: existingThread?.messageToolMap,
       ...session,
     };
 

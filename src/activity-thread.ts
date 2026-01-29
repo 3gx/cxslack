@@ -79,7 +79,7 @@ export class ActivityThreadManager {
   /**
    * Add an activity entry to the batch for a conversation.
    */
-  addEntry(conversationKey: string, entry: ActivityEntry): void {
+  addEntry(conversationKey: string, entry: ActivityEntry): ActivityEntry[] {
     const batch = this.batches.get(conversationKey) || {
       entries: [],
       postedToolUseIds: [],
@@ -87,6 +87,7 @@ export class ActivityThreadManager {
     };
     batch.entries.push(entry);
     this.batches.set(conversationKey, batch);
+    return batch.entries;
   }
 
   /**
@@ -236,13 +237,27 @@ export class ActivityThreadManager {
       case 'starting':
         return ':brain: *Analyzing request...*';
       case 'thinking':
-        return `:brain: *Thinking...* ${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
-      case 'tool_start':
-        return `${emoji} *${entry.tool}*${entry.toolInput ? ` \`${entry.toolInput}\`` : ''} [in progress]`;
-      case 'tool_complete':
-        return `:white_check_mark: *${entry.tool}*${entry.toolInput ? ` \`${entry.toolInput}\`` : ''}${duration}`;
+        return `:brain: *Thinking...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+      case 'tool_start': {
+        const input =
+          typeof entry.toolInput === 'string'
+            ? entry.toolInput
+            : entry.toolInput
+              ? JSON.stringify(entry.toolInput).slice(0, 300)
+              : '';
+        return `${emoji} *${entry.tool}*${input ? ` \`${input}\`` : ''} [in progress]`;
+      }
+      case 'tool_complete': {
+        const input =
+          typeof entry.toolInput === 'string'
+            ? entry.toolInput
+            : entry.toolInput
+              ? JSON.stringify(entry.toolInput).slice(0, 300)
+              : '';
+        return `:white_check_mark: *${entry.tool}*${input ? ` \`${input}\`` : ''}${duration}`;
+      }
       case 'generating':
-        return `:pencil: *Generating...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+        return `:memo: *Generating...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
       case 'error':
         return `:x: ${entry.message || 'Error'}`;
       case 'aborted':
@@ -561,7 +576,8 @@ export async function flushActivityBatchToThread(
   client: WebClient,
   channel: string,
   threadTs: string,
-  force?: boolean
+  force?: boolean,
+  mapActivityTs?: (ts: string) => void
 ): Promise<void> {
   const entries = manager.getEntries(conversationKey);
   if (entries.length === 0) return;
@@ -580,11 +596,28 @@ export async function flushActivityBatchToThread(
 
   try {
     if (batch?.postedTs) {
-      // Update existing batch message
-      await withSlackRetry(
-        () => client.chat.update({ channel, ts: batch.postedTs, text }),
-        'batch.update'
-      );
+      // Update existing batch message; if missing, post new
+      try {
+        await withSlackRetry(
+          () => client.chat.update({ channel, ts: batch.postedTs, text }),
+          'batch.update'
+        );
+      } catch (err: any) {
+        const notFound = err?.data?.error === 'message_not_found';
+        if (!notFound) {
+          throw err;
+        }
+        const result = await withSlackRetry(
+          () => client.chat.postMessage({ channel, thread_ts: threadTs, text }),
+          'batch.post'
+        );
+        if (batch) {
+          batch.postedTs = (result as any).ts;
+        }
+        if (mapActivityTs && (result as any).ts) {
+          mapActivityTs((result as any).ts);
+        }
+      }
     } else {
       // Post new batch message
       const result = await withSlackRetry(
@@ -593,6 +626,9 @@ export async function flushActivityBatchToThread(
       );
       if (batch) {
         batch.postedTs = (result as any).ts;
+      }
+      if (mapActivityTs && (result as any).ts) {
+        mapActivityTs((result as any).ts);
       }
     }
 
