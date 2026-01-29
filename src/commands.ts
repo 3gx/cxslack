@@ -314,6 +314,39 @@ export async function handleStatusCommand(
     lines.push(`*Context window:* ${percentLeft}% left (${(totalTokens / 1000).toFixed(1)}K used / ${(lastUsage.contextWindow / 1000).toFixed(0)}K)`);
   }
 
+  // Get rate limits and credits
+  try {
+    const rateLimits = await codex.getRateLimits();
+    if (rateLimits) {
+      // 5h limit
+      if (rateLimits.primary) {
+        const pctLeft = 100 - rateLimits.primary.usedPercent;
+        const resetTime = rateLimits.primary.resetsAt
+          ? new Date(rateLimits.primary.resetsAt * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+          : '';
+        lines.push(`*5h limit:* ${pctLeft}% left${resetTime ? ` (resets ${resetTime})` : ''}`);
+      }
+      // Weekly limit
+      if (rateLimits.secondary) {
+        const pctLeft = 100 - rateLimits.secondary.usedPercent;
+        const resetTime = rateLimits.secondary.resetsAt
+          ? new Date(rateLimits.secondary.resetsAt * 1000).toLocaleDateString('en-US', { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+          : '';
+        lines.push(`*Weekly limit:* ${pctLeft}% left${resetTime ? ` (resets ${resetTime})` : ''}`);
+      }
+      // Credits
+      if (rateLimits.credits) {
+        if (rateLimits.credits.unlimited) {
+          lines.push(`*Credits:* unlimited`);
+        } else if (rateLimits.credits.balance) {
+          lines.push(`*Credits:* ${rateLimits.credits.balance}`);
+        }
+      }
+    }
+  } catch (err) {
+    // Rate limits not available
+  }
+
   // Show fork info if applicable
   if (threadTs) {
     const threadSession = getThreadSession(channelId, threadTs);

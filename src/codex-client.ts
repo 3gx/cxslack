@@ -59,6 +59,28 @@ export interface AccountInfo {
   isPlus?: boolean;
 }
 
+// Rate limit window (5h or weekly)
+export interface RateLimitWindow {
+  usedPercent: number;
+  resetsAt?: number; // Unix timestamp in seconds
+  windowDurationMins?: number;
+}
+
+// Credits snapshot
+export interface CreditsSnapshot {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance?: string;
+}
+
+// Rate limits response
+export interface RateLimits {
+  primary?: RateLimitWindow; // 5h limit
+  secondary?: RateLimitWindow; // Weekly limit
+  credits?: CreditsSnapshot;
+  planType?: 'free' | 'plus' | 'pro' | 'team' | 'business' | 'enterprise' | 'edu' | 'unknown';
+}
+
 // Turn status
 export type TurnStatus = 'running' | 'completed' | 'interrupted' | 'failed';
 
@@ -446,6 +468,19 @@ export class CodexClient extends EventEmitter {
     } catch {
       // model/list may not be implemented - return empty array
       return [];
+    }
+  }
+
+  /**
+   * Get account rate limits and credits.
+   */
+  async getRateLimits(): Promise<RateLimits | null> {
+    try {
+      const result = await this.rpc<{ rateLimits: RateLimits }>('account/rateLimits/read', {});
+      return result.rateLimits;
+    } catch {
+      // May not be available
+      return null;
     }
   }
 
