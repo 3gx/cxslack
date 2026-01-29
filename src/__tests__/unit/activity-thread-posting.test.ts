@@ -112,11 +112,13 @@ describe('flushActivityBatchToThread', () => {
 
     await flushActivityBatchToThread(manager, key, mockClient, 'C123', '456.789');
 
-    expect(mockClient.chat.postMessage).toHaveBeenCalledWith({
-      channel: 'C123',
-      thread_ts: '456.789',
-      text: expect.stringContaining('Read'),
-    });
+    expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: 'C123',
+        thread_ts: '456.789',
+        text: expect.stringContaining('Read'),
+      })
+    );
   });
 
   it('does nothing when batch empty', async () => {
@@ -137,7 +139,7 @@ describe('flushActivityBatchToThread', () => {
     });
 
     // First call
-    await flushActivityBatchToThread(manager, key, mockClient, 'C123', '456.789', true);
+    await flushActivityBatchToThread(manager, key, mockClient, 'C123', '456.789', { force: true });
 
     // Reset mock
     mockClient.chat.postMessage.mockClear();
@@ -152,7 +154,7 @@ describe('flushActivityBatchToThread', () => {
     });
 
     // Second call with force=true should still work even if rate limited
-    await flushActivityBatchToThread(manager, key, mockClient, 'C123', '456.789', true);
+    await flushActivityBatchToThread(manager, key, mockClient, 'C123', '456.789', { force: true });
 
     // Should have been called (update or post)
     expect(

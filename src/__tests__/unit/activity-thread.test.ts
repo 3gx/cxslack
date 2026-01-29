@@ -278,7 +278,7 @@ describe('buildActivityLogText', () => {
 
     const text = buildActivityLogText(entries);
 
-    expect(text).toContain(':pencil:'); // Generating uses pencil emoji
+    expect(text).toContain(':memo:'); // Generating uses memo emoji now
     expect(text).toContain('500');
   });
 });

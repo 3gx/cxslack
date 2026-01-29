@@ -119,6 +119,8 @@ export interface ThreadSession {
   messageToolMap?: Record<string, string>;
   /** Last thinking content (for attach-thinking action) */
   lastThinkingContent?: string;
+  /** Turn counter for this thread (incremented per turn) */
+  turnCounter?: number;
 }
 
 /**
@@ -293,6 +295,7 @@ export async function saveThreadSession(
       messageTurnMap: existingThread?.messageTurnMap,
       messageToolMap: existingThread?.messageToolMap,
       lastThinkingContent: existingThread?.lastThinkingContent,
+      turnCounter: existingThread?.turnCounter ?? 0,
       ...session,
     };
 

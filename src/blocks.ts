@@ -409,6 +409,29 @@ export function buildActivityEntryBlocks(params: ActivityEntryBlockParams): Bloc
   return blocks;
 }
 
+// Helper for mapping tool/thinking entries to block actions in thread activity
+export function buildActivityEntryActionParams(
+  entry: import('./activity-thread.js').ActivityEntry,
+  conversationKey: string,
+  turnIndex: number,
+  slackTs: string,
+  includeAttachThinking: boolean
+): ActivityEntryActionParams | undefined {
+  // Only show fork on entries tied to a turn index we can resume from
+  const includeFork = Number.isInteger(turnIndex) && turnIndex >= 0;
+  const isThinking = entry.type === 'thinking';
+  if (!includeFork && !(includeAttachThinking && isThinking)) {
+    return undefined;
+  }
+  return {
+    conversationKey,
+    turnIndex,
+    slackTs,
+    includeFork,
+    includeAttachThinking: includeAttachThinking && isThinking,
+  };
+}
+
 
 // ============================================================================
 // Command Response Blocks
@@ -1525,7 +1548,7 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
       continue;
     }
 
-    const line = formatActivityEntryForThread(entry);
+    const line = formatThreadActivityEntry(entry);
     if (line) {
       lines.push(line);
     }
@@ -1534,10 +1557,7 @@ export function formatThreadActivityBatch(entries: ActivityEntry[]): string {
   return lines.join('\n');
 }
 
-/**
- * Format a single activity entry for thread display.
- */
-function formatActivityEntryForThread(entry: ActivityEntry): string {
+export function formatThreadActivityEntry(entry: ActivityEntry): string {
   const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
   const toolEmoji = entry.tool ? THREAD_TOOL_EMOJI[entry.tool] || ':gear:' : ':gear:';
   const toolInput = entry.toolInput ? formatToolInputSummary(entry.tool || '', entry.toolInput) : '';

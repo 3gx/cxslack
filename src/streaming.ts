@@ -45,6 +45,7 @@ import {
   postResponseToThread,
   postErrorToThread,
 } from './activity-thread.js';
+import { buildActivityEntryActionParams } from './blocks.js';
 import { withSlackRetry } from './slack-retry.js';
 
 // Constants matching CCSLACK architecture
@@ -122,6 +123,8 @@ export interface StreamingContext {
   model?: string;
   /** Turn start time (for duration calculation) */
   startTime: number;
+  /** Turn index within the thread (0-based) */
+  turnIndex?: number;
 }
 
 /**
@@ -183,6 +186,8 @@ interface StreamingState {
   postedBatchTs: string | null;
   /** Race condition fix - track posted tool use IDs */
   postedBatchToolUseIds: Set<string>;
+  /** Turn index captured at startStreaming */
+  turnIndex?: number;
 }
 
 /**
@@ -259,6 +264,9 @@ export class StreamingManager {
     cleanupMutex(key);
     this.activityManager.clearEntries(key);
 
+    // Determine turn index for fork-here mapping
+    const turnIndex = this.nextTurnIndex(key, context.threadTs);
+
     // Create state - REUSE initial message as activity message
     const state: StreamingState = {
       text: '',
@@ -287,9 +295,10 @@ export class StreamingManager {
       lastActivityPostTime: 0,
       postedBatchTs: null,
       postedBatchToolUseIds: new Set(),
+      turnIndex,
     };
 
-    this.contexts.set(key, context);
+    this.contexts.set(key, { ...context, turnIndex });
     this.states.set(key, state);
 
     // Add "Analyzing request..." entry
@@ -465,12 +474,40 @@ export class StreamingManager {
     return undefined;
   }
 
+  /**
+   * Compute and persist next turn index for a conversation.
+   * Uses in-memory counter first, falls back to thread session storage.
+   */
+  private nextTurnIndex(conversationKey: string, threadTs?: string): number {
+    const existing = this.turnCounters.get(conversationKey);
+    if (existing !== undefined) {
+      const next = existing + 1;
+      this.turnCounters.set(conversationKey, next);
+      return next;
+    }
+
+    // Seed from persisted thread session turnCounter
+    const { channelId } = parseConversationKey(conversationKey);
+    const session = threadTs ? getThreadSession(channelId, threadTs) : null;
+    const seed = session?.turnCounter ?? 0;
+    const next = seed;
+    this.turnCounters.set(conversationKey, next);
+    return next;
+  }
+
   private setupEventHandlers(): void {
     // Turn started - update turnId and check for pending abort
     this.codex.on('turn:started', ({ threadId, turnId }) => {
       const found = this.findContextByThreadId(threadId);
       if (found) {
         found.context.turnId = turnId;
+        // ensure turnIndex captured
+        if (found.context.turnIndex === undefined) {
+          const idx = this.nextTurnIndex(found.key, found.context.threadTs);
+          found.context.turnIndex = idx;
+          const st = this.states.get(found.key);
+          if (st) st.turnIndex = idx;
+        }
         const state = this.states.get(found.key);
         if (state?.pendingAbort) {
           console.log(`[streaming] Executing pending abort for turnId: ${turnId}`);
@@ -600,14 +637,25 @@ export class StreamingManager {
             this.slack,
             channelId,
             state.threadParentTs || originalTs,
-            true, // force
-            (ts) => {
-              // Map final batch message to turnId for actions/updates
-              const threadSession = getThreadSession(channelId, state.threadParentTs || originalTs);
-              const messageTurnMap = threadSession?.messageTurnMap || {};
-              messageTurnMap[ts] = found.context.turnId;
-              saveThreadSession(channelId, state.threadParentTs || originalTs, { messageTurnMap })
-                .catch((err) => console.error('[streaming] Failed to save messageTurnMap (final):', err));
+            {
+              force: true,
+              mapActivityTs: (ts, entry) => {
+                const threadSession = getThreadSession(channelId, state.threadParentTs || originalTs);
+                const messageTurnMap = threadSession?.messageTurnMap || {};
+                messageTurnMap[ts] = found.context.turnId;
+                const messageToolMap = threadSession?.messageToolMap || {};
+                if (entry.toolUseId) {
+                  messageToolMap[ts] = entry.toolUseId;
+                }
+                saveThreadSession(channelId, state.threadParentTs || originalTs, {
+                  messageTurnMap,
+                  messageToolMap,
+                }).catch((err) => console.error('[streaming] Failed to save messageTurn/Tool map (final):', err));
+              },
+              buildActions: (entry, slackTs) => {
+                const ti = state.turnIndex ?? found.context.turnIndex ?? 0;
+                return buildActivityEntryActionParams(entry, found.key, ti, slackTs || state.activityMessageTs || originalTs, true);
+              },
             }
           ).catch((err) => console.error('[streaming] Final batch flush failed:', err));
 
@@ -709,19 +757,29 @@ export class StreamingManager {
 
           const context = this.contexts.get(key);
           if (context) {
+            const ti = state.turnIndex ?? context.turnIndex ?? this.nextTurnIndex(key, context.threadTs);
             flushActivityBatchToThread(
               this.activityManager,
               key,
               this.slack,
               context.channelId,
               state.threadParentTs || context.originalTs,
-              false,
-              (ts) => {
-                const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
-                const messageToolMap = threadSession?.messageToolMap || {};
-                messageToolMap[ts] = itemId;
-                saveThreadSession(context.channelId, context.threadTs || context.originalTs, { messageToolMap })
-                  .catch((err) => console.error('[streaming] Failed to save messageToolMap:', err));
+              {
+                force: false,
+                mapActivityTs: (ts, entry) => {
+                  const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
+                  const messageToolMap = threadSession?.messageToolMap || {};
+                  const messageTurnMap = threadSession?.messageTurnMap || {};
+                  messageToolMap[ts] = entry.toolUseId || itemId;
+                  messageTurnMap[ts] = context.turnId;
+                  saveThreadSession(context.channelId, context.threadTs || context.originalTs, {
+                    messageToolMap,
+                    messageTurnMap,
+                    turnCounter: ti + 1,
+                  }).catch((err) => console.error('[streaming] Failed to save message maps:', err));
+                },
+                buildActions: (entry, slackTs) =>
+                  buildActivityEntryActionParams(entry, key, ti, slackTs || context.originalTs, true),
               }
             ).catch((err) => console.error('[streaming] Thread batch post failed:', err));
           }
@@ -754,19 +812,29 @@ export class StreamingManager {
             // Integration point 2: Flush activity batch to thread on tool completion
             const context = this.contexts.get(key);
             if (context) {
+              const ti = state.turnIndex ?? context.turnIndex ?? this.nextTurnIndex(key, context.threadTs);
               flushActivityBatchToThread(
                 this.activityManager,
                 key,
                 this.slack,
                 context.channelId,
                 state.threadParentTs || context.originalTs,
-                false,
-                (ts) => {
-                  const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
-                  const messageToolMap = threadSession?.messageToolMap || {};
-                  messageToolMap[ts] = itemId;
-                  saveThreadSession(context.channelId, context.threadTs || context.originalTs, { messageToolMap })
-                    .catch((err) => console.error('[streaming] Failed to save messageToolMap:', err));
+                {
+                  force: false,
+                  mapActivityTs: (ts, entry) => {
+                    const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
+                    const messageToolMap = threadSession?.messageToolMap || {};
+                    const messageTurnMap = threadSession?.messageTurnMap || {};
+                    messageToolMap[ts] = entry.toolUseId || itemId;
+                    messageTurnMap[ts] = context.turnId;
+                    saveThreadSession(context.channelId, context.threadTs || context.originalTs, {
+                      messageToolMap,
+                      messageTurnMap,
+                      turnCounter: ti + 1,
+                    }).catch((err) => console.error('[streaming] Failed to save message maps:', err));
+                  },
+                  buildActions: (entry, slackTs) =>
+                    buildActivityEntryActionParams(entry, key, ti, slackTs || context.originalTs, true),
                 }
               ).catch((err) => {
                 console.error('[streaming] Thread batch post failed:', err);
@@ -813,19 +881,26 @@ export class StreamingManager {
           // Post thinking batch to thread to make it visible
           const context = this.contexts.get(key);
           if (context) {
+            const ti = state.turnIndex ?? context.turnIndex ?? this.nextTurnIndex(key, context.threadTs);
             flushActivityBatchToThread(
               this.activityManager,
               key,
               this.slack,
               context.channelId,
               state.threadParentTs || context.originalTs,
-              false,
-              (ts) => {
-                const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
-                const messageTurnMap = threadSession?.messageTurnMap || {};
-                messageTurnMap[ts] = context.turnId;
-                saveThreadSession(context.channelId, context.threadTs || context.originalTs, { messageTurnMap })
-                  .catch((err) => console.error('[streaming] Failed to save messageTurnMap:', err));
+              {
+                force: false,
+                mapActivityTs: (ts) => {
+                  const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
+                  const messageTurnMap = threadSession?.messageTurnMap || {};
+                  messageTurnMap[ts] = context.turnId;
+                  saveThreadSession(context.channelId, context.threadTs || context.originalTs, {
+                    messageTurnMap,
+                    turnCounter: ti + 1,
+                  }).catch((err) => console.error('[streaming] Failed to save messageTurnMap:', err));
+                },
+                buildActions: (entry, slackTs) =>
+                  buildActivityEntryActionParams(entry, key, ti, slackTs || context.originalTs, true),
               }
             ).catch((err) => console.error('[streaming] Thread batch post failed:', err));
           }
@@ -1085,7 +1160,7 @@ export class StreamingManager {
 
     try {
       const threadTs = context.threadTs || context.originalTs;
-      await withSlackRetry(
+      const result = await withSlackRetry(
         () =>
           this.slack.chat.postMessage({
             channel: context.channelId,
@@ -1095,6 +1170,14 @@ export class StreamingManager {
           }),
         'response.post'
       );
+
+      const postedTs = (result as any)?.ts as string | undefined;
+      if (postedTs && context.threadTs) {
+        const session = getThreadSession(context.channelId, context.threadTs);
+        const messageTurnMap = session?.messageTurnMap || {};
+        messageTurnMap[postedTs] = context.turnId;
+        await saveThreadSession(context.channelId, context.threadTs, { messageTurnMap });
+      }
     } catch (err) {
       console.error('Failed to post response message:', err);
     }

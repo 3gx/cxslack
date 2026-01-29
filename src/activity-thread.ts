@@ -13,10 +13,12 @@ import {
   markdownToSlack,
   truncateWithClosedFormatting,
   formatThreadActivityBatch,
+  formatThreadActivityEntry,
   formatThreadStartingMessage,
   formatThreadThinkingMessage,
   formatThreadResponseMessage,
   formatThreadErrorMessage,
+  buildActivityEntryBlocks,
 } from './blocks.js';
 
 // Max chars before converting to .md attachment
@@ -45,6 +47,7 @@ export interface ActivityBatch {
   postedTs?: string; // Slack ts of posted batch message
   postedToolUseIds: string[]; // Tool use IDs included in posted message (race fix)
   lastPostTime: number; // For rate limiting
+  postedCount: number; // How many entries have been emitted as thread replies
 }
 
 // Spinner frames for animated status
@@ -84,6 +87,7 @@ export class ActivityThreadManager {
       entries: [],
       postedToolUseIds: [],
       lastPostTime: 0,
+      postedCount: 0,
     };
     batch.entries.push(entry);
     this.batches.set(conversationKey, batch);
@@ -107,6 +111,7 @@ export class ActivityThreadManager {
   /**
    * Post batched entries to thread.
    */
+  // Legacy flush kept for compatibility (used by tests)
   async flushBatch(
     conversationKey: string,
     client: WebClient,
@@ -576,14 +581,19 @@ export async function flushActivityBatchToThread(
   client: WebClient,
   channel: string,
   threadTs: string,
-  force?: boolean,
-  mapActivityTs?: (ts: string) => void
+  options?: {
+    force?: boolean;
+    mapActivityTs?: (ts: string, entry: ActivityEntry) => void;
+    buildActions?: (entry: ActivityEntry, slackTs?: string) => import('./blocks.js').ActivityEntryActionParams | undefined;
+    useBlocks?: boolean;
+  }
 ): Promise<void> {
   const entries = manager.getEntries(conversationKey);
   if (entries.length === 0) return;
 
   // Check rate limiting
   const batch = (manager as any).batches?.get(conversationKey);
+  const force = options?.force ?? false;
   if (!force && batch) {
     const timeSinceLastPost = Date.now() - (batch.lastPostTime || 0);
     if (timeSinceLastPost < ACTIVITY_BATCH_MIN_GAP_MS) {
@@ -591,53 +601,62 @@ export async function flushActivityBatchToThread(
     }
   }
 
-  const text = formatThreadActivityBatch(entries);
-  if (!text) return;
+  const startIndex = batch?.postedCount ?? 0;
+  const newEntries = entries.slice(startIndex);
+  if (newEntries.length === 0) return;
 
-  try {
-    if (batch?.postedTs) {
-      // Update existing batch message; if missing, post new
-      try {
-        await withSlackRetry(
-          () => client.chat.update({ channel, ts: batch.postedTs, text }),
-          'batch.update'
-        );
-      } catch (err: any) {
-        const notFound = err?.data?.error === 'message_not_found';
-        if (!notFound) {
-          throw err;
-        }
-        const result = await withSlackRetry(
-          () => client.chat.postMessage({ channel, thread_ts: threadTs, text }),
-          'batch.post'
-        );
-        if (batch) {
-          batch.postedTs = (result as any).ts;
-        }
-        if (mapActivityTs && (result as any).ts) {
-          mapActivityTs((result as any).ts);
-        }
-      }
-    } else {
-      // Post new batch message
+  for (const entry of newEntries) {
+    const text = formatThreadActivityEntry(entry);
+    if (!text) {
+      if (batch) batch.postedCount += 1;
+      continue;
+    }
+
+    try {
+      // Step 1: post with basic section (no actions yet)
+      const baseBlocks = options?.useBlocks === false
+        ? undefined
+        : buildActivityEntryBlocks({ text });
+
       const result = await withSlackRetry(
-        () => client.chat.postMessage({ channel, thread_ts: threadTs, text }),
-        'batch.post'
+        () => client.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          text,
+          ...(baseBlocks ? { blocks: baseBlocks, unfurl_links: false, unfurl_media: false } : {}),
+        }),
+        'batch.entry.post'
       );
-      if (batch) {
-        batch.postedTs = (result as any).ts;
-      }
-      if (mapActivityTs && (result as any).ts) {
-        mapActivityTs((result as any).ts);
-      }
-    }
 
-    // Update last post time
-    if (batch) {
-      batch.lastPostTime = Date.now();
+      const postedTs = (result as any).ts as string | undefined;
+
+      // Step 2: if actions requested, update message with buttons using real ts
+      if (postedTs && options?.buildActions) {
+        const actions = options.buildActions(entry, postedTs);
+        if (actions) {
+          const blocks = buildActivityEntryBlocks({ text, actions });
+          await withSlackRetry(
+            () => client.chat.update({ channel, ts: postedTs, text, blocks }),
+            'batch.entry.update'
+          );
+        }
+      }
+
+      if (batch) {
+        batch.postedTs = postedTs || batch.postedTs;
+        batch.postedCount += 1;
+        batch.lastPostTime = Date.now();
+        if (entry.toolUseId) {
+          batch.postedToolUseIds.push(entry.toolUseId);
+        }
+      }
+
+      if (postedTs && options?.mapActivityTs) {
+        options.mapActivityTs(postedTs, entry);
+      }
+    } catch (err) {
+      console.error('[flushActivityBatchToThread] Failed:', err);
     }
-  } catch (err) {
-    console.error('[flushActivityBatchToThread] Failed:', err);
   }
 }
 
