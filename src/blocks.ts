@@ -1127,6 +1127,8 @@ export interface ForkToChannelModalParams {
   conversationKey: string;
   /** Codex turn ID - actual index is queried from Codex at fork execution time */
   turnId: string;
+  /** Suggested channel name (computed by checking existing forks) */
+  suggestedName: string;
 }
 
 /**
@@ -1159,8 +1161,6 @@ export function buildForkToChannelModalView(params: ForkToChannelModalParams): {
   close: { type: 'plain_text'; text: string };
   blocks: ModalBlock[];
 } {
-  const suggestedName = `${params.sourceChannelName}-fork`;
-
   return {
     type: 'modal',
     callback_id: 'fork_to_channel_modal',
@@ -1183,7 +1183,7 @@ export function buildForkToChannelModalView(params: ForkToChannelModalParams): {
           type: 'plain_text_input',
           action_id: 'channel_name_input',
           placeholder: { type: 'plain_text', text: 'Enter channel name' },
-          initial_value: suggestedName,
+          initial_value: params.suggestedName,
           max_length: 80,
         },
         label: { type: 'plain_text', text: 'New Channel Name' },

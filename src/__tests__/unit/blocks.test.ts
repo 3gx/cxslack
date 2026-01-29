@@ -629,6 +629,7 @@ describe('Block Kit Builders', () => {
       sourceThreadTs: '789.012',
       conversationKey: 'C123:789.012',
       turnId: 'turn_abc123', // Codex turn ID (NOT turnIndex)
+      suggestedName: 'general-fork', // Computed by slack-bot.ts
     };
 
     it('builds a modal with correct callback_id', () => {
@@ -646,15 +647,26 @@ describe('Block Kit Builders', () => {
       expect(metadata.sourceChannelName).toBe('general');
       expect(metadata.turnId).toBe('turn_abc123'); // turnId, NOT turnIndex
       expect(metadata.conversationKey).toBe('C123:789.012');
+      expect(metadata.suggestedName).toBe('general-fork');
     });
 
-    it('pre-fills channel name with -fork suffix', () => {
+    it('pre-fills channel name with suggestedName', () => {
       const modal = buildForkToChannelModalView(baseParams);
 
       // Find the input block
       const inputBlock = modal.blocks.find((b) => b.type === 'input') as { element?: { initial_value?: string } };
       expect(inputBlock).toBeDefined();
       expect(inputBlock?.element?.initial_value).toBe('general-fork');
+    });
+
+    it('pre-fills channel name with -fork-N suffix when provided', () => {
+      const modal = buildForkToChannelModalView({
+        ...baseParams,
+        suggestedName: 'general-fork-3',
+      });
+
+      const inputBlock = modal.blocks.find((b) => b.type === 'input') as { element?: { initial_value?: string } };
+      expect(inputBlock?.element?.initial_value).toBe('general-fork-3');
     });
 
     it('shows generic description without turn number', () => {

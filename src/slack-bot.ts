@@ -392,15 +392,53 @@ function setupEventHandlers(): void {
         const messageTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.ts;
         const threadTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.thread_ts ?? messageTs;
 
-        // Get channel name for suggested fork channel name
+        // Get channel name and find next available fork name
         const triggerBody = body as { trigger_id?: string };
         if (triggerBody.trigger_id) {
           let channelName = 'channel';
+          let suggestedName = 'channel-fork';
+
           try {
             const channelInfo = await client.conversations.info({ channel: channelId });
             channelName = (channelInfo.channel as { name?: string })?.name ?? 'channel';
-          } catch {
+            const baseForkName = `${channelName}-fork`;
+
+            // List channels to find existing forks with this pattern
+            // Include archived channels since Slack blocks names even for archived channels
+            const existingNames = new Set<string>();
+            let cursor: string | undefined;
+            do {
+              const listResult = await client.conversations.list({
+                types: 'public_channel,private_channel',
+                exclude_archived: false,
+                limit: 200,
+                cursor,
+              });
+              if (listResult.ok && listResult.channels) {
+                for (const ch of listResult.channels) {
+                  if (ch.name?.startsWith(baseForkName)) {
+                    existingNames.add(ch.name);
+                  }
+                }
+              }
+              cursor = listResult.response_metadata?.next_cursor;
+            } while (cursor);
+            console.log(`[Fork] Found existing fork channels: ${[...existingNames].join(', ') || 'none'}`);
+
+            // Find next available name: -fork, then -fork-1, -fork-2, etc.
+            if (!existingNames.has(baseForkName)) {
+              suggestedName = baseForkName;
+            } else {
+              let num = 1;
+              while (existingNames.has(`${baseForkName}-${num}`)) {
+                num++;
+              }
+              suggestedName = `${baseForkName}-${num}`;
+            }
+            console.log(`[Fork] Suggested name: ${suggestedName}`);
+          } catch (error) {
             // Use default name if channel info unavailable
+            console.log('[Fork] Could not get channel name for prefill:', error);
           }
 
           await client.views.open({
@@ -412,6 +450,7 @@ function setupEventHandlers(): void {
               sourceThreadTs: threadTs ?? '',
               conversationKey,
               turnId,
+              suggestedName,
             }),
           });
         }
@@ -891,12 +930,27 @@ async function createForkChannel(params: CreateForkChannelParams): Promise<Creat
     });
   } catch (error) {
     const errMsg = (error as { data?: { error?: string } })?.data?.error;
-    if (errMsg === 'name_taken') {
-      throw new Error(`Channel name "${channelName}" is already taken. Please choose a different name.`);
-    } else if (errMsg === 'invalid_name_specials') {
-      throw new Error(`Channel name "${channelName}" contains invalid characters. Use only lowercase letters, numbers, and hyphens.`);
+    switch (errMsg) {
+      case 'name_taken':
+        throw new Error(`Channel name "${channelName}" is already taken. Please choose a different name.`);
+      case 'invalid_name_specials':
+      case 'invalid_name_punctuation':
+        throw new Error(`Channel name "${channelName}" contains invalid characters. Use only lowercase letters, numbers, and hyphens.`);
+      case 'invalid_name':
+      case 'invalid_name_required':
+        throw new Error(`Invalid channel name "${channelName}". Channel names must be lowercase with no spaces.`);
+      case 'invalid_name_maxlength':
+        throw new Error(`Channel name "${channelName}" is too long. Maximum 80 characters allowed.`);
+      case 'restricted_action':
+        throw new Error('Channel creation is restricted by your workspace policy. Contact your admin.');
+      case 'user_is_restricted':
+        throw new Error('You do not have permission to create channels in this workspace.');
+      case 'no_permission':
+        throw new Error('The bot does not have permission to create channels. Please check bot permissions.');
+      default:
+        // Show the actual Slack error for debugging
+        throw new Error(`Failed to create channel: ${errMsg || (error as Error)?.message || 'Unknown error'}`);
     }
-    throw error;
   }
 
   if (!createResult.ok || !createResult.channel?.id) {

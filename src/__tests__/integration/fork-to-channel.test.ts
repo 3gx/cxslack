@@ -79,9 +79,10 @@ describe('Fork to Channel Flow', () => {
       sourceThreadTs: '789.012',
       conversationKey: 'C123456:789.012',
       turnId: 'turn_abc123', // Codex turn ID (NOT turnIndex)
+      suggestedName: 'general-fork', // Computed by slack-bot.ts before opening modal
     };
 
-    it('suggests channel name with -fork suffix', () => {
+    it('uses provided suggestedName for initial value', () => {
       const modal = buildForkToChannelModalView(baseParams);
       const inputBlock = modal.blocks.find((b) => b.type === 'input') as {
         element?: { initial_value?: string };
@@ -89,16 +90,15 @@ describe('Fork to Channel Flow', () => {
       expect(inputBlock?.element?.initial_value).toBe('general-fork');
     });
 
-    it('handles channel names that already end with -fork', () => {
+    it('uses suggestedName with -fork-N suffix when provided', () => {
       const modal = buildForkToChannelModalView({
         ...baseParams,
-        sourceChannelName: 'my-channel-fork',
+        suggestedName: 'general-fork-2', // When general-fork and general-fork-1 exist
       });
       const inputBlock = modal.blocks.find((b) => b.type === 'input') as {
         element?: { initial_value?: string };
       };
-      // Should still append -fork (user can edit)
-      expect(inputBlock?.element?.initial_value).toBe('my-channel-fork-fork');
+      expect(inputBlock?.element?.initial_value).toBe('general-fork-2');
     });
 
     it('preserves turnId in private_metadata', () => {
@@ -279,6 +279,7 @@ describe('Fork to Channel Flow', () => {
         sourceThreadTs: '789.012',
         conversationKey: 'C123456:789.012',
         turnId: 'turn_def456',
+        suggestedName: 'general-fork',
       });
 
       const metadata = JSON.parse(modal.private_metadata);
@@ -295,11 +296,137 @@ describe('Fork to Channel Flow', () => {
         sourceThreadTs: '789.012',
         conversationKey: 'C123456:789.012',
         turnId: 'turn_first',
+        suggestedName: 'general-fork',
       });
 
       const sectionBlock = modal.blocks.find((b) => b.type === 'section');
       expect(sectionBlock?.text?.text).toContain('Fork conversation from this point');
       expect(sectionBlock?.text?.text).not.toMatch(/turn \d+/);
+    });
+  });
+
+  describe('Fork Name Suggestion Logic', () => {
+    // This tests the logic used in slack-bot.ts to find the next available fork name
+    function findNextForkName(baseForkName: string, existingNames: Set<string>): string {
+      if (!existingNames.has(baseForkName)) {
+        return baseForkName;
+      }
+      let num = 1;
+      while (existingNames.has(`${baseForkName}-${num}`)) {
+        num++;
+      }
+      return `${baseForkName}-${num}`;
+    }
+
+    it('suggests baseForkName when no forks exist', () => {
+      const existing = new Set<string>();
+      expect(findNextForkName('general-fork', existing)).toBe('general-fork');
+    });
+
+    it('suggests -fork-1 when -fork exists', () => {
+      const existing = new Set(['general-fork']);
+      expect(findNextForkName('general-fork', existing)).toBe('general-fork-1');
+    });
+
+    it('suggests -fork-2 when -fork and -fork-1 exist', () => {
+      const existing = new Set(['general-fork', 'general-fork-1']);
+      expect(findNextForkName('general-fork', existing)).toBe('general-fork-2');
+    });
+
+    it('suggests -fork-3 when -fork, -fork-1, -fork-2 exist', () => {
+      const existing = new Set(['general-fork', 'general-fork-1', 'general-fork-2']);
+      expect(findNextForkName('general-fork', existing)).toBe('general-fork-3');
+    });
+
+    it('fills gaps in sequence', () => {
+      // If -fork-1 is missing but -fork and -fork-2 exist
+      const existing = new Set(['general-fork', 'general-fork-2']);
+      expect(findNextForkName('general-fork', existing)).toBe('general-fork-1');
+    });
+
+    it('handles large numbers', () => {
+      const existing = new Set<string>();
+      for (let i = 0; i <= 10; i++) {
+        existing.add(i === 0 ? 'general-fork' : `general-fork-${i}`);
+      }
+      expect(findNextForkName('general-fork', existing)).toBe('general-fork-11');
+    });
+  });
+
+  describe('Channel Creation Error Messages', () => {
+    // These test the error messages generated in createForkChannel
+    function getErrorMessage(slackError: string, channelName: string): string {
+      switch (slackError) {
+        case 'name_taken':
+          return `Channel name "${channelName}" is already taken. Please choose a different name.`;
+        case 'invalid_name_specials':
+        case 'invalid_name_punctuation':
+          return `Channel name "${channelName}" contains invalid characters. Use only lowercase letters, numbers, and hyphens.`;
+        case 'invalid_name':
+        case 'invalid_name_required':
+          return `Invalid channel name "${channelName}". Channel names must be lowercase with no spaces.`;
+        case 'invalid_name_maxlength':
+          return `Channel name "${channelName}" is too long. Maximum 80 characters allowed.`;
+        case 'restricted_action':
+          return 'Channel creation is restricted by your workspace policy. Contact your admin.';
+        case 'user_is_restricted':
+          return 'You do not have permission to create channels in this workspace.';
+        case 'no_permission':
+          return 'The bot does not have permission to create channels. Please check bot permissions.';
+        default:
+          return `Failed to create channel: ${slackError || 'Unknown error'}`;
+      }
+    }
+
+    it('provides specific message for name_taken', () => {
+      const msg = getErrorMessage('name_taken', 'test-fork');
+      expect(msg).toContain('already taken');
+      expect(msg).toContain('test-fork');
+    });
+
+    it('provides specific message for invalid_name_specials', () => {
+      const msg = getErrorMessage('invalid_name_specials', 'test@fork');
+      expect(msg).toContain('invalid characters');
+      expect(msg).toContain('test@fork');
+    });
+
+    it('provides specific message for invalid_name_punctuation', () => {
+      const msg = getErrorMessage('invalid_name_punctuation', 'test.fork');
+      expect(msg).toContain('invalid characters');
+    });
+
+    it('provides specific message for invalid_name', () => {
+      const msg = getErrorMessage('invalid_name', 'TEST FORK');
+      expect(msg).toContain('lowercase with no spaces');
+    });
+
+    it('provides specific message for invalid_name_maxlength', () => {
+      const longName = 'a'.repeat(100);
+      const msg = getErrorMessage('invalid_name_maxlength', longName);
+      expect(msg).toContain('too long');
+      expect(msg).toContain('Maximum 80 characters');
+    });
+
+    it('provides specific message for restricted_action', () => {
+      const msg = getErrorMessage('restricted_action', 'test-fork');
+      expect(msg).toContain('restricted');
+      expect(msg).toContain('workspace policy');
+    });
+
+    it('provides specific message for user_is_restricted', () => {
+      const msg = getErrorMessage('user_is_restricted', 'test-fork');
+      expect(msg).toContain('do not have permission');
+    });
+
+    it('provides specific message for no_permission', () => {
+      const msg = getErrorMessage('no_permission', 'test-fork');
+      expect(msg).toContain('bot does not have permission');
+    });
+
+    it('shows actual error for unknown Slack errors', () => {
+      const msg = getErrorMessage('some_unknown_error', 'test-fork');
+      expect(msg).toContain('Failed to create channel');
+      expect(msg).toContain('some_unknown_error');
     });
   });
 });

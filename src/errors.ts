@@ -136,10 +136,9 @@ export function toUserMessage(error: unknown): string {
     return `Slack error: ${error.data?.error || 'Unknown error'}`;
   }
 
-  // Handle generic errors
+  // Handle generic errors - show the actual message
   if (error instanceof Error) {
-    // Don't expose internal error messages to users
-    return 'An unexpected error occurred. Please try again.';
+    return error.message || 'An unexpected error occurred. Please try again.';
   }
 
   return 'An unexpected error occurred. Please try again.';
