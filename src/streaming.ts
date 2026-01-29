@@ -1057,6 +1057,8 @@ export class StreamingManager {
       const inputTokensForStats = includeFinalStats && hasTokenCounts ? adjInput : undefined;
       const outputTokensForStats = includeFinalStats && hasTokenCounts ? adjOutput : undefined;
 
+      const threadTs = context.threadTs || context.originalTs;
+
       const blocks = buildActivityBlocks({
         activityText: activityText || ':gear: Starting...',
         status: state.status,
@@ -1084,7 +1086,6 @@ export class StreamingManager {
       });
 
       const fallbackText = activityText || 'Processing...';
-      const threadTs = context.threadTs || context.originalTs;
 
       // Update or post with error fallback
       try {
