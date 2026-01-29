@@ -33,22 +33,27 @@ import {
   buildTextBlocks,
   buildErrorBlocks,
   Block,
+  ModelInfo,
 } from './blocks.js';
 import fs from 'fs';
 
-export const FALLBACK_MODELS = [
-  'gpt-5.2-codex',
-  'gpt-5.2',
-  'gpt-5.1-codex-max',
-  'gpt-5.1-codex-mini',
-] as const;
+/**
+ * Fallback model list when server doesn't provide models.
+ * Uses ModelInfo format for consistency with button-based UI.
+ */
+export const FALLBACK_MODELS: ModelInfo[] = [
+  { value: 'gpt-5.2-codex', displayName: 'GPT-5.2 Codex', description: 'Latest frontier agentic coding model.' },
+  { value: 'gpt-5.2', displayName: 'GPT-5.2', description: 'Latest frontier model with improvements across knowledge, reasoning and coding.' },
+  { value: 'gpt-5.1-codex-max', displayName: 'GPT-5.1 Codex Max', description: 'Codex-optimized flagship for deep and fast reasoning.' },
+  { value: 'gpt-5.1-codex-mini', displayName: 'GPT-5.1 Codex Mini', description: 'Optimized for codex. Cheaper, faster, but less capable.' },
+];
 
-export const FALLBACK_MODEL_DESCRIPTIONS: Record<string, string> = {
-  'gpt-5.2-codex': 'Latest frontier agentic coding model.',
-  'gpt-5.2': 'Latest frontier model with improvements across knowledge, reasoning and coding.',
-  'gpt-5.1-codex-max': 'Codex-optimized flagship for deep and fast reasoning.',
-  'gpt-5.1-codex-mini': 'Optimized for codex. Cheaper, faster, but less capable.',
-};
+/**
+ * Get model info by value.
+ */
+export function getModelInfo(modelValue: string): ModelInfo | undefined {
+  return FALLBACK_MODELS.find(m => m.value === modelValue);
+}
 
 /**
  * Command result to return to the caller.
@@ -57,6 +62,7 @@ export interface CommandResult {
   blocks: Block[];
   text: string; // Fallback text
   ephemeral?: boolean; // Whether to send as ephemeral message
+  showModelSelection?: boolean; // Flag to trigger model picker with emoji tracking
 }
 
 /**
@@ -165,53 +171,29 @@ export async function handleClearCommand(
 
 /**
  * Handle /model command.
+ * Returns showModelSelection flag so slack-bot.ts can handle emoji tracking.
  */
 export async function handleModelCommand(
   context: CommandContext,
-  codex: CodexClient
+  _codex: CodexClient
 ): Promise<CommandResult> {
-  const { channelId, threadTs, text: args } = context;
+  const { channelId, threadTs } = context;
 
   // Get current model
   const session = threadTs
     ? getThreadSession(channelId, threadTs)
     : getSession(channelId);
   const currentModel = session?.model;
-  const currentReasoning = session?.reasoningEffort;
 
-  // Get available models
-  let availableModels: string[] = [];
-  try {
-    availableModels = await codex.listModels();
-  } catch (err) {
-    console.error('Failed to list models:', err);
-  }
-  if (availableModels.length === 0) {
-    availableModels = [...FALLBACK_MODELS];
-  }
+  // Use fallback models (button-based UI)
+  // The actual model list would come from SDK if available
+  const models = FALLBACK_MODELS;
 
-  if (args) {
-    // Ignore inline model args; prompt is required to pick model + reasoning
-    return {
-      blocks: buildModelSelectionBlocks({
-        availableModels,
-        currentModel,
-        currentReasoning,
-        modelDescriptions: FALLBACK_MODEL_DESCRIPTIONS,
-      }),
-      text: 'Use the model selector to choose a model and reasoning level.',
-    };
-  }
-
-  // Always show selection prompt
+  // Return flag for slack-bot.ts to handle with emoji tracking
   return {
-    blocks: buildModelSelectionBlocks({
-      availableModels,
-      currentModel,
-      currentReasoning,
-      modelDescriptions: FALLBACK_MODEL_DESCRIPTIONS,
-    }),
-    text: 'Select a model and reasoning level.',
+    blocks: buildModelSelectionBlocks(models, currentModel),
+    text: 'Select a model.',
+    showModelSelection: true,
   };
 }
 

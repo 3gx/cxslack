@@ -14,7 +14,7 @@ import {
   CommandContext,
   parseCommand,
   FALLBACK_MODELS,
-  FALLBACK_MODEL_DESCRIPTIONS,
+  getModelInfo,
 } from './commands.js';
 import {
   getSession,
@@ -31,11 +31,27 @@ import {
   buildActivityBlocks,
   buildPolicyStatusBlocks,
   buildModelSelectionBlocks,
+  buildReasoningSelectionBlocks,
+  buildModelConfirmationBlocks,
+  buildModelPickerCancelledBlocks,
   buildErrorBlocks,
   buildTextBlocks,
   buildAbortConfirmationModalView,
   Block,
 } from './blocks.js';
+
+// ============================================================================
+// Pending Model Selection Tracking (for emoji cleanup)
+// ============================================================================
+
+interface PendingModelSelection {
+  originalTs: string;   // User's message timestamp (for emoji cleanup)
+  channelId: string;
+  threadTs?: string;
+}
+
+// Track pending model selections for emoji cleanup
+export const pendingModelSelections = new Map<string, PendingModelSelection>();
 import { toUserMessage } from './errors.js';
 import { markAborted } from './abort-tracker.js';
 
@@ -336,12 +352,13 @@ function setupEventHandlers(): void {
     });
   });
 
-  // Handle /model selection (model dropdown)
-  app.action('model_select', async ({ action, ack, body, client }) => {
+  // Handle model button clicks (Step 1 of 2)
+  // Pattern matches model_select_<model_value>
+  app.action(/^model_select_(.+)$/, async ({ action, ack, body, client }) => {
     await ack();
 
-    const selected = (action as { selected_option?: { value: string } }).selected_option?.value;
-    if (!selected) return;
+    const actionId = 'action_id' in action ? action.action_id : '';
+    const modelValue = actionId.replace('model_select_', '');
 
     const channelId = body.channel?.id;
     const messageTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.ts;
@@ -349,6 +366,8 @@ function setupEventHandlers(): void {
     const threadTs =
       (body as { message?: { ts?: string; thread_ts?: string } }).message?.thread_ts ??
       messageTs;
+
+    console.log(`[model] Model button clicked: ${modelValue} for channel: ${channelId}`);
 
     const conversationKey = makeConversationKey(channelId, threadTs);
     if (streamingManager.isStreaming(conversationKey)) {
@@ -369,38 +388,41 @@ function setupEventHandlers(): void {
       return;
     }
 
-    await saveThreadSession(channelId, threadTs, { model: selected });
+    // Get model info for display name
+    const modelInfo = getModelInfo(modelValue);
+    const displayName = modelInfo?.displayName || modelValue;
 
+    // Get current reasoning for initial selection
     const session = getThreadSession(channelId, threadTs) ?? getSession(channelId);
-    let availableModels: string[] = [];
-    try {
-      availableModels = await codex.listModels();
-    } catch (err) {
-      console.error('Failed to list models:', err);
-    }
-    if (availableModels.length === 0) {
-      availableModels = [...FALLBACK_MODELS];
-    }
 
+    // Show reasoning selection (Step 2)
+    // Keep pending selection tracking for emoji cleanup
     await client.chat.update({
       channel: channelId,
       ts: messageTs,
-      text: `Model set to ${selected}`,
-      blocks: buildModelSelectionBlocks({
-        availableModels,
-        currentModel: session?.model,
-        currentReasoning: session?.reasoningEffort,
-        modelDescriptions: FALLBACK_MODEL_DESCRIPTIONS,
-      }),
+      text: `Select reasoning for ${displayName}`,
+      blocks: buildReasoningSelectionBlocks(modelValue, displayName, session?.reasoningEffort),
     });
   });
 
-  // Handle /model selection (reasoning dropdown)
-  app.action('reasoning_select', async ({ action, ack, body, client }) => {
+  // Handle reasoning button clicks (Step 2 of 2)
+  // Pattern matches reasoning_select_<reasoning_value>
+  app.action(/^reasoning_select_(.+)$/, async ({ action, ack, body, client }) => {
     await ack();
 
-    const selected = (action as { selected_option?: { value: string } }).selected_option?.value;
-    if (!selected) return;
+    const actionId = 'action_id' in action ? action.action_id : '';
+    const reasoningValue = actionId.replace('reasoning_select_', '');
+
+    // Value contains JSON with model and reasoning
+    const actionValue = 'value' in action ? (action.value as string) : '';
+    let modelValue = '';
+    try {
+      const parsed = JSON.parse(actionValue);
+      modelValue = parsed.model;
+    } catch {
+      console.error('[model] Failed to parse reasoning action value:', actionValue);
+      return;
+    }
 
     const channelId = body.channel?.id;
     const messageTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.ts;
@@ -409,18 +431,32 @@ function setupEventHandlers(): void {
       (body as { message?: { ts?: string; thread_ts?: string } }).message?.thread_ts ??
       messageTs;
 
+    console.log(`[model] Reasoning selected: ${reasoningValue} for model: ${modelValue}`);
+
+    // Remove emojis from original message
+    const pending = pendingModelSelections.get(messageTs);
+    if (pending) {
+      try {
+        await client.reactions.remove({ channel: pending.channelId, timestamp: pending.originalTs, name: 'question' });
+      } catch { /* ignore */ }
+      try {
+        await client.reactions.remove({ channel: pending.channelId, timestamp: pending.originalTs, name: 'eyes' });
+      } catch { /* ignore */ }
+      pendingModelSelections.delete(messageTs);
+    }
+
     const conversationKey = makeConversationKey(channelId, threadTs);
     if (streamingManager.isStreaming(conversationKey)) {
       await client.chat.update({
         channel: channelId,
         ts: messageTs,
-        text: 'Cannot change reasoning while processing',
+        text: 'Cannot change settings while processing',
         blocks: [
           {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: ':warning: Cannot change reasoning while a turn is running. Please wait or abort.',
+              text: ':warning: Cannot change settings while a turn is running. Please wait or abort.',
             },
           },
         ],
@@ -428,31 +464,51 @@ function setupEventHandlers(): void {
       return;
     }
 
-    const reasoningEffort = selected === 'default' ? undefined : (selected as ReasoningEffort);
+    // Save both model and reasoning to session
+    const reasoningEffort = reasoningValue === 'medium' ? undefined : (reasoningValue as ReasoningEffort);
+    await saveThreadSession(channelId, threadTs, { model: modelValue, reasoningEffort });
 
-    await saveThreadSession(channelId, threadTs, { reasoningEffort });
+    // Get model info for display name
+    const modelInfo = getModelInfo(modelValue);
+    const displayName = modelInfo?.displayName || modelValue;
 
-    const session = getThreadSession(channelId, threadTs) ?? getSession(channelId);
-    let availableModels: string[] = [];
-    try {
-      availableModels = await codex.listModels();
-    } catch (err) {
-      console.error('Failed to list models:', err);
-    }
-    if (availableModels.length === 0) {
-      availableModels = [...FALLBACK_MODELS];
-    }
-
+    // Show confirmation
     await client.chat.update({
       channel: channelId,
       ts: messageTs,
-      text: `Reasoning set to ${reasoningEffort ?? 'default'}`,
-      blocks: buildModelSelectionBlocks({
-        availableModels,
-        currentModel: session?.model,
-        currentReasoning: session?.reasoningEffort,
-        modelDescriptions: FALLBACK_MODEL_DESCRIPTIONS,
-      }),
+      text: `Settings updated: ${displayName}, ${reasoningValue}`,
+      blocks: buildModelConfirmationBlocks(displayName, modelValue, reasoningValue),
+    });
+  });
+
+  // Handle model picker cancel button
+  app.action('model_picker_cancel', async ({ ack, body, client }) => {
+    await ack();
+
+    const channelId = body.channel?.id;
+    const messageTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.ts;
+    if (!channelId || !messageTs) return;
+
+    console.log('[model] Model picker cancelled');
+
+    // Remove emojis from original message
+    const pending = pendingModelSelections.get(messageTs);
+    if (pending) {
+      try {
+        await client.reactions.remove({ channel: pending.channelId, timestamp: pending.originalTs, name: 'question' });
+      } catch { /* ignore */ }
+      try {
+        await client.reactions.remove({ channel: pending.channelId, timestamp: pending.originalTs, name: 'eyes' });
+      } catch { /* ignore */ }
+      pendingModelSelections.delete(messageTs);
+    }
+
+    // Show cancellation message
+    await client.chat.update({
+      channel: channelId,
+      ts: messageTs,
+      text: 'Model selection cancelled',
+      blocks: buildModelPickerCancelledBlocks(),
     });
   });
 }
@@ -485,6 +541,30 @@ async function handleUserMessage(
 
   const commandResult = await handleCommand(commandContext, codex);
   if (commandResult) {
+    // Handle /model command with emoji tracking
+    if (commandResult.showModelSelection) {
+      const response = await app.client.chat.postMessage({
+        channel: channelId,
+        thread_ts: postingThreadTs,
+        blocks: commandResult.blocks,
+        text: commandResult.text,
+      });
+
+      // Track pending selection for emoji cleanup
+      if (response.ts) {
+        pendingModelSelections.set(response.ts, {
+          originalTs: messageTs,
+          channelId,
+          threadTs: postingThreadTs,
+        });
+        // Add :question: emoji to user's message (keep :eyes: from message receipt)
+        try {
+          await app.client.reactions.add({ channel: channelId, timestamp: messageTs, name: 'question' });
+        } catch { /* ignore if already added */ }
+      }
+      return;
+    }
+
     // Send command response in thread
     await app.client.chat.postMessage({
       channel: channelId,

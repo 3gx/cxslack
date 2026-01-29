@@ -518,132 +518,193 @@ export function buildModelStatusBlocks(
   return blocks;
 }
 
-export interface ModelSelectionBlockParams {
-  availableModels: string[];
-  currentModel?: string;
-  currentReasoning?: ReasoningEffort;
-  modelDescriptions?: Record<string, string>;
+// ============================================================================
+// Model Selection Blocks (Button-based two-step flow like ccslack)
+// ============================================================================
+
+export interface ModelInfo {
+  value: string;       // e.g., "gpt-5.2-codex"
+  displayName: string; // e.g., "GPT-5.2 Codex"
+  description: string; // Human-readable description
 }
 
 /**
- * Build blocks for /model command selection prompt (model + reasoning).
+ * Build blocks for model selection (Step 1 of 2).
+ * Shows model buttons - user clicks one to proceed to reasoning selection.
  */
-export function buildModelSelectionBlocks(params: ModelSelectionBlockParams): Block[] {
-  const { availableModels, currentModel, currentReasoning, modelDescriptions } = params;
-
-  const modelOptions = availableModels.map((model) => ({
-    text: { type: 'plain_text', text: model },
-    value: model,
+export function buildModelSelectionBlocks(
+  models: ModelInfo[],
+  currentModel?: string
+): Block[] {
+  // Create buttons for each model (max 5 for Slack actions block)
+  const buttons = models.slice(0, 5).map(model => ({
+    type: 'button' as const,
+    text: {
+      type: 'plain_text' as const,
+      text: model.displayName,
+      emoji: true,
+    },
+    action_id: `model_select_${model.value}`,
+    value: model.value,
+    ...(currentModel === model.value ? { style: 'primary' as const } : {}),
   }));
 
-  const reasoningOptions: Array<{ text: { type: 'plain_text'; text: string }; value: string }> = [
-    { text: { type: 'plain_text', text: 'default' }, value: 'default' },
-    { text: { type: 'plain_text', text: 'minimal' }, value: 'minimal' },
-    { text: { type: 'plain_text', text: 'low' }, value: 'low' },
-    { text: { type: 'plain_text', text: 'medium' }, value: 'medium' },
-    { text: { type: 'plain_text', text: 'high' }, value: 'high' },
-    { text: { type: 'plain_text', text: 'xhigh' }, value: 'xhigh' },
-  ];
+  // Build description context
+  const descriptions = models.slice(0, 5).map(m =>
+    `• *${m.displayName}*: ${m.description}`
+  ).join('\n');
 
   const blocks: Block[] = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text:
-          `:robot_face: *Select Model & Reasoning*\n` +
-          `Model: *${currentModel || 'default'}*\n` +
-          `Reasoning: *${currentReasoning || 'default'}*`,
+        text: `*Select Model* (Step 1/2)\nCurrent: \`${currentModel || 'default'}\``,
       },
     },
   ];
 
-  if (modelOptions.length > 0) {
-    const hasCurrentModel = currentModel && availableModels.includes(currentModel);
-    const reasoningInitial = reasoningOptions.find(
-      (opt) => opt.value === (currentReasoning ?? 'default')
-    );
+  if (buttons.length > 0) {
     blocks.push({
       type: 'actions',
       block_id: 'model_selection',
-      elements: [
-        {
-          type: 'static_select',
-          action_id: 'model_select',
-          placeholder: { type: 'plain_text', text: 'Select a model' },
-          options: modelOptions,
-          ...(hasCurrentModel
-            ? {
-                initial_option: {
-                  text: { type: 'plain_text', text: currentModel },
-                  value: currentModel,
-                },
-              }
-            : {}),
-        },
-        {
-          type: 'static_select',
-          action_id: 'reasoning_select',
-          placeholder: { type: 'plain_text', text: 'Select reasoning' },
-          options: reasoningOptions,
-          ...(reasoningInitial ? { initial_option: reasoningInitial } : {}),
-        },
-      ],
+      elements: buttons,
+    });
+    blocks.push({
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: descriptions,
+      }],
     });
   } else {
     blocks.push({
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: ':warning: Model list unavailable from server. Try again later.',
+        text: ':warning: No models available. Using default.',
       },
-    });
-    blocks.push({
-      type: 'actions',
-      block_id: 'reasoning_only',
-      elements: [
-        {
-          type: 'static_select',
-          action_id: 'reasoning_select',
-          placeholder: { type: 'plain_text', text: 'Select reasoning' },
-          options: reasoningOptions,
-          ...(reasoningOptions.find((opt) => opt.value === (currentReasoning ?? 'default'))
-            ? { initial_option: reasoningOptions.find((opt) => opt.value === (currentReasoning ?? 'default')) }
-            : {}),
-        },
-      ],
     });
   }
 
+  // Cancel button
   blocks.push({
-    type: 'context',
-    elements: [
-      {
-        type: 'mrkdwn',
-        text: 'Changes apply on the next turn.',
-      },
-    ],
+    type: 'actions',
+    block_id: 'model_cancel',
+    elements: [{
+      type: 'button',
+      text: { type: 'plain_text', text: 'Cancel' },
+      action_id: 'model_picker_cancel',
+    }],
   });
 
-  if (modelDescriptions && availableModels.length > 0) {
-    const descLines = availableModels
-      .filter((m) => modelDescriptions[m])
-      .map((m) => `• *${m}*: ${modelDescriptions[m]}`)
-      .join('\n');
-    if (descLines) {
-      blocks.push({
-        type: 'context',
-        elements: [
-          {
-            type: 'mrkdwn',
-            text: descLines,
-          },
-        ],
-      });
-    }
-  }
-
   return blocks;
+}
+
+/**
+ * Build blocks for reasoning selection (Step 2 of 2).
+ * Shows reasoning buttons after model is selected.
+ */
+export function buildReasoningSelectionBlocks(
+  selectedModel: string,
+  selectedModelDisplayName: string,
+  currentReasoning?: ReasoningEffort
+): Block[] {
+  const reasoningLevels: Array<{ value: string; label: string; description: string }> = [
+    { value: 'minimal', label: 'Minimal', description: 'Fastest, minimal reasoning' },
+    { value: 'low', label: 'Low', description: 'Fast responses with light reasoning' },
+    { value: 'medium', label: 'Medium', description: 'Balanced speed and depth (default)' },
+    { value: 'high', label: 'High', description: 'Greater depth for complex problems' },
+    { value: 'xhigh', label: 'Extra High', description: 'Maximum reasoning depth' },
+  ];
+
+  const buttons = reasoningLevels.map(level => ({
+    type: 'button' as const,
+    text: {
+      type: 'plain_text' as const,
+      text: level.label,
+      emoji: true,
+    },
+    action_id: `reasoning_select_${level.value}`,
+    value: JSON.stringify({ model: selectedModel, reasoning: level.value }),
+    ...(currentReasoning === level.value ? { style: 'primary' as const } : {}),
+  }));
+
+  const descriptions = reasoningLevels.map(l =>
+    `• *${l.label}*: ${l.description}`
+  ).join('\n');
+
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Select Reasoning Level* (Step 2/2)\nModel: \`${selectedModelDisplayName}\``,
+      },
+    },
+    {
+      type: 'actions',
+      block_id: 'reasoning_selection',
+      elements: buttons,
+    },
+    {
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: descriptions,
+      }],
+    },
+    {
+      type: 'actions',
+      block_id: 'reasoning_cancel',
+      elements: [{
+        type: 'button',
+        text: { type: 'plain_text', text: 'Cancel' },
+        action_id: 'model_picker_cancel',
+      }],
+    },
+  ];
+}
+
+/**
+ * Build blocks for model selection confirmation.
+ */
+export function buildModelConfirmationBlocks(
+  modelDisplayName: string,
+  modelValue: string,
+  reasoning: string
+): Block[] {
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:white_check_mark: *Settings Updated*\nModel: \`${modelDisplayName}\`\nReasoning: \`${reasoning}\``,
+      },
+    },
+    {
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: 'Changes apply on the next turn.',
+      }],
+    },
+  ];
+}
+
+/**
+ * Build blocks for model picker cancellation.
+ */
+export function buildModelPickerCancelledBlocks(): Block[] {
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: ':x: Model selection cancelled.',
+      },
+    },
+  ];
 }
 
 /**

@@ -19,6 +19,10 @@ import {
   buildAbortConfirmationModalView,
   buildActivityBlocks,
   buildModelSelectionBlocks,
+  buildReasoningSelectionBlocks,
+  buildModelConfirmationBlocks,
+  buildModelPickerCancelledBlocks,
+  ModelInfo,
 } from '../../blocks.js';
 
 describe('Block Kit Builders', () => {
@@ -243,29 +247,150 @@ describe('Block Kit Builders', () => {
     });
   });
 
-  describe('buildModelSelectionBlocks', () => {
-    it('renders model and reasoning selectors', () => {
-      const blocks = buildModelSelectionBlocks({
-        availableModels: ['model-a', 'model-b'],
-        currentModel: 'model-b',
-        currentReasoning: 'high',
-      });
+  describe('buildModelSelectionBlocks (Step 1 - Button-based)', () => {
+    const mockModels: ModelInfo[] = [
+      { value: 'gpt-5.2-codex', displayName: 'GPT-5.2 Codex', description: 'Latest coding model' },
+      { value: 'gpt-5.2', displayName: 'GPT-5.2', description: 'Latest frontier model' },
+    ];
 
-      expect(blocks[0].text?.text).toContain('Select Model & Reasoning');
-      expect(blocks[0].text?.text).toContain('model-b');
-      expect(blocks[1].type).toBe('actions');
-      const elements = blocks[1].elements as Array<{ action_id: string }>;
-      expect(elements.map((e) => e.action_id)).toContain('model_select');
-      expect(elements.map((e) => e.action_id)).toContain('reasoning_select');
+    it('renders model buttons with correct action IDs', () => {
+      const blocks = buildModelSelectionBlocks(mockModels, 'gpt-5.2');
+
+      expect(blocks[0].text?.text).toContain('Select Model');
+      expect(blocks[0].text?.text).toContain('Step 1/2');
+      expect(blocks[0].text?.text).toContain('gpt-5.2');
+
+      // Check actions block has buttons
+      const actionsBlock = blocks.find((b) => b.block_id === 'model_selection');
+      expect(actionsBlock).toBeDefined();
+      const elements = actionsBlock?.elements as Array<{ action_id: string; style?: string }>;
+      expect(elements).toHaveLength(2);
+      expect(elements[0].action_id).toBe('model_select_gpt-5.2-codex');
+      expect(elements[1].action_id).toBe('model_select_gpt-5.2');
+      // Current model should have primary style
+      expect(elements[1].style).toBe('primary');
     });
 
-    it('shows warning when model list is empty', () => {
-      const blocks = buildModelSelectionBlocks({
-        availableModels: [],
-      });
+    it('includes model descriptions in context', () => {
+      const blocks = buildModelSelectionBlocks(mockModels);
 
-      const warning = blocks.find((b) => b.type === 'section' && b.text?.text.includes('Model list unavailable'));
+      const contextBlock = blocks.find((b) => b.type === 'context');
+      expect(contextBlock).toBeDefined();
+      const contextElements = contextBlock?.elements as Array<{ text: string }>;
+      expect(contextElements[0].text).toContain('GPT-5.2 Codex');
+      expect(contextElements[0].text).toContain('Latest coding model');
+    });
+
+    it('includes cancel button', () => {
+      const blocks = buildModelSelectionBlocks(mockModels);
+
+      const cancelBlock = blocks.find((b) => b.block_id === 'model_cancel');
+      expect(cancelBlock).toBeDefined();
+      const elements = cancelBlock?.elements as Array<{ action_id: string }>;
+      expect(elements[0].action_id).toBe('model_picker_cancel');
+    });
+
+    it('shows warning when no models available', () => {
+      const blocks = buildModelSelectionBlocks([]);
+
+      const warning = blocks.find((b) => b.type === 'section' && b.text?.text.includes('No models available'));
       expect(warning).toBeDefined();
+    });
+
+    it('limits to 5 models max', () => {
+      const manyModels: ModelInfo[] = Array.from({ length: 10 }, (_, i) => ({
+        value: `model-${i}`,
+        displayName: `Model ${i}`,
+        description: `Description ${i}`,
+      }));
+
+      const blocks = buildModelSelectionBlocks(manyModels);
+      const actionsBlock = blocks.find((b) => b.block_id === 'model_selection');
+      const elements = actionsBlock?.elements as Array<{ action_id: string }>;
+      expect(elements).toHaveLength(5);
+    });
+  });
+
+  describe('buildReasoningSelectionBlocks (Step 2 - Button-based)', () => {
+    it('renders reasoning buttons with model context', () => {
+      const blocks = buildReasoningSelectionBlocks('gpt-5.2-codex', 'GPT-5.2 Codex', 'high');
+
+      expect(blocks[0].text?.text).toContain('Select Reasoning Level');
+      expect(blocks[0].text?.text).toContain('Step 2/2');
+      expect(blocks[0].text?.text).toContain('GPT-5.2 Codex');
+
+      // Check actions block has reasoning buttons
+      const actionsBlock = blocks.find((b) => b.block_id === 'reasoning_selection');
+      expect(actionsBlock).toBeDefined();
+      const elements = actionsBlock?.elements as Array<{ action_id: string; value: string; style?: string }>;
+      expect(elements).toHaveLength(5);
+      expect(elements.map((e) => e.action_id)).toEqual([
+        'reasoning_select_minimal',
+        'reasoning_select_low',
+        'reasoning_select_medium',
+        'reasoning_select_high',
+        'reasoning_select_xhigh',
+      ]);
+      // Current reasoning should have primary style
+      expect(elements[3].style).toBe('primary'); // high is at index 3
+    });
+
+    it('encodes model in button value', () => {
+      const blocks = buildReasoningSelectionBlocks('gpt-5.2', 'GPT-5.2');
+
+      const actionsBlock = blocks.find((b) => b.block_id === 'reasoning_selection');
+      const elements = actionsBlock?.elements as Array<{ value: string }>;
+      const parsed = JSON.parse(elements[0].value);
+      expect(parsed.model).toBe('gpt-5.2');
+      expect(parsed.reasoning).toBe('minimal');
+    });
+
+    it('includes cancel button', () => {
+      const blocks = buildReasoningSelectionBlocks('gpt-5.2', 'GPT-5.2');
+
+      const cancelBlock = blocks.find((b) => b.block_id === 'reasoning_cancel');
+      expect(cancelBlock).toBeDefined();
+      const elements = cancelBlock?.elements as Array<{ action_id: string }>;
+      expect(elements[0].action_id).toBe('model_picker_cancel');
+    });
+
+    it('includes reasoning level descriptions', () => {
+      const blocks = buildReasoningSelectionBlocks('gpt-5.2', 'GPT-5.2');
+
+      const contextBlocks = blocks.filter((b) => b.type === 'context');
+      expect(contextBlocks.length).toBeGreaterThan(0);
+      const contextElements = contextBlocks[0]?.elements as Array<{ text: string }>;
+      expect(contextElements[0].text).toContain('Minimal');
+      expect(contextElements[0].text).toContain('Fastest');
+    });
+  });
+
+  describe('buildModelConfirmationBlocks', () => {
+    it('shows confirmation with model and reasoning', () => {
+      const blocks = buildModelConfirmationBlocks('GPT-5.2 Codex', 'gpt-5.2-codex', 'high');
+
+      expect(blocks[0].text?.text).toContain(':white_check_mark:');
+      expect(blocks[0].text?.text).toContain('Settings Updated');
+      expect(blocks[0].text?.text).toContain('GPT-5.2 Codex');
+      expect(blocks[0].text?.text).toContain('high');
+    });
+
+    it('includes context about when changes apply', () => {
+      const blocks = buildModelConfirmationBlocks('GPT-5.2', 'gpt-5.2', 'medium');
+
+      const contextBlock = blocks.find((b) => b.type === 'context');
+      expect(contextBlock).toBeDefined();
+      const contextElements = contextBlock?.elements as Array<{ text: string }>;
+      expect(contextElements[0].text).toContain('next turn');
+    });
+  });
+
+  describe('buildModelPickerCancelledBlocks', () => {
+    it('shows cancellation message', () => {
+      const blocks = buildModelPickerCancelledBlocks();
+
+      expect(blocks[0].text?.text).toContain(':x:');
+      expect(blocks[0].text?.text).toContain('cancelled');
     });
   });
 
