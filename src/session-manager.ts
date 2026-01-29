@@ -205,6 +205,7 @@ export async function saveSession(channelId: string, session: Partial<Session>):
       updateRateSeconds: existing?.updateRateSeconds,
       threads: existing?.threads,
       turns: existing?.turns,
+      lastUsage: existing?.lastUsage,
       ...session,
     };
     saveSessions(store);
@@ -279,6 +280,7 @@ export async function saveThreadSession(
       configuredBy: existingThread?.configuredBy ?? mainChannel.configuredBy,
       configuredAt: existingThread?.configuredAt ?? mainChannel.configuredAt,
       updateRateSeconds: existingThread?.updateRateSeconds ?? mainChannel.updateRateSeconds,
+      lastUsage: existingThread?.lastUsage,
       ...session,
     };
 
