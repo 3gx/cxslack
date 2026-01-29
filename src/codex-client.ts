@@ -124,7 +124,15 @@ export interface CodexClientEvents {
   'item:delta': (params: { itemId: string; delta: string }) => void;
   'item:completed': (params: { itemId: string }) => void;
   'approval:requested': (request: ApprovalRequest) => void;
-  'tokens:updated': (params: { inputTokens: number; outputTokens: number }) => void;
+  'tokens:updated': (params: {
+    inputTokens: number;
+    outputTokens: number;
+    contextWindow?: number;
+    maxOutputTokens?: number;
+    cacheReadInputTokens?: number;
+    cacheCreationInputTokens?: number;
+    costUsd?: number;
+  }) => void;
 
   // Thinking/reasoning events
   'thinking:delta': (params: { content: string }) => void;
@@ -667,10 +675,32 @@ export class CodexClient extends EventEmitter {
           outputTokens?: number;
           input_tokens?: number;
           output_tokens?: number;
+          contextWindow?: number;
+          context_window?: number;
+          maxOutputTokens?: number;
+          max_output_tokens?: number;
+          cacheReadInputTokens?: number;
+          cache_read_input_tokens?: number;
+          cacheCreationInputTokens?: number;
+          cache_creation_input_tokens?: number;
+          costUsd?: number;
+          cost_usd?: number;
+          totalCostUsd?: number;
+          total_cost_usd?: number;
         };
+        const costUsd =
+          p.costUsd ??
+          p.cost_usd ??
+          p.totalCostUsd ??
+          p.total_cost_usd;
         this.emit('tokens:updated', {
           inputTokens: p.inputTokens ?? p.input_tokens ?? 0,
           outputTokens: p.outputTokens ?? p.output_tokens ?? 0,
+          contextWindow: p.contextWindow ?? p.context_window,
+          maxOutputTokens: p.maxOutputTokens ?? p.max_output_tokens,
+          cacheReadInputTokens: p.cacheReadInputTokens ?? p.cache_read_input_tokens,
+          cacheCreationInputTokens: p.cacheCreationInputTokens ?? p.cache_creation_input_tokens,
+          costUsd,
         });
         break;
       }

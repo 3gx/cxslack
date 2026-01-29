@@ -3,7 +3,7 @@
  * Centralizes construction of interactive message blocks.
  */
 
-import type { ApprovalPolicy } from './codex-client.js';
+import type { ApprovalPolicy, ReasoningEffort } from './codex-client.js';
 
 // Slack Block Kit types (simplified for our use case)
 export interface Block {
@@ -408,6 +408,59 @@ export function buildPolicyStatusBlocks(params: PolicyStatusBlockParams): Block[
 }
 
 /**
+ * Build blocks for /policy command selection prompt.
+ */
+export function buildPolicySelectionBlocks(currentPolicy: ApprovalPolicy): Block[] {
+  const descriptions: Record<ApprovalPolicy, string> = {
+    never: 'Never prompt, auto-approve all actions',
+    'on-request': 'Model decides when to ask (default)',
+    'on-failure': 'Auto-run in sandbox, prompt only on failure',
+    untrusted: 'Prompt for everything except safe reads',
+  };
+
+  const button = (policy: ApprovalPolicy, label: string) => ({
+    type: 'button',
+    text: { type: 'plain_text', text: label },
+    action_id: `policy_select_${policy}`,
+    value: policy,
+    ...(currentPolicy === policy ? { style: 'primary' as const } : {}),
+  });
+
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:clipboard: *Select Approval Policy*\nCurrent: *${currentPolicy}*`,
+      },
+    },
+    {
+      type: 'actions',
+      block_id: 'policy_selection',
+      elements: [
+        button('never', ':unlock: never'),
+        button('on-request', ':question: on-request'),
+        button('on-failure', ':construction: on-failure'),
+        button('untrusted', ':lock: untrusted'),
+      ],
+    },
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text:
+            `- *never* - ${descriptions.never}\n` +
+            `- *on-request* - ${descriptions['on-request']}\n` +
+            `- *on-failure* - ${descriptions['on-failure']}\n` +
+            `- *untrusted* - ${descriptions.untrusted}`,
+        },
+      ],
+    },
+  ];
+}
+
+/**
  * Build blocks for /clear command response.
  */
 export function buildClearBlocks(): Block[] {
@@ -461,6 +514,115 @@ export function buildModelStatusBlocks(
       });
     }
   }
+
+  return blocks;
+}
+
+export interface ModelSelectionBlockParams {
+  availableModels: string[];
+  currentModel?: string;
+  currentReasoning?: ReasoningEffort;
+}
+
+/**
+ * Build blocks for /model command selection prompt (model + reasoning).
+ */
+export function buildModelSelectionBlocks(params: ModelSelectionBlockParams): Block[] {
+  const { availableModels, currentModel, currentReasoning } = params;
+
+  const modelOptions = availableModels.map((model) => ({
+    text: { type: 'plain_text', text: model },
+    value: model,
+  }));
+
+  const reasoningOptions: Array<{ text: { type: 'plain_text'; text: string }; value: string }> = [
+    { text: { type: 'plain_text', text: 'default' }, value: 'default' },
+    { text: { type: 'plain_text', text: 'minimal' }, value: 'minimal' },
+    { text: { type: 'plain_text', text: 'low' }, value: 'low' },
+    { text: { type: 'plain_text', text: 'medium' }, value: 'medium' },
+    { text: { type: 'plain_text', text: 'high' }, value: 'high' },
+    { text: { type: 'plain_text', text: 'xhigh' }, value: 'xhigh' },
+  ];
+
+  const blocks: Block[] = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          `:robot_face: *Select Model & Reasoning*\n` +
+          `Model: *${currentModel || 'default'}*\n` +
+          `Reasoning: *${currentReasoning || 'default'}*`,
+      },
+    },
+  ];
+
+  if (modelOptions.length > 0) {
+    const hasCurrentModel = currentModel && availableModels.includes(currentModel);
+    const reasoningInitial = reasoningOptions.find(
+      (opt) => opt.value === (currentReasoning ?? 'default')
+    );
+    blocks.push({
+      type: 'actions',
+      block_id: 'model_selection',
+      elements: [
+        {
+          type: 'static_select',
+          action_id: 'model_select',
+          placeholder: { type: 'plain_text', text: 'Select a model' },
+          options: modelOptions,
+          ...(hasCurrentModel
+            ? {
+                initial_option: {
+                  text: { type: 'plain_text', text: currentModel },
+                  value: currentModel,
+                },
+              }
+            : {}),
+        },
+        {
+          type: 'static_select',
+          action_id: 'reasoning_select',
+          placeholder: { type: 'plain_text', text: 'Select reasoning' },
+          options: reasoningOptions,
+          ...(reasoningInitial ? { initial_option: reasoningInitial } : {}),
+        },
+      ],
+    });
+  } else {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: ':warning: Model list unavailable from server. Try again later.',
+      },
+    });
+    blocks.push({
+      type: 'actions',
+      block_id: 'reasoning_only',
+      elements: [
+        {
+          type: 'static_select',
+          action_id: 'reasoning_select',
+          placeholder: { type: 'plain_text', text: 'Select reasoning' },
+          options: reasoningOptions,
+          ...(reasoningOptions.find((opt) => opt.value === (currentReasoning ?? 'default'))
+            ? { initial_option: reasoningOptions.find((opt) => opt.value === (currentReasoning ?? 'default')) }
+            : {}),
+        },
+      ],
+    });
+  }
+
+  blocks.push({
+    type: 'context',
+    elements: [
+      {
+        type: 'mrkdwn',
+        text: 'Changes apply on the next turn.',
+      },
+    ],
+  });
 
   return blocks;
 }
@@ -587,47 +749,101 @@ export function buildErrorBlocks(message: string): Block[] {
 // Progress Indicators
 // ============================================================================
 
+// Auto-compact defaults (mirrors ccslack)
+const COMPACT_BUFFER = 13000;
+const DEFAULT_EFFECTIVE_MAX_OUTPUT_TOKENS = 32000;
+export const DEFAULT_CONTEXT_WINDOW = 200000;
+
+/**
+ * Compute auto-compact threshold in tokens.
+ */
+export function computeAutoCompactThreshold(contextWindow: number, maxOutputTokens?: number): number {
+  const effectiveMaxOutput = Math.min(
+    DEFAULT_EFFECTIVE_MAX_OUTPUT_TOKENS,
+    maxOutputTokens ?? DEFAULT_EFFECTIVE_MAX_OUTPUT_TOKENS
+  );
+  return contextWindow - effectiveMaxOutput - COMPACT_BUFFER;
+}
+
+/** Format token count as "x.yk" with one decimal for readability. */
+function formatTokenCount(count: number): string {
+  if (count >= 1000) {
+    return `${(count / 1000).toFixed(1)}k`;
+  }
+  return count.toString();
+}
+
+/** Format token count as "x.yk" for compact threshold display. */
+export function formatTokensK(tokens: number): string {
+  return `${(tokens / 1000).toFixed(1)}k`;
+}
+
 export interface UnifiedStatusLineParams {
   approvalPolicy: ApprovalPolicy;
   model?: string;
-  durationMs?: number;
+  reasoningEffort?: ReasoningEffort;
+  sessionId?: string;
+  contextPercent?: number;
+  compactPercent?: number;
+  tokensToCompact?: number;
   inputTokens?: number;
   outputTokens?: number;
+  costUsd?: number;
+  durationMs?: number;
 }
 
 /**
- * Build a unified status line showing policy, model, duration, and tokens.
+ * Build a unified status line showing policy, model, session, and stats.
+ * Line 1: policy | model [reason] | session
+ * Line 2: ctx/compact | tokens | cost | duration (only when available)
  */
 export function buildUnifiedStatusLine(params: UnifiedStatusLineParams): string {
-  const parts: string[] = [];
+  const line1Parts: string[] = [];
+  const line2Parts: string[] = [];
 
-  // Policy badge
-  const policyEmoji: Record<ApprovalPolicy, string> = {
-    never: ':unlock:',
-    'on-request': ':question:',
-    'on-failure': ':construction:',
-    untrusted: ':lock:',
-  };
-  parts.push(`${policyEmoji[params.approvalPolicy]} ${params.approvalPolicy}`);
+  const modelLabel = params.model ? params.model : 'default';
+  const modelWithReasoning = params.reasoningEffort
+    ? `${modelLabel} [${params.reasoningEffort}]`
+    : modelLabel;
+  const sessionLabel = params.sessionId || 'n/a';
 
-  // Model
-  if (params.model) {
-    parts.push(`| ${params.model}`);
+  line1Parts.push(params.approvalPolicy);
+  line1Parts.push(modelWithReasoning);
+  line1Parts.push(sessionLabel);
+
+  if (params.contextPercent !== undefined) {
+    if (params.compactPercent !== undefined && params.tokensToCompact !== undefined) {
+      line2Parts.push(
+        `${params.contextPercent.toFixed(1)}% ctx (${params.compactPercent.toFixed(1)}% ${formatTokensK(
+          params.tokensToCompact
+        )} tok to :zap:)`
+      );
+    } else if (params.compactPercent !== undefined) {
+      line2Parts.push(`${params.contextPercent.toFixed(1)}% ctx (${params.compactPercent.toFixed(1)}% to :zap:)`);
+    } else {
+      line2Parts.push(`${params.contextPercent.toFixed(1)}% ctx`);
+    }
   }
 
-  // Duration
-  if (params.durationMs) {
-    parts.push(`| ${(params.durationMs / 1000).toFixed(1)}s`);
+  if (params.inputTokens !== undefined || params.outputTokens !== undefined) {
+    const inStr = formatTokenCount(params.inputTokens ?? 0);
+    const outStr = formatTokenCount(params.outputTokens ?? 0);
+    line2Parts.push(`${inStr}/${outStr}`);
   }
 
-  // Tokens
-  if (params.inputTokens || params.outputTokens) {
-    const inp = params.inputTokens || 0;
-    const out = params.outputTokens || 0;
-    parts.push(`| ${inp}/${out} tokens`);
+  if (params.costUsd !== undefined) {
+    line2Parts.push(`$${params.costUsd.toFixed(2)}`);
   }
 
-  return `_${parts.join(' ')}_`;
+  if (params.durationMs !== undefined) {
+    line2Parts.push(`${(params.durationMs / 1000).toFixed(1)}s`);
+  }
+
+  const line1 = `_${line1Parts.join(' | ')}_`;
+  if (line2Parts.length === 0) {
+    return line1;
+  }
+  return `${line1}\n_${line2Parts.join(' | ')}_`;
 }
 
 // ============================================================================
@@ -650,15 +866,43 @@ export interface ActivityBlockParams {
   conversationKey: string;
   elapsedMs: number;
   entries?: ActivityEntry[]; // For todo extraction
+  approvalPolicy: ApprovalPolicy;
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
+  sessionId?: string;
+  contextPercent?: number;
+  compactPercent?: number;
+  tokensToCompact?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+  spinner?: string;
 }
 
 /**
  * Build blocks for activity message with rolling window of entries.
- * Includes status line at bottom and abort button during processing.
+ * Includes spinner (in-progress), unified status line, and abort button during processing.
  * If entries are provided, extracts and prepends todo list.
  */
 export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
-  const { activityText, status, conversationKey, elapsedMs, entries } = params;
+  const {
+    activityText,
+    status,
+    conversationKey,
+    elapsedMs,
+    entries,
+    approvalPolicy,
+    model,
+    reasoningEffort,
+    sessionId,
+    contextPercent,
+    compactPercent,
+    tokensToCompact,
+    inputTokens,
+    outputTokens,
+    costUsd,
+    spinner,
+  } = params;
   const blocks: Block[] = [];
   const elapsedSec = (elapsedMs / 1000).toFixed(1);
 
@@ -683,25 +927,42 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
     expand: true,
   } as Block);
 
-  // Status line at bottom
-  let statusText: string;
-  if (status === 'completed') {
-    statusText = `:white_check_mark: *Complete* | ${elapsedSec}s`;
-  } else if (status === 'interrupted') {
-    statusText = ':octagonal_sign: *Aborted*';
-  } else if (status === 'failed') {
-    statusText = ':x: *Error*';
-  } else {
-    statusText = `:gear: *Processing...* | ${elapsedSec}s`;
+  const isRunning = status === 'running';
+
+  // Spinner line (in-progress only)
+  if (isRunning) {
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: `${spinner || '\u25D0'} [${elapsedSec}s]` }],
+    });
   }
 
+  // Unified status line (policy | model | session [+ stats])
+  const durationForStats = isRunning ? undefined : elapsedMs;
   blocks.push({
     type: 'context',
-    elements: [{ type: 'mrkdwn', text: statusText }],
+    elements: [
+      {
+        type: 'mrkdwn',
+        text: buildUnifiedStatusLine({
+          approvalPolicy,
+          model,
+          reasoningEffort,
+          sessionId,
+          contextPercent,
+          compactPercent,
+          tokensToCompact,
+          inputTokens,
+          outputTokens,
+          costUsd,
+          durationMs: durationForStats,
+        }),
+      },
+    ],
   });
 
   // Abort button (only during processing)
-  if (status === 'running') {
+  if (isRunning) {
     blocks.push({
       type: 'actions',
       block_id: `status_panel_${conversationKey}`,

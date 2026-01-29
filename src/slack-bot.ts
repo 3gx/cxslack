@@ -6,10 +6,10 @@
  */
 
 import { App, LogLevel } from '@slack/bolt';
-import { CodexClient, ApprovalRequest, TurnContent } from './codex-client.js';
+import { CodexClient, ApprovalRequest, TurnContent, ReasoningEffort, ApprovalPolicy } from './codex-client.js';
 import { StreamingManager, makeConversationKey, StreamingContext } from './streaming.js';
 import { ApprovalHandler } from './approval-handler.js';
-import { handleCommand, CommandContext } from './commands.js';
+import { handleCommand, CommandContext, parseCommand } from './commands.js';
 import {
   getSession,
   saveSession,
@@ -23,6 +23,8 @@ import {
 } from './session-manager.js';
 import {
   buildActivityBlocks,
+  buildPolicyStatusBlocks,
+  buildModelSelectionBlocks,
   buildErrorBlocks,
   buildTextBlocks,
   buildAbortConfirmationModalView,
@@ -289,6 +291,156 @@ function setupEventHandlers(): void {
       });
     }
   });
+
+  // Handle /policy selection buttons
+  app.action(/^policy_select_(never|on-request|on-failure|untrusted)$/, async ({ action, ack, body, client }) => {
+    await ack();
+
+    const actionId = (action as { action_id: string }).action_id;
+    const newPolicy = actionId.replace('policy_select_', '') as ApprovalPolicy;
+    const channelId = body.channel?.id;
+    const messageTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.ts;
+    const threadTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.thread_ts
+      ?? messageTs;
+
+    if (!channelId || !messageTs) {
+      return;
+    }
+
+    const currentPolicy = getEffectiveApprovalPolicy(channelId, threadTs);
+
+    if (threadTs) {
+      await saveThreadSession(channelId, threadTs, { approvalPolicy: newPolicy });
+    } else {
+      await saveSession(channelId, { approvalPolicy: newPolicy });
+    }
+
+    // Update active context for status display (applies next turn)
+    const conversationKey = makeConversationKey(channelId, threadTs);
+    const context = streamingManager.getContext(conversationKey);
+    if (context) {
+      context.approvalPolicy = newPolicy;
+    }
+
+    await client.chat.update({
+      channel: channelId,
+      ts: messageTs,
+      text: `Approval policy changed: ${currentPolicy} → ${newPolicy}`,
+      blocks: buildPolicyStatusBlocks({ currentPolicy, newPolicy }),
+    });
+  });
+
+  // Handle /model selection (model dropdown)
+  app.action('model_select', async ({ action, ack, body, client }) => {
+    await ack();
+
+    const selected = (action as { selected_option?: { value: string } }).selected_option?.value;
+    if (!selected) return;
+
+    const channelId = body.channel?.id;
+    const messageTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.ts;
+    if (!channelId || !messageTs) return;
+    const threadTs =
+      (body as { message?: { ts?: string; thread_ts?: string } }).message?.thread_ts ??
+      messageTs;
+
+    const conversationKey = makeConversationKey(channelId, threadTs);
+    if (streamingManager.isStreaming(conversationKey)) {
+      await client.chat.update({
+        channel: channelId,
+        ts: messageTs,
+        text: 'Cannot change model while processing',
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: ':warning: Cannot change model while a turn is running. Please wait or abort.',
+            },
+          },
+        ],
+      });
+      return;
+    }
+
+    await saveThreadSession(channelId, threadTs, { model: selected });
+
+    const session = getThreadSession(channelId, threadTs) ?? getSession(channelId);
+    let availableModels: string[] = [];
+    try {
+      availableModels = await codex.listModels();
+    } catch (err) {
+      console.error('Failed to list models:', err);
+    }
+
+    await client.chat.update({
+      channel: channelId,
+      ts: messageTs,
+      text: `Model set to ${selected}`,
+      blocks: buildModelSelectionBlocks({
+        availableModels,
+        currentModel: session?.model,
+        currentReasoning: session?.reasoningEffort,
+      }),
+    });
+  });
+
+  // Handle /model selection (reasoning dropdown)
+  app.action('reasoning_select', async ({ action, ack, body, client }) => {
+    await ack();
+
+    const selected = (action as { selected_option?: { value: string } }).selected_option?.value;
+    if (!selected) return;
+
+    const channelId = body.channel?.id;
+    const messageTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.ts;
+    if (!channelId || !messageTs) return;
+    const threadTs =
+      (body as { message?: { ts?: string; thread_ts?: string } }).message?.thread_ts ??
+      messageTs;
+
+    const conversationKey = makeConversationKey(channelId, threadTs);
+    if (streamingManager.isStreaming(conversationKey)) {
+      await client.chat.update({
+        channel: channelId,
+        ts: messageTs,
+        text: 'Cannot change reasoning while processing',
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: ':warning: Cannot change reasoning while a turn is running. Please wait or abort.',
+            },
+          },
+        ],
+      });
+      return;
+    }
+
+    const reasoningEffort = selected === 'default' ? undefined : (selected as ReasoningEffort);
+
+    await saveThreadSession(channelId, threadTs, { reasoningEffort });
+
+    const session = getThreadSession(channelId, threadTs) ?? getSession(channelId);
+    let availableModels: string[] = [];
+    try {
+      availableModels = await codex.listModels();
+    } catch (err) {
+      console.error('Failed to list models:', err);
+    }
+
+    await client.chat.update({
+      channel: channelId,
+      ts: messageTs,
+      text: `Reasoning set to ${reasoningEffort ?? 'default'}`,
+      blocks: buildModelSelectionBlocks({
+        availableModels,
+        currentModel: session?.model,
+        currentReasoning: session?.reasoningEffort,
+      }),
+    });
+  });
 }
 
 /**
@@ -307,6 +459,8 @@ async function handleUserMessage(
   const postingThreadTs = threadTs ?? messageTs;
   const conversationKey = makeConversationKey(channelId, postingThreadTs);
 
+  const parsedCommand = parseCommand(text);
+
   // Check if this is a command
   const commandContext: CommandContext = {
     channelId,
@@ -324,6 +478,13 @@ async function handleUserMessage(
       blocks: commandResult.blocks,
       text: commandResult.text,
     });
+
+    // Live update: adjust update rate for active streaming
+    if (parsedCommand?.command === 'update-rate') {
+      const session = getThreadSession(channelId, postingThreadTs) ?? getSession(channelId);
+      const newRate = session?.updateRateSeconds ?? 3;
+      streamingManager.updateRate(conversationKey, newRate * 1000);
+    }
     return;
   }
 
@@ -376,6 +537,11 @@ async function handleUserMessage(
       status: 'running',
       conversationKey,
       elapsedMs: 0,
+      approvalPolicy,
+      model: session?.model,
+      reasoningEffort: session?.reasoningEffort,
+      sessionId: threadId,
+      spinner: '\u25D0',
     }),
     text: 'Starting...',
   });
@@ -396,6 +562,7 @@ async function handleUserMessage(
     approvalPolicy,
     updateRateMs: (session?.updateRateSeconds ?? 3) * 1000,
     model: session?.model,
+    reasoningEffort: session?.reasoningEffort,
     startTime: Date.now(),
   };
 

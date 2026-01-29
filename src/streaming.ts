@@ -17,9 +17,14 @@
 
 import type { WebClient } from '@slack/web-api';
 import { Mutex } from 'async-mutex';
-import type { CodexClient, TurnStatus, ApprovalRequest } from './codex-client.js';
-import { buildTextBlocks, buildActivityBlocks, Block } from './blocks.js';
-import type { ApprovalPolicy } from './codex-client.js';
+import type { CodexClient, TurnStatus, ApprovalRequest, ApprovalPolicy, ReasoningEffort } from './codex-client.js';
+import {
+  buildTextBlocks,
+  buildActivityBlocks,
+  Block,
+  DEFAULT_CONTEXT_WINDOW,
+  computeAutoCompactThreshold,
+} from './blocks.js';
 import {
   markProcessingStart,
   removeProcessingEmoji,
@@ -44,6 +49,7 @@ import { withSlackRetry } from './slack-retry.js';
 const MAX_LIVE_ENTRIES = 300; // Threshold for rolling window
 const ROLLING_WINDOW_SIZE = 20; // Show last N entries when exceeded
 const ACTIVITY_LOG_MAX_CHARS = 1000; // Max chars for activity display
+const STATUS_SPINNER_FRAMES = ['\u25D0', '\u25D3', '\u25D1', '\u25D2'];
 
 // Item types that should NOT be displayed as tool activity
 // These are message lifecycle events, not tool executions
@@ -106,6 +112,8 @@ export interface StreamingContext {
   turnId: string;
   /** Current approval policy */
   approvalPolicy: ApprovalPolicy;
+  /** Current reasoning effort */
+  reasoningEffort?: ReasoningEffort;
   /** Update rate in ms */
   updateRateMs: number;
   /** Model being used */
@@ -132,6 +140,16 @@ interface StreamingState {
   inputTokens: number;
   /** Accumulated output tokens */
   outputTokens: number;
+  /** Cache read input tokens (if provided) */
+  cacheReadInputTokens: number;
+  /** Cache creation input tokens (if provided) */
+  cacheCreationInputTokens: number;
+  /** Context window size (if provided) */
+  contextWindow?: number;
+  /** Max output tokens (if provided) */
+  maxOutputTokens?: number;
+  /** Total cost in USD (if provided) */
+  costUsd?: number;
   /** Accumulated thinking content */
   thinkingContent: string;
   /** Thinking start timestamp */
@@ -142,6 +160,8 @@ interface StreamingState {
   activeTools: Map<string, { tool: string; input?: string; startTime: number }>;
   /** The ONE activity message timestamp we update */
   activityMessageTs?: string;
+  /** Spinner index for status updates */
+  spinnerIndex: number;
   /** Whether an abort is pending (waiting for turnId) */
   pendingAbort?: boolean;
   /** Timeout for pending abort (safety net) */
@@ -217,11 +237,17 @@ export class StreamingManager {
       status: 'running',
       inputTokens: 0,
       outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      contextWindow: undefined,
+      maxOutputTokens: undefined,
+      costUsd: undefined,
       thinkingContent: '',
       thinkingStartTime: 0,
       thinkingComplete: false,
       activeTools: new Map(),
       activityMessageTs: context.messageTs, // REUSE initial message!
+      spinnerIndex: 0,
       pendingAbort: false,
       pendingAbortTimeout: undefined,
       // Activity thread batch state
@@ -323,6 +349,37 @@ export class StreamingManager {
    */
   getContext(conversationKey: string): StreamingContext | undefined {
     return this.contexts.get(conversationKey);
+  }
+
+  /**
+   * Check if a conversation is actively streaming.
+   */
+  isStreaming(conversationKey: string): boolean {
+    return this.states.get(conversationKey)?.isStreaming ?? false;
+  }
+
+  /**
+   * Update streaming refresh rate for an active conversation.
+   */
+  updateRate(conversationKey: string, updateRateMs: number): void {
+    const context = this.contexts.get(conversationKey);
+    const state = this.states.get(conversationKey);
+    if (!context || !state || !state.isStreaming) {
+      return;
+    }
+
+    context.updateRateMs = updateRateMs;
+
+    if (state.updateTimer) {
+      clearInterval(state.updateTimer);
+      state.updateTimer = null;
+    }
+
+    state.updateTimer = setInterval(() => {
+      this.updateActivityMessage(conversationKey).catch((err) => {
+        console.error('[streaming] Failed to update activity message:', err);
+      });
+    }, updateRateMs);
   }
 
   /**
@@ -653,11 +710,26 @@ export class StreamingManager {
     });
 
     // Token usage updates
-    this.codex.on('tokens:updated', ({ inputTokens, outputTokens }) => {
+    this.codex.on('tokens:updated', ({ inputTokens, outputTokens, contextWindow, maxOutputTokens, cacheReadInputTokens, cacheCreationInputTokens, costUsd }) => {
       for (const [, state] of this.states) {
         if (state.isStreaming) {
           state.inputTokens += inputTokens;
           state.outputTokens += outputTokens;
+          if (cacheReadInputTokens) {
+            state.cacheReadInputTokens += cacheReadInputTokens;
+          }
+          if (cacheCreationInputTokens) {
+            state.cacheCreationInputTokens += cacheCreationInputTokens;
+          }
+          if (contextWindow) {
+            state.contextWindow = contextWindow;
+          }
+          if (maxOutputTokens) {
+            state.maxOutputTokens = maxOutputTokens;
+          }
+          if (costUsd !== undefined) {
+            state.costUsd = costUsd;
+          }
           break;
         }
       }
@@ -719,14 +791,55 @@ export class StreamingManager {
         activityText += `\n:memo: *Response* _[${state.text.length} chars]_\n> ${preview}${state.text.length > 200 ? '...' : ''}`;
       }
 
-      // Build blocks with status at bottom and abort button
       const elapsedMs = Date.now() - context.startTime;
+
+      // Spinner frame (cycles each update)
+      state.spinnerIndex = (state.spinnerIndex + 1) % STATUS_SPINNER_FRAMES.length;
+      const spinner = STATUS_SPINNER_FRAMES[state.spinnerIndex];
+
+      // Compute context % and compact stats (best-effort)
+      const contextTokens =
+        state.inputTokens + state.cacheCreationInputTokens + state.cacheReadInputTokens;
+      const contextWindow = state.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+      const contextPercent =
+        contextTokens > 0
+          ? Math.min(100, Math.max(0, Number(((contextTokens / contextWindow) * 100).toFixed(1))))
+          : undefined;
+      const autoCompactThreshold = computeAutoCompactThreshold(
+        contextWindow,
+        state.maxOutputTokens
+      );
+      const compactBase = autoCompactThreshold > 0 ? autoCompactThreshold : undefined;
+      const compactPercent =
+        compactBase && contextTokens > 0
+          ? Math.max(
+              0,
+              Number(((compactBase - contextTokens) / compactBase * 100).toFixed(1))
+            )
+          : undefined;
+      const tokensToCompact =
+        compactBase && contextTokens > 0 ? Math.max(0, compactBase - contextTokens) : undefined;
+
+      const includeFinalStats = state.status !== 'running';
+      const hasTokenCounts = state.inputTokens > 0 || state.outputTokens > 0;
+
       const blocks = buildActivityBlocks({
         activityText: activityText || ':gear: Starting...',
         status: state.status,
         conversationKey,
         elapsedMs,
-        entries,  // Pass for todo extraction
+        entries, // Pass for todo extraction
+        approvalPolicy: context.approvalPolicy,
+        model: context.model,
+        reasoningEffort: context.reasoningEffort,
+        sessionId: context.threadId,
+        contextPercent,
+        compactPercent,
+        tokensToCompact,
+        inputTokens: includeFinalStats && hasTokenCounts ? state.inputTokens : undefined,
+        outputTokens: includeFinalStats && hasTokenCounts ? state.outputTokens : undefined,
+        costUsd: includeFinalStats ? state.costUsd : undefined,
+        spinner,
       });
 
       const fallbackText = activityText || 'Processing...';

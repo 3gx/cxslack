@@ -26,8 +26,9 @@ import {
 } from './session-manager.js';
 import {
   buildPolicyStatusBlocks,
+  buildPolicySelectionBlocks,
   buildClearBlocks,
-  buildModelStatusBlocks,
+  buildModelSelectionBlocks,
   buildReasoningStatusBlocks,
   buildTextBlocks,
   buildErrorBlocks,
@@ -94,10 +95,10 @@ export async function handlePolicyCommand(
   const currentPolicy = getEffectiveApprovalPolicy(channelId, threadTs);
 
   if (!args) {
-    // Show current policy
+    // Show policy selection prompt
     return {
-      blocks: buildPolicyStatusBlocks({ currentPolicy }),
-      text: `Current approval policy: ${currentPolicy}`,
+      blocks: buildPolicySelectionBlocks(currentPolicy),
+      text: `Select approval policy (current: ${currentPolicy})`,
     };
   }
 
@@ -162,6 +163,7 @@ export async function handleModelCommand(
     ? getThreadSession(channelId, threadTs)
     : getSession(channelId);
   const currentModel = session?.model;
+  const currentReasoning = session?.reasoningEffort;
 
   // Get available models
   let availableModels: string[] = [];
@@ -171,35 +173,26 @@ export async function handleModelCommand(
     console.error('Failed to list models:', err);
   }
 
-  if (!args) {
-    // Show current model
+  if (args) {
+    // Ignore inline model args; prompt is required to pick model + reasoning
     return {
-      blocks: buildModelStatusBlocks(currentModel, availableModels),
-      text: `Current model: ${currentModel || 'default'}`,
+      blocks: buildModelSelectionBlocks({
+        availableModels,
+        currentModel,
+        currentReasoning,
+      }),
+      text: 'Use the model selector to choose a model and reasoning level.',
     };
   }
 
-  // Validate and set new model
-  const newModel = args.trim();
-  if (availableModels.length > 0 && !availableModels.includes(newModel)) {
-    return {
-      blocks: buildErrorBlocks(
-        `Invalid model: "${newModel}"\nAvailable models: ${availableModels.join(', ')}`
-      ),
-      text: `Invalid model: ${newModel}`,
-    };
-  }
-
-  // Update session
-  if (threadTs) {
-    await saveThreadSession(channelId, threadTs, { model: newModel });
-  } else {
-    await saveSession(channelId, { model: newModel });
-  }
-
+  // Always show selection prompt
   return {
-    blocks: buildModelStatusBlocks(currentModel, availableModels, newModel),
-    text: `Model changed: ${currentModel || 'default'} → ${newModel}`,
+    blocks: buildModelSelectionBlocks({
+      availableModels,
+      currentModel,
+      currentReasoning,
+    }),
+    text: 'Select a model and reasoning level.',
   };
 }
 
