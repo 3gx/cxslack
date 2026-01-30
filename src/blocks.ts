@@ -2092,10 +2092,18 @@ export function formatThreadActivityEntry(entry: ActivityEntry): string {
       const thinkingStatus = entry.thinkingInProgress ? '...' : '';
       const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
       const header = `:bulb: *Thinking${thinkingStatus}*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+      const lines: string[] = [header];
       if (entry.thinkingContent) {
-        return `${header}\n${entry.thinkingContent}`;
+        lines.push(entry.thinkingContent);
       }
-      return header;
+      if (!entry.thinkingInProgress && entry.thinkingTruncated) {
+        if (entry.thinkingAttachmentLink) {
+          lines.push(`_Full response <${entry.thinkingAttachmentLink}|attached>._`);
+        } else {
+          lines.push('_Full content attached._');
+        }
+      }
+      return lines.join('\n');
     }
     case 'tool_start':
       return `${toolEmoji} *${normalizeToolName(entry.tool || '')}*${toolInput} [in progress]`;

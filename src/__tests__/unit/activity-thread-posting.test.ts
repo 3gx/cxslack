@@ -615,6 +615,35 @@ describe('Thread Activity formatThreadActivityEntry', () => {
     expect(result).toContain('• Read: 338 lines');
     expect(result).toContain('• Output:');
   });
+
+  it('adds attachment suffix for truncated thinking with link', () => {
+    const entry: ActivityEntry = {
+      type: 'thinking',
+      timestamp: Date.now(),
+      thinkingInProgress: false,
+      thinkingContent: '...tail...',
+      thinkingTruncated: true,
+      thinkingAttachmentLink: 'https://example.com/file',
+      charCount: 4000,
+    };
+
+    const result = formatThreadActivityEntry(entry);
+    expect(result).toContain('_Full response <https://example.com/file|attached>._');
+  });
+
+  it('adds generic attachment suffix for truncated thinking without link', () => {
+    const entry: ActivityEntry = {
+      type: 'thinking',
+      timestamp: Date.now(),
+      thinkingInProgress: false,
+      thinkingContent: '...tail...',
+      thinkingTruncated: true,
+      charCount: 4000,
+    };
+
+    const result = formatThreadActivityEntry(entry);
+    expect(result).toContain('_Full content attached._');
+  });
 });
 
 // ============================================================================

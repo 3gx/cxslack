@@ -47,6 +47,9 @@ import {
   buildActivityLogText,
   flushActivityBatchToThread,
   updateThinkingEntryInThread,
+  getThinkingEntryTs,
+  getMessagePermalink,
+  uploadFilesToThread,
   postThinkingToThread,
   postResponseToThread,
   postErrorToThread,
@@ -62,14 +65,64 @@ const ROLLING_WINDOW_SIZE = 20; // Show last N entries when exceeded
 const ACTIVITY_LOG_MAX_CHARS = 1000; // Max chars for activity display
 const STATUS_SPINNER_FRAMES = ['\u25D0', '\u25D3', '\u25D1', '\u25D2'];
 
+// Extract tail with formatting preserved (ported from ccslack)
+function extractTailWithFormatting(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  // Find extraction start point
+  let startIdx = text.length - maxChars;
+
+  // Try to find a good break point (newline) within first 20% of extraction
+  const searchEnd = startIdx + Math.floor(maxChars * 0.2);
+  const nextNewline = text.indexOf('\n', startIdx);
+  if (nextNewline !== -1 && nextNewline < searchEnd) {
+    startIdx = nextNewline + 1;
+  }
+
+  // Extract tail
+  const tail = text.substring(startIdx);
+
+  // Check formatting state BEFORE extraction point
+  const beforeExtract = text.substring(0, startIdx);
+
+  // Count code blocks (```) - odd count means we're inside one
+  const codeBlockMatches = beforeExtract.match(/```(\w*)?/g) || [];
+  const insideCodeBlock = codeBlockMatches.length % 2 === 1;
+
+  // Get language tag from last opening code block
+  let codeBlockLang = '';
+  if (insideCodeBlock) {
+    const lastMatch = codeBlockMatches[codeBlockMatches.length - 1];
+    codeBlockLang = lastMatch.substring(3);
+  }
+
+  // Only check inline formatting if NOT inside code block
+  let prefix = '...';
+  if (insideCodeBlock) {
+    prefix = '...\n```' + codeBlockLang + '\n';
+  } else {
+    // Check inline formatting (only if outside code block)
+    const inlineCode = (beforeExtract.match(/(?<!`)`(?!`)/g) || []).length % 2 === 1;
+    const bold = (beforeExtract.match(/(?<!\*)\*(?!\*)/g) || []).length % 2 === 1;
+    const italic = (beforeExtract.match(/(?<!_)_(?!_)/g) || []).length % 2 === 1;
+    const strike = (beforeExtract.match(/~/g) || []).length % 2 === 1;
+
+    if (inlineCode) prefix += '`';
+    if (bold) prefix += '*';
+    if (italic) prefix += '_';
+    if (strike) prefix += '~';
+  }
+
+  return prefix + tail;
+}
+
 function buildThinkingDisplay(content: string, maxChars: number): { display: string; truncated: boolean } {
   if (content.length <= maxChars) {
     return { display: content, truncated: false };
   }
-  const ellipsis = '...';
-  const keep = Math.max(0, maxChars - ellipsis.length);
-  const tail = content.slice(-keep);
-  return { display: `${ellipsis}${tail}`, truncated: true };
+  return { display: extractTailWithFormatting(content, maxChars), truncated: true };
 }
 
 // Item types that should NOT be displayed as tool activity
@@ -762,24 +815,83 @@ export class StreamingManager {
             // Empty body - just waits for any queued flush work to complete
           });
 
-          // Integration point 3: Post thinking to thread when thinking completes
-          // FIX: Always post thinking content here. The streaming flush only posts headers
-          // (":bulb: Thinking... [X chars]"), not actual content. postThinkingToThread posts
-          // the full content as a separate message.
+          // Integration point 3: Finalize thinking in thread when thinking completes
           const sessionForLimit = found.context.threadTs
             ? getThreadSession(channelId, found.context.threadTs)
             : getSession(channelId);
           const threadCharLimit = sessionForLimit?.threadCharLimit;
 
           if (state.thinkingContent && state.thinkingContent.length > 100) {
-            await postThinkingToThread(
-              this.slack,
-              channelId,
-              state.threadParentTs || originalTs,
-              state.thinkingContent,
-              Date.now() - (state.thinkingStartTime || found.context.startTime),
-              THINKING_MESSAGE_SIZE
-            ).catch((err) => console.error('[streaming] Thinking post failed:', err));
+            const entries = this.activityManager.getEntries(found.key);
+            const currentEntry = [...entries].reverse().find(
+              (entry) => entry.type === 'thinking' && entry.thinkingSegmentId
+            );
+
+            const fullContent = state.thinkingContent;
+            const durationMs = Date.now() - (state.thinkingStartTime || found.context.startTime);
+            const { display, truncated } = buildThinkingDisplay(fullContent, THINKING_MESSAGE_SIZE);
+
+            if (currentEntry) {
+              currentEntry.thinkingInProgress = false;
+              currentEntry.durationMs = durationMs;
+              currentEntry.thinkingContent = display;
+              currentEntry.thinkingTruncated = truncated;
+              currentEntry.charCount = fullContent.length;
+            }
+
+            const segmentId = currentEntry?.thinkingSegmentId;
+            const thinkingMsgTs = segmentId
+              ? getThinkingEntryTs(this.activityManager, found.key, segmentId)
+              : undefined;
+
+            if (currentEntry && segmentId && thinkingMsgTs) {
+              if (fullContent.length > THINKING_MESSAGE_SIZE) {
+                try {
+                  const thinkingMsgLink = await getMessagePermalink(
+                    this.slack,
+                    channelId,
+                    thinkingMsgTs
+                  );
+                  const uploadResult = await uploadFilesToThread(
+                    this.slack,
+                    channelId,
+                    state.threadParentTs || originalTs,
+                    fullContent,
+                    `_Content for <${thinkingMsgLink}|this thinking block>._`,
+                    found.context.userId
+                  );
+
+                  if (uploadResult.success && uploadResult.fileMessageTs) {
+                    const fileMsgLink = await getMessagePermalink(
+                      this.slack,
+                      channelId,
+                      uploadResult.fileMessageTs
+                    );
+                    currentEntry.thinkingAttachmentLink = fileMsgLink;
+                  }
+                } catch (err) {
+                  console.error('[streaming] Thinking attachment upload failed:', err);
+                }
+              }
+
+              await updateThinkingEntryInThread(
+                this.activityManager,
+                found.key,
+                this.slack,
+                channelId,
+                currentEntry
+              ).catch((err) => console.error('[streaming] Thinking update failed:', err));
+            } else {
+              // Fallback: no existing thinking message; post a standalone message
+              await postThinkingToThread(
+                this.slack,
+                channelId,
+                state.threadParentTs || originalTs,
+                fullContent,
+                durationMs,
+                THINKING_MESSAGE_SIZE
+              ).catch((err) => console.error('[streaming] Thinking post failed:', err));
+            }
           }
 
           // Integration point 5: Post response to thread
@@ -1388,7 +1500,7 @@ export class StreamingManager {
               if (entries[i].type === 'thinking' && entries[i].thinkingSegmentId === segmentId) {
                 entries[i].thinkingContent = display;
                 entries[i].thinkingTruncated = truncated;
-                entries[i].charCount = display.length;
+                entries[i].charCount = updatedSegment.length;
                 entries[i].thinkingInProgress = true;
                 break;
               }

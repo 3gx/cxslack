@@ -253,12 +253,19 @@ describe('Thinking/Reasoning Events', () => {
     streaming.stopStreaming(conversationKey);
   });
 
-  it('thinking content is posted on turn:completed even after streaming header was posted', async () => {
+  it('thinking content updates existing thread entry on turn:completed', async () => {
     const context = createContext();
     streaming.startStreaming(context);
     const conversationKey = makeConversationKey(context.channelId, context.threadTs);
 
     const state = (streaming as any).states.get(conversationKey);
+
+    const updateSpy = vi
+      .spyOn(ActivityThread, 'updateThinkingEntryInThread')
+      .mockResolvedValue(true);
+    const tsSpy = vi
+      .spyOn(ActivityThread, 'getThinkingEntryTs')
+      .mockReturnValue('thinking.ts');
 
     // Emit thinking:started - this sets thinkingPostedDuringStreaming=true after flush
     codex.emit('thinking:started', { itemId: 'reasoning-content-test' });
@@ -280,10 +287,7 @@ describe('Thinking/Reasoning Events', () => {
     expect(state.thinkingContent).toBe(thinkingContent);
     expect(state.thinkingContent.length).toBeGreaterThan(100);
 
-    // Clear mock calls from streaming phase
-    (slack.chat.postMessage as any).mockClear();
-
-    // Emit turn:completed - this should post full thinking content
+    // Emit turn:completed - this should update the existing thinking entry
     codex.emit('turn:completed', {
       threadId: context.threadId,
       turnId: context.turnId,
@@ -293,16 +297,11 @@ describe('Thinking/Reasoning Events', () => {
     // Wait for async handlers
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    // FIX VERIFICATION: postThinkingToThread should have been called
-    // It posts thinking content via chat.postMessage with the full content
-    const postCalls = (slack.chat.postMessage as any).mock.calls;
-    const thinkingPost = postCalls.find((call: any[]) => {
-      const text = call[0]?.text || '';
-      return text.includes(thinkingContent) || text.includes('Thinking');
-    });
+    // Should update existing thinking entry in-place
+    expect(updateSpy).toHaveBeenCalled();
 
-    // The fix ensures thinking content is posted even when thinkingPostedDuringStreaming=true
-    expect(thinkingPost).toBeDefined();
+    updateSpy.mockRestore();
+    tsSpy.mockRestore();
   });
 
   it('thinking updates thread message on update-rate cadence', async () => {

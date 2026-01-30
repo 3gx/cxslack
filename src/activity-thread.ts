@@ -36,6 +36,31 @@ function escapeSlackMrkdwn(text: string): string {
 const MAX_MESSAGE_LENGTH = 2900;
 const THINKING_TRUNCATE_LENGTH = 500;
 
+// Get permalink URL for a message using Slack API (works on iOS)
+export async function getMessagePermalink(
+  client: WebClient,
+  channel: string,
+  messageTs: string
+): Promise<string> {
+  try {
+    const result = await withSlackRetry(
+      () =>
+        client.chat.getPermalink({
+          channel,
+          message_ts: messageTs,
+        }),
+      'permalink.get'
+    ) as { ok?: boolean; permalink?: string };
+    if (result.ok && result.permalink) {
+      return result.permalink;
+    }
+  } catch (error) {
+    console.error('[getMessagePermalink] Failed to get permalink, using fallback:', error);
+  }
+  // Fallback (desktop works; iOS may not)
+  return `https://slack.com/archives/${channel}/p${messageTs.replace('.', '')}`;
+}
+
 /**
  * Activity entry types for tracking tool/thinking progress.
  */
@@ -50,6 +75,7 @@ export interface ActivityEntry {
   charCount?: number;
   thinkingContent?: string;
   thinkingTruncated?: boolean;
+  thinkingAttachmentLink?: string;
 
   // Result metrics (computed from input for Edit/Write, from output for Bash)
   lineCount?: number;           // Read/Write/Bash: lines in result/content
@@ -622,6 +648,81 @@ export async function uploadMarkdownAndPngWithResponse(
 }
 
 /**
+ * Upload .md and .png files to a thread without posting a text message.
+ * Used for thinking attachments when we update the existing thinking message in-place.
+ */
+export async function uploadFilesToThread(
+  client: WebClient,
+  channelId: string,
+  threadTs: string,
+  markdown: string,
+  initialComment?: string,
+  userId?: string
+): Promise<{ success: boolean; fileMessageTs?: string }> {
+  try {
+    const pngBuffer = await markdownToPng(markdown);
+
+    const timestamp = Date.now();
+    const files: Array<{ content: string | Buffer; filename: string; title: string }> = [
+      {
+        content: markdown,
+        filename: `thinking-${timestamp}.md`,
+        title: 'Full Thinking (Markdown)',
+      },
+    ];
+
+    if (pngBuffer) {
+      files.push({
+        content: pngBuffer,
+        filename: `thinking-${timestamp}.png`,
+        title: 'Thinking Preview',
+      });
+    }
+
+    const fileResult = await withSlackRetry(
+      () =>
+        client.files.uploadV2({
+          channel_id: channelId,
+          thread_ts: threadTs,
+          initial_comment: initialComment,
+          file_uploads: files.map((f) => ({
+            file: typeof f.content === 'string' ? Buffer.from(f.content, 'utf-8') : f.content,
+            filename: f.filename,
+            title: f.title,
+          })),
+        } as any),
+      'thinking.files'
+    );
+
+    const shares = (fileResult as any)?.files?.[0]?.shares;
+    let fileMessageTs = shares?.public?.[channelId]?.[0]?.ts ?? shares?.private?.[channelId]?.[0]?.ts;
+
+    if (!fileMessageTs) {
+      const fileId = (fileResult as any)?.files?.[0]?.files?.[0]?.id;
+      if (fileId) {
+        fileMessageTs = (await pollForFileShares(client, fileId, channelId)) ?? undefined;
+      }
+    }
+
+    return { success: true, fileMessageTs };
+  } catch (error) {
+    console.error('[uploadFilesToThread] Failed to upload files:', error);
+    if (userId) {
+      try {
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: userId,
+          text: `Failed to attach files: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        });
+      } catch {
+        // Ignore ephemeral failure
+      }
+    }
+    return { success: false };
+  }
+}
+
+/**
  * Post "Analyzing request..." starting message to thread.
  */
 export async function postStartingToThread(
@@ -838,6 +939,19 @@ export async function updateThinkingEntryInThread(
 }
 
 /**
+ * Get the posted thread message ts for a thinking segment.
+ * Used for permalink generation and in-place updates.
+ */
+export function getThinkingEntryTs(
+  manager: ActivityThreadManager,
+  conversationKey: string,
+  thinkingSegmentId: string
+): string | undefined {
+  const batch = (manager as any).batches?.get(conversationKey) as ActivityBatch | undefined;
+  return batch?.thinkingIdToPostedTs?.get(thinkingSegmentId);
+}
+
+/**
  * Post thinking content to thread.
  * Uploads .md + .png if content is long.
  */
@@ -875,11 +989,16 @@ export async function postThinkingToThread(
 
   // Long thinking - upload with .md + .png
   const slackFormatted = markdownToSlack(content);
+  const suffix = '_Full content attached._';
+  const previewLimit = Math.max(0, limit - suffix.length - 2);
+  const preview = slackFormatted.length <= previewLimit
+    ? slackFormatted
+    : truncateWithClosedFormatting(slackFormatted, previewLimit);
   const result = await uploadMarkdownAndPngWithResponse(
     client,
     channel,
     content,
-    `${header}\n\n${slackFormatted}`,
+    `${header}\n\n${preview}\n${suffix}`,
     threadTs,
     undefined,
     limit
