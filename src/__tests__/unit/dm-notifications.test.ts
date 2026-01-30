@@ -23,23 +23,27 @@ describe('DM Notifications', () => {
         },
         conversations: {
           open: vi.fn().mockResolvedValue({ channel: { id: 'D123' } }),
+          info: vi.fn().mockResolvedValue({ ok: true, channel: { name: 'general' } }),
         },
       };
 
-      await sendDmNotification(
-        mockClient as any,
-        'U123',
-        'C456',
-        '789.012',
-        'conv-key',
-        'Test Title',
-        'Preview text'
-      );
+      await sendDmNotification({
+        client: mockClient as any,
+        userId: 'U123',
+        channelId: 'C456',
+        messageTs: '789.012',
+        conversationKey: 'conv-key',
+        emoji: ':white_check_mark:',
+        title: 'Test Title',
+        subtitle: 'Done',
+        queryPreview: 'Preview text',
+      });
 
       expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({
           channel: 'D123',
-          text: expect.stringContaining('Test Title'),
+          text: expect.stringContaining(':white_check_mark:'),
+          blocks: expect.any(Array),
           unfurl_links: false,
         })
       );
@@ -59,14 +63,15 @@ describe('DM Notifications', () => {
         },
       };
 
-      await sendDmNotification(
-        mockClient as any,
-        'U123',
-        'C456',
-        '789.012',
-        'conv-key',
-        'Test Title'
-      );
+      await sendDmNotification({
+        client: mockClient as any,
+        userId: 'U123',
+        channelId: 'C456',
+        messageTs: '789.012',
+        conversationKey: 'conv-key',
+        emoji: ':question:',
+        title: 'Test Title',
+      });
 
       expect(mockClient.chat.postMessage).not.toHaveBeenCalled();
     });
@@ -82,29 +87,32 @@ describe('DM Notifications', () => {
         },
         conversations: {
           open: vi.fn().mockResolvedValue({ channel: { id: 'D123' } }),
+          info: vi.fn().mockResolvedValue({ ok: true, channel: { name: 'general' } }),
         },
       };
 
       // First call should go through
-      await sendDmNotification(
-        mockClient as any,
-        'U123',
-        'C456',
-        '789.012',
-        'debounce-test',
-        'First'
-      );
+      await sendDmNotification({
+        client: mockClient as any,
+        userId: 'U123',
+        channelId: 'C456',
+        messageTs: '789.012',
+        conversationKey: 'debounce-test',
+        emoji: ':white_check_mark:',
+        title: 'First',
+      });
       expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(1);
 
       // Second call within debounce window should be skipped
-      await sendDmNotification(
-        mockClient as any,
-        'U123',
-        'C456',
-        '789.012',
-        'debounce-test',
-        'Second'
-      );
+      await sendDmNotification({
+        client: mockClient as any,
+        userId: 'U123',
+        channelId: 'C456',
+        messageTs: '789.012',
+        conversationKey: 'debounce-test',
+        emoji: ':white_check_mark:',
+        title: 'First',
+      });
       expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(1);
 
       // Clean up
@@ -122,32 +130,35 @@ describe('DM Notifications', () => {
         },
         conversations: {
           open: vi.fn().mockResolvedValue({ channel: { id: 'D123' } }),
+          info: vi.fn().mockResolvedValue({ ok: true, channel: { name: 'general' } }),
         },
       };
 
       // First call
-      await sendDmNotification(
-        mockClient as any,
-        'U123',
-        'C456',
-        '789.012',
-        'debounce-window-test',
-        'First'
-      );
+      await sendDmNotification({
+        client: mockClient as any,
+        userId: 'U123',
+        channelId: 'C456',
+        messageTs: '789.012',
+        conversationKey: 'debounce-window-test',
+        emoji: ':white_check_mark:',
+        title: 'First',
+      });
       expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(1);
 
       // Advance time past debounce window (15s)
       vi.advanceTimersByTime(16000);
 
       // Second call should go through now
-      await sendDmNotification(
-        mockClient as any,
-        'U123',
-        'C456',
-        '789.012',
-        'debounce-window-test',
-        'Second'
-      );
+      await sendDmNotification({
+        client: mockClient as any,
+        userId: 'U123',
+        channelId: 'C456',
+        messageTs: '789.012',
+        conversationKey: 'debounce-window-test',
+        emoji: ':white_check_mark:',
+        title: 'First',
+      });
       expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(2);
 
       // Clean up
@@ -167,19 +178,21 @@ describe('DM Notifications', () => {
         },
         conversations: {
           open: vi.fn(),
+          info: vi.fn().mockResolvedValue({ ok: true, channel: { name: 'general' } }),
         },
       };
 
       // Should not throw
       await expect(
-        sendDmNotification(
-          mockClient as any,
-          'U123',
-          'C456',
-          '789.012',
-          'dm-disabled-test',
-          'Test'
-        )
+        sendDmNotification({
+          client: mockClient as any,
+          userId: 'U123',
+          channelId: 'C456',
+          messageTs: '789.012',
+          conversationKey: 'dm-disabled-test',
+          emoji: ':question:',
+          title: 'Test',
+        })
       ).resolves.toBeUndefined();
 
       expect(consoleSpy).toHaveBeenCalled();
@@ -198,26 +211,29 @@ describe('DM Notifications', () => {
         },
         conversations: {
           open: vi.fn().mockResolvedValue({ channel: { id: 'D123' } }),
+          info: vi.fn().mockResolvedValue({ ok: true, channel: { name: 'general' } }),
         },
       };
 
       // Same user, different conversations
-      await sendDmNotification(
-        mockClient as any,
-        'U123',
-        'C456',
-        '789.012',
-        'conv-1',
-        'First'
-      );
-      await sendDmNotification(
-        mockClient as any,
-        'U123',
-        'C456',
-        '789.012',
-        'conv-2',
-        'Second'
-      );
+      await sendDmNotification({
+        client: mockClient as any,
+        userId: 'U123',
+        channelId: 'C456',
+        messageTs: '789.012',
+        conversationKey: 'conv-1',
+        emoji: ':white_check_mark:',
+        title: 'First',
+      });
+      await sendDmNotification({
+        client: mockClient as any,
+        userId: 'U123',
+        channelId: 'C456',
+        messageTs: '789.012',
+        conversationKey: 'conv-2',
+        emoji: ':white_check_mark:',
+        title: 'Second',
+      });
 
       // Both should go through (different conversation keys)
       expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(2);

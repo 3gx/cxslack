@@ -1099,6 +1099,7 @@ async function handleUserMessage(
     messageTs: initialResult.ts,
     originalTs: messageTs, // User's original message for emoji reactions
     userId, // Track user for DM notifications
+    query: text,
     threadId,
     turnId: '', // Will be set when turn starts
     approvalPolicy,

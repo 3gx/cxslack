@@ -81,6 +81,7 @@ export class ApprovalHandler {
     // Build blocks based on request type
     let blocks: Block[];
     let previewText: string | undefined;
+    let subtitle: string | undefined;
     if (request.method === 'item/commandExecution/requestApproval') {
       const cmdRequest = request as CommandApprovalRequest;
       blocks = buildCommandApprovalBlocks({
@@ -92,7 +93,8 @@ export class ApprovalHandler {
         sandboxed: cmdRequest.params.sandboxed,
         requestId,
       });
-      previewText = `Command: \`${cmdRequest.params.parsedCmd}\``;
+      previewText = `Command: ${cmdRequest.params.parsedCmd}`;
+      subtitle = 'Tool approval needed';
     } else {
       const fileRequest = request as FileChangeApprovalRequest;
       blocks = buildFileChangeApprovalBlocks({
@@ -103,7 +105,8 @@ export class ApprovalHandler {
         reason: fileRequest.params.reason,
         requestId,
       });
-      previewText = `File: \`${fileRequest.params.filePath}\``;
+      previewText = `File: ${fileRequest.params.filePath}`;
+      subtitle = 'Tool approval needed';
     }
 
     // Post approval message to Slack
@@ -132,15 +135,17 @@ export class ApprovalHandler {
     // Send DM notification if userId is provided
     if (userId) {
       const conversationKey = makeConversationKey(channelId, threadTs);
-      await sendDmNotification(
-        this.slack,
+      await sendDmNotification({
+        client: this.slack,
         userId,
         channelId,
-        result.ts,
+        messageTs: result.ts,
         conversationKey,
-        ':question: Approval needed',
-        previewText
-      ).catch((err) => {
+        emoji: ':wrench:',
+        title: 'Tool approval needed',
+        subtitle,
+        queryPreview: previewText,
+      }).catch((err) => {
         console.error('Failed to send DM notification:', err);
       });
     }

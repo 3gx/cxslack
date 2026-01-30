@@ -52,6 +52,7 @@ import {
 } from './activity-thread.js';
 import { buildActivityEntryActionParams } from './blocks.js';
 import { withSlackRetry } from './slack-retry.js';
+import { sendDmNotification } from './dm-notifications.js';
 import { THINKING_MESSAGE_SIZE } from './commands.js';
 
 // Constants matching CCSLACK architecture
@@ -128,6 +129,8 @@ export interface StreamingContext {
   originalTs: string;
   /** User ID who initiated the request */
   userId?: string;
+  /** Original user query text (for DM previews) */
+  query?: string;
   /** Codex thread ID */
   threadId: string;
   /** Current turn ID */
@@ -731,6 +734,22 @@ export class StreamingManager {
 
           // FINAL update - shows complete status and response
           await this.updateActivityMessage(found.key);
+
+          // Send DM notification for completion
+          if (status === 'completed' && found.context.userId) {
+            const conversationKey = makeConversationKey(channelId, found.context.threadTs);
+            const messageTs = state.activityMessageTs || found.context.messageTs;
+            await sendDmNotification({
+              client: this.slack,
+              userId: found.context.userId,
+              channelId,
+              messageTs,
+              conversationKey,
+              emoji: ':white_check_mark:',
+              title: 'Query completed',
+              queryPreview: found.context.query,
+            }).catch((err) => console.error('[streaming] Failed to send completion DM:', err));
+          }
 
           // Clean up activity entries
           this.activityManager.clearEntries(found.key);
