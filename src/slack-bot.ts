@@ -51,6 +51,8 @@ import {
 } from './blocks.js';
 import { withSlackRetry } from './slack-retry.js';
 import { markProcessingStart, markApprovalWait, removeProcessingEmoji } from './emoji-reactions.js';
+import { processSlackFiles, SlackFile } from './file-handler.js';
+import { buildMessageContent } from './content-builder.js';
 
 // ============================================================================
 // Pending Model Selection Tracking (for emoji cleanup)
@@ -227,6 +229,7 @@ function setupEventHandlers(): void {
     const channelId: string = event.channel;
     const threadTs: string | undefined = event.thread_ts;
     const messageTs: string = event.ts;
+    const eventFiles = (event as unknown as { files?: SlackFile[] }).files;
     // Always reply in a thread: use existing thread or create new one under user's message
     const replyThreadTs = threadTs ?? messageTs;
 
@@ -252,7 +255,7 @@ function setupEventHandlers(): void {
         return;
       }
 
-      await handleUserMessage(channelId, threadTs, userId, text, messageTs);
+      await handleUserMessage(channelId, threadTs, userId, text, messageTs, eventFiles);
     } catch (error) {
       console.error('Error handling app_mention:', error);
       await say({
@@ -273,6 +276,7 @@ function setupEventHandlers(): void {
       user?: string;
       text?: string;
       ts: string;
+      files?: SlackFile[];
     };
 
     // Skip bot messages and app mentions (handled separately)
@@ -298,7 +302,7 @@ function setupEventHandlers(): void {
     }
 
     try {
-      await handleUserMessage(channelId, threadTs, userId, text, messageTs);
+      await handleUserMessage(channelId, threadTs, userId, text, messageTs, msg.files);
     } catch (error) {
       console.error('Error handling message:', error);
       await say({
@@ -897,7 +901,8 @@ async function handleUserMessage(
   threadTs: string | undefined,
   userId: string,
   text: string,
-  messageTs: string
+  messageTs: string,
+  files?: SlackFile[]
 ): Promise<void> {
   // CRITICAL: All bot responses go into threads, never pollute the main channel.
   // If user mentions bot in main channel, use their message as thread anchor.
@@ -1140,8 +1145,23 @@ async function handleUserMessage(
 
   streamingManager.startStreaming(streamingContext);
 
+  // Build turn input (files first, then text)
+  let input: TurnContent[] = [{ type: 'text', text }];
+  if (files && files.length > 0) {
+    try {
+      const { files: processedFiles, warnings } = await processSlackFiles(
+        files,
+        process.env.SLACK_BOT_TOKEN!
+      );
+      input = buildMessageContent(text, processedFiles, warnings);
+    } catch (error) {
+      console.error('[FileUpload] Error processing files:', error);
+      // Fallback to plain text input
+      input = [{ type: 'text', text }];
+    }
+  }
+
   // Start the turn
-  const input: TurnContent[] = [{ type: 'text', text }];
   const turnId = await codex.startTurn(threadId, input, {
     approvalPolicy,
     reasoningEffort: effectiveReasoning,
