@@ -252,9 +252,25 @@ export class ActivityThreadManager {
    * Format batch of entries as text.
    */
   private formatBatch(entries: ActivityEntry[]): string {
+    // Build set of completed tool IDs to skip their tool_start entries
+    const completedIds = new Set<string>();
+    for (const entry of entries) {
+      if (entry.type === 'tool_complete' && entry.toolUseId) {
+        completedIds.add(entry.toolUseId);
+      }
+    }
+
+    // Filter out tool_start entries that have a matching tool_complete
+    const filteredEntries = entries.filter((entry) => {
+      if (entry.type === 'tool_start' && entry.toolUseId && completedIds.has(entry.toolUseId)) {
+        return false; // Skip - we have the completed version
+      }
+      return true;
+    });
+
     // Limit to last 20 entries (rolling window)
-    const displayEntries = entries.slice(-20);
-    const hiddenCount = entries.length - displayEntries.length;
+    const displayEntries = filteredEntries.slice(-20);
+    const hiddenCount = filteredEntries.length - displayEntries.length;
 
     let text = '';
     if (hiddenCount > 0) {
@@ -278,15 +294,13 @@ export class ActivityThreadManager {
       case 'thinking':
         return `:brain: *Thinking...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
       case 'tool_start': {
-        // Type guard: only pass object input, not string
-        const inputObj = typeof entry.toolInput === 'object' ? entry.toolInput : undefined;
-        const inputSummary = formatToolInputSummary(entry.tool || '', inputObj);
+        // Pass toolInput directly - formatToolInputSummary handles both string and object inputs
+        const inputSummary = formatToolInputSummary(entry.tool || '', entry.toolInput);
         return `${emoji} *${normalizeToolName(entry.tool || '')}*${inputSummary} [in progress]`;
       }
       case 'tool_complete': {
-        // Type guard: only pass object input, not string
-        const inputObj = typeof entry.toolInput === 'object' ? entry.toolInput : undefined;
-        const inputSummary = formatToolInputSummary(entry.tool || '', inputObj);
+        // Pass toolInput directly - formatToolInputSummary handles both string and object inputs
+        const inputSummary = formatToolInputSummary(entry.tool || '', entry.toolInput);
         const resultSummary = formatToolResultSummary(entry);
         const errorFlag = entry.toolIsError ? ' :warning:' : '';
 
@@ -327,13 +341,29 @@ export function buildActivityLogText(
 ): string {
   const manager = new ActivityThreadManager();
 
+  // Build set of completed tool IDs to skip their tool_start entries
+  const completedIds = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type === 'tool_complete' && entry.toolUseId) {
+      completedIds.add(entry.toolUseId);
+    }
+  }
+
+  // Filter out tool_start entries that have a matching tool_complete
+  const filteredEntries = entries.filter((entry) => {
+    if (entry.type === 'tool_start' && entry.toolUseId && completedIds.has(entry.toolUseId)) {
+      return false; // Skip - we have the completed version
+    }
+    return true;
+  });
+
   // Start with maxEntries, reduce until text fits within maxChars
   // This ensures we always show the MOST RECENT entries (end of array)
-  let entriesToShow = Math.min(entries.length, maxEntries);
+  let entriesToShow = Math.min(filteredEntries.length, maxEntries);
 
   while (entriesToShow > 0) {
-    const displayEntries = entries.slice(-entriesToShow);
-    const hiddenCount = entries.length - displayEntries.length;
+    const displayEntries = filteredEntries.slice(-entriesToShow);
+    const hiddenCount = filteredEntries.length - displayEntries.length;
 
     let text = '';
     if (hiddenCount > 0) {

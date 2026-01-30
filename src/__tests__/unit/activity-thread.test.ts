@@ -167,6 +167,34 @@ describe('buildActivityLogText', () => {
     expect(text).not.toContain('earlier entries');
   });
 
+  it('skips tool_start when tool_complete exists for same toolUseId', () => {
+    const entries: ActivityEntry[] = [
+      { type: 'tool_start', timestamp: Date.now(), tool: 'Bash', toolInput: 'npm test', toolUseId: 'tool-1' },
+      { type: 'tool_complete', timestamp: Date.now(), tool: 'Bash', toolInput: 'npm test', toolUseId: 'tool-1', durationMs: 500 },
+    ];
+
+    const text = buildActivityLogText(entries);
+
+    // Should NOT contain "[in progress]" - the tool_start should be skipped
+    expect(text).not.toContain('[in progress]');
+    // Should contain the completed entry with duration
+    expect(text).toContain('Bash');
+    expect(text).toContain('0.5s');
+  });
+
+  it('shows tool_start when tool_complete does not exist yet', () => {
+    const entries: ActivityEntry[] = [
+      { type: 'tool_start', timestamp: Date.now(), tool: 'Bash', toolInput: 'npm test', toolUseId: 'tool-1' },
+    ];
+
+    const text = buildActivityLogText(entries);
+
+    // Should contain "[in progress]" since no tool_complete yet
+    expect(text).toContain('[in progress]');
+    expect(text).toContain('Bash');
+    expect(text).toContain('`npm test`');
+  });
+
   it('reduces entries when output exceeds maxChars (rolling window)', () => {
     // Create many entries to generate long text
     const entries: ActivityEntry[] = [];
@@ -257,6 +285,32 @@ describe('buildActivityLogText', () => {
 
     expect(text).toContain(':mag:'); // Read tool emoji
     expect(text).toContain('Read');
+  });
+
+  it('formats tool_start with string toolInput (command)', () => {
+    const entries: ActivityEntry[] = [
+      { type: 'tool_start', timestamp: Date.now(), tool: 'Bash', toolInput: 'npm test' },
+    ];
+
+    const text = buildActivityLogText(entries);
+
+    expect(text).toContain(':computer:');
+    expect(text).toContain('Bash');
+    expect(text).toContain('`npm test`'); // Command should be displayed in backticks
+    expect(text).toContain('[in progress]');
+  });
+
+  it('formats tool_complete with string toolInput (command)', () => {
+    const entries: ActivityEntry[] = [
+      { type: 'tool_complete', timestamp: Date.now(), tool: 'Bash', toolInput: 'git status', durationMs: 500 },
+    ];
+
+    const text = buildActivityLogText(entries);
+
+    expect(text).toContain(':computer:');
+    expect(text).toContain('Bash');
+    expect(text).toContain('`git status`'); // Command should be displayed in backticks
+    expect(text).toContain('0.5s');
   });
 
   it('formats tool_complete entry with duration', () => {
