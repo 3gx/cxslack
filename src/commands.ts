@@ -86,6 +86,8 @@ export interface CommandResult {
   text: string; // Fallback text
   ephemeral?: boolean; // Whether to send as ephemeral message
   showModelSelection?: boolean; // Flag to trigger model picker with emoji tracking
+  showPolicySelection?: boolean; // Flag to trigger policy picker with emoji tracking
+  showSandboxSelection?: boolean; // Flag to trigger sandbox picker with emoji tracking
   sandboxModeChange?: SandboxMode; // Flag to restart app-server with new sandbox mode
 }
 
@@ -143,6 +145,7 @@ export async function handlePolicyCommand(
     return {
       blocks: buildPolicySelectionBlocks(currentPolicy),
       text: `Select approval policy (current: ${currentPolicy})`,
+      showPolicySelection: true,
     };
   }
 
@@ -591,6 +594,7 @@ export async function handleSandboxCommand(
     return {
       blocks: buildSandboxSelectionBlocks(currentMode),
       text: `Select sandbox mode (current: ${currentMode ?? 'default'})`,
+      showSandboxSelection: true,
     };
   }
 

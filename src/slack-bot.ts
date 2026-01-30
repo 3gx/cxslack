@@ -40,6 +40,8 @@ import {
   buildReasoningSelectionBlocks,
   buildModelConfirmationBlocks,
   buildModelPickerCancelledBlocks,
+  buildPolicyPickerCancelledBlocks,
+  buildSandboxPickerCancelledBlocks,
   buildErrorBlocks,
   buildTextBlocks,
   buildAbortConfirmationModalView,
@@ -48,6 +50,7 @@ import {
   Block,
 } from './blocks.js';
 import { withSlackRetry } from './slack-retry.js';
+import { markProcessingStart, markApprovalWait, removeProcessingEmoji } from './emoji-reactions.js';
 
 // ============================================================================
 // Pending Model Selection Tracking (for emoji cleanup)
@@ -61,6 +64,20 @@ interface PendingModelSelection {
 
 // Track pending model selections for emoji cleanup
 export const pendingModelSelections = new Map<string, PendingModelSelection>();
+interface PendingPolicySelection {
+  originalTs: string;
+  channelId: string;
+  threadTs?: string;
+}
+
+interface PendingSandboxSelection {
+  originalTs: string;
+  channelId: string;
+  threadTs?: string;
+}
+
+export const pendingPolicySelections = new Map<string, PendingPolicySelection>();
+export const pendingSandboxSelections = new Map<string, PendingSandboxSelection>();
 import { toUserMessage } from './errors.js';
 import { markAborted } from './abort-tracker.js';
 
@@ -555,6 +572,34 @@ function setupEventHandlers(): void {
       text: `Approval policy changed: ${currentPolicy} → ${newPolicy}`,
       blocks: buildPolicyStatusBlocks({ currentPolicy, newPolicy }),
     });
+
+    const pending = pendingPolicySelections.get(messageTs);
+    if (pending) {
+      await removeProcessingEmoji(client, pending.channelId, pending.originalTs);
+      pendingPolicySelections.delete(messageTs);
+    }
+  });
+
+  // Handle /policy cancel button
+  app.action('policy_picker_cancel', async ({ ack, body, client }) => {
+    await ack();
+
+    const channelId = body.channel?.id;
+    const messageTs = (body as { message?: { ts?: string } }).message?.ts;
+    if (!channelId || !messageTs) return;
+
+    const pending = pendingPolicySelections.get(messageTs);
+    if (pending) {
+      await removeProcessingEmoji(client, pending.channelId, pending.originalTs);
+      pendingPolicySelections.delete(messageTs);
+    }
+
+    await client.chat.update({
+      channel: channelId,
+      ts: messageTs,
+      text: 'Policy selection cancelled',
+      blocks: buildPolicyPickerCancelledBlocks(),
+    });
   });
 
   // Handle /sandbox selection buttons
@@ -577,6 +622,11 @@ function setupEventHandlers(): void {
         text: 'Cannot change sandbox while processing',
         blocks: buildErrorBlocks('Cannot change sandbox while a turn is running. Please wait or abort.'),
       });
+      const pending = pendingSandboxSelections.get(messageTs);
+      if (pending) {
+        await removeProcessingEmoji(client, pending.channelId, pending.originalTs);
+        pendingSandboxSelections.delete(messageTs);
+      }
       return;
     }
 
@@ -592,6 +642,11 @@ function setupEventHandlers(): void {
         text: `Failed to update sandbox: ${message}`,
         blocks: buildErrorBlocks(`Failed to update sandbox: ${message}`),
       });
+      const pending = pendingSandboxSelections.get(messageTs);
+      if (pending) {
+        await removeProcessingEmoji(client, pending.channelId, pending.originalTs);
+        pendingSandboxSelections.delete(messageTs);
+      }
       return;
     }
 
@@ -600,6 +655,34 @@ function setupEventHandlers(): void {
       ts: messageTs,
       text: `Sandbox mode changed: ${currentMode ?? 'default'} → ${newMode}`,
       blocks: buildSandboxStatusBlocks({ currentMode, newMode }),
+    });
+
+    const pending = pendingSandboxSelections.get(messageTs);
+    if (pending) {
+      await removeProcessingEmoji(client, pending.channelId, pending.originalTs);
+      pendingSandboxSelections.delete(messageTs);
+    }
+  });
+
+  // Handle /sandbox cancel button
+  app.action('sandbox_picker_cancel', async ({ ack, body, client }) => {
+    await ack();
+
+    const channelId = body.channel?.id;
+    const messageTs = (body as { message?: { ts?: string } }).message?.ts;
+    if (!channelId || !messageTs) return;
+
+    const pending = pendingSandboxSelections.get(messageTs);
+    if (pending) {
+      await removeProcessingEmoji(client, pending.channelId, pending.originalTs);
+      pendingSandboxSelections.delete(messageTs);
+    }
+
+    await client.chat.update({
+      channel: channelId,
+      ts: messageTs,
+      text: 'Sandbox selection cancelled',
+      blocks: buildSandboxPickerCancelledBlocks(),
     });
   });
 
@@ -690,12 +773,7 @@ function setupEventHandlers(): void {
 
     console.log(`[model] Reasoning selected: ${reasoningValue} for model: ${modelValue}, thread: ${threadTs}`);
     if (pending) {
-      try {
-        await client.reactions.remove({ channel: pending.channelId, timestamp: pending.originalTs, name: 'question' });
-      } catch { /* ignore */ }
-      try {
-        await client.reactions.remove({ channel: pending.channelId, timestamp: pending.originalTs, name: 'eyes' });
-      } catch { /* ignore */ }
+      await removeProcessingEmoji(client, pending.channelId, pending.originalTs);
       pendingModelSelections.delete(messageTs);
     }
 
@@ -753,12 +831,7 @@ function setupEventHandlers(): void {
     // Remove emojis from original message
     const pending = pendingModelSelections.get(messageTs);
     if (pending) {
-      try {
-        await client.reactions.remove({ channel: pending.channelId, timestamp: pending.originalTs, name: 'question' });
-      } catch { /* ignore */ }
-      try {
-        await client.reactions.remove({ channel: pending.channelId, timestamp: pending.originalTs, name: 'eyes' });
-      } catch { /* ignore */ }
+      await removeProcessingEmoji(client, pending.channelId, pending.originalTs);
       pendingModelSelections.delete(messageTs);
     }
 
@@ -865,6 +938,7 @@ async function handleUserMessage(
 
     // Handle /model command with emoji tracking
     if (commandResult.showModelSelection) {
+      await markProcessingStart(app.client, channelId, messageTs);
       const response = await app.client.chat.postMessage({
         channel: channelId,
         thread_ts: postingThreadTs,
@@ -879,10 +953,47 @@ async function handleUserMessage(
           channelId,
           threadTs: postingThreadTs,
         });
-        // Add :question: emoji to user's message (keep :eyes: from message receipt)
-        try {
-          await app.client.reactions.add({ channel: channelId, timestamp: messageTs, name: 'question' });
-        } catch { /* ignore if already added */ }
+        await markApprovalWait(app.client, channelId, messageTs);
+      }
+      return;
+    }
+
+    if (commandResult.showPolicySelection) {
+      await markProcessingStart(app.client, channelId, messageTs);
+      const response = await app.client.chat.postMessage({
+        channel: channelId,
+        thread_ts: postingThreadTs,
+        blocks: commandResult.blocks,
+        text: commandResult.text,
+      });
+
+      if (response.ts) {
+        pendingPolicySelections.set(response.ts, {
+          originalTs: messageTs,
+          channelId,
+          threadTs: postingThreadTs,
+        });
+        await markApprovalWait(app.client, channelId, messageTs);
+      }
+      return;
+    }
+
+    if (commandResult.showSandboxSelection) {
+      await markProcessingStart(app.client, channelId, messageTs);
+      const response = await app.client.chat.postMessage({
+        channel: channelId,
+        thread_ts: postingThreadTs,
+        blocks: commandResult.blocks,
+        text: commandResult.text,
+      });
+
+      if (response.ts) {
+        pendingSandboxSelections.set(response.ts, {
+          originalTs: messageTs,
+          channelId,
+          threadTs: postingThreadTs,
+        });
+        await markApprovalWait(app.client, channelId, messageTs);
       }
       return;
     }

@@ -12,7 +12,9 @@ import {
   buildApprovalDeniedBlocks,
   buildPolicyStatusBlocks,
   buildPolicySelectionBlocks,
+  buildPolicyPickerCancelledBlocks,
   buildSandboxSelectionBlocks,
+  buildSandboxPickerCancelledBlocks,
   buildSandboxStatusBlocks,
   buildClearBlocks,
   buildTextBlocks,
@@ -248,6 +250,21 @@ describe('Block Kit Builders', () => {
       const current = actions.find((a) => a.action_id === 'policy_select_on-request');
       expect(current?.style).toBe('primary');
     });
+
+    it('includes cancel button', () => {
+      const blocks = buildPolicySelectionBlocks('on-request');
+      const cancelBlock = blocks.find((b) => b.block_id === 'policy_cancel');
+      expect(cancelBlock).toBeDefined();
+      const elements = cancelBlock?.elements as Array<{ action_id: string }>;
+      expect(elements[0].action_id).toBe('policy_picker_cancel');
+    });
+  });
+
+  describe('buildPolicyPickerCancelledBlocks', () => {
+    it('shows cancellation message', () => {
+      const blocks = buildPolicyPickerCancelledBlocks();
+      expect(blocks[0].text?.text).toContain('cancelled');
+    });
   });
 
   describe('buildSandboxStatusBlocks', () => {
@@ -264,6 +281,21 @@ describe('Block Kit Builders', () => {
       const actionsBlock = blocks.find((b) => b.block_id === 'sandbox_selection') as any;
       const button = actionsBlock.elements.find((el: any) => el.action_id === 'sandbox_select_workspace-write');
       expect(button.style).toBe('primary');
+    });
+
+    it('includes cancel button', () => {
+      const blocks = buildSandboxSelectionBlocks('workspace-write');
+      const cancelBlock = blocks.find((b) => b.block_id === 'sandbox_cancel');
+      expect(cancelBlock).toBeDefined();
+      const elements = cancelBlock?.elements as Array<{ action_id: string }>;
+      expect(elements[0].action_id).toBe('sandbox_picker_cancel');
+    });
+  });
+
+  describe('buildSandboxPickerCancelledBlocks', () => {
+    it('shows cancellation message', () => {
+      const blocks = buildSandboxPickerCancelledBlocks();
+      expect(blocks[0].text?.text).toContain('cancelled');
     });
   });
 

@@ -554,6 +554,30 @@ export function buildPolicySelectionBlocks(currentPolicy: ApprovalPolicy): Block
         },
       ],
     },
+    {
+      type: 'actions',
+      block_id: 'policy_cancel',
+      elements: [{
+        type: 'button',
+        text: { type: 'plain_text', text: 'Cancel' },
+        action_id: 'policy_picker_cancel',
+      }],
+    },
+  ];
+}
+
+/**
+ * Build blocks for policy picker cancellation.
+ */
+export function buildPolicyPickerCancelledBlocks(): Block[] {
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: ':x: Policy selection cancelled.',
+      },
+    },
   ];
 }
 
@@ -643,6 +667,30 @@ export function buildSandboxSelectionBlocks(currentMode?: SandboxMode): Block[] 
         button('workspace-write', ':memo: workspace-write'),
         button('danger-full-access', ':warning: danger-full-access'),
       ],
+    },
+    {
+      type: 'actions',
+      block_id: 'sandbox_cancel',
+      elements: [{
+        type: 'button',
+        text: { type: 'plain_text', text: 'Cancel' },
+        action_id: 'sandbox_picker_cancel',
+      }],
+    },
+  ];
+}
+
+/**
+ * Build blocks for sandbox picker cancellation.
+ */
+export function buildSandboxPickerCancelledBlocks(): Block[] {
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: ':x: Sandbox selection cancelled.',
+      },
     },
   ];
 }

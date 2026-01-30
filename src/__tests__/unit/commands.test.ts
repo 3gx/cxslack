@@ -43,6 +43,7 @@ describe('Command Handlers', () => {
 
     expect(result.blocks.length).toBeGreaterThan(0);
     expect(result.blocks[0].text?.text).toContain('Select Approval Policy');
+    expect(result.showPolicySelection).toBe(true);
   });
 
   it('returns error for invalid policy', async () => {
@@ -189,6 +190,7 @@ describe('Command Handlers', () => {
       const codex = { getSandboxMode: () => 'workspace-write' } as any;
       const result = await handleSandboxCommand({ ...baseContext, text: '' }, codex);
       expect(result.text).toContain('Select sandbox mode');
+      expect(result.showSandboxSelection).toBe(true);
     });
 
     it('returns error for invalid mode', async () => {
