@@ -266,7 +266,8 @@ describe('buildActivityLogText', () => {
 
     const text = buildActivityLogText(entries);
 
-    expect(text).toContain(':white_check_mark:'); // Completed tool uses checkmark
+    expect(text).toContain(':computer:'); // Tool emoji, not checkmark
+    expect(text).not.toContain(':white_check_mark:');
     expect(text).toContain('Bash');
     expect(text).toContain('2.5s');
   });

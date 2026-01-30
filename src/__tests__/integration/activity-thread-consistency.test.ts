@@ -76,7 +76,7 @@ describe('Activity Thread Consistency', () => {
       expect(threadFormat).toContain(':memo:');
     });
 
-    it('uses appropriate emoji for tool_complete in main vs thread', () => {
+    it('uses tool emoji for tool_complete in both main and thread', () => {
       const entry: ActivityEntry = {
         type: 'tool_complete',
         timestamp: Date.now(),
@@ -92,10 +92,10 @@ describe('Activity Thread Consistency', () => {
       // Thread message format
       const threadFormat = formatThreadActivityEntry(entry);
 
-      // Live Activity: always checkmark for completed
-      expect(mainFormat).toContain(':white_check_mark:');
+      // Both use tool-specific emoji, NOT checkmark
+      expect(mainFormat).toContain(':mag:'); // Read tool emoji
+      expect(mainFormat).not.toContain(':white_check_mark:');
 
-      // Thread Activity: tool-specific emoji (intentional divergence)
       expect(threadFormat).toContain(':mag:'); // Read tool emoji
       expect(threadFormat).not.toContain(':white_check_mark:');
     });

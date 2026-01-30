@@ -294,7 +294,7 @@ export class ActivityThreadManager {
           outputHint = ` → \`${truncated}${ellipsis}\``;
         }
 
-        return `:white_check_mark: *${normalizeToolName(entry.tool || '')}*${inputSummary}${resultSummary}${outputHint}${duration}${errorFlag}`;
+        return `${emoji} *${normalizeToolName(entry.tool || '')}*${inputSummary}${resultSummary}${outputHint}${duration}${errorFlag}`;
       }
       case 'generating':
         return `:memo: *Generating...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;

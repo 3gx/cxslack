@@ -433,7 +433,8 @@ describe('Live Activity formatEntry', () => {
 
     const result = (manager as any).formatEntry(entry);
 
-    expect(result).toContain(':white_check_mark:');
+    expect(result).toContain(':computer:'); // Tool emoji, not checkmark
+    expect(result).not.toContain(':white_check_mark:');
     expect(result).toContain('*Bash*');
     expect(result).toContain('`npm run build 2>&1`');
     expect(result).toContain('→');
