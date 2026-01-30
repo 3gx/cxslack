@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { updateSourceMessageWithForkLink } from '../../slack-bot.js';
+import { updateSourceMessageWithForkLink, restoreForkHereButton } from '../../slack-bot.js';
 
 function buildMessage(ts: string) {
   return {
@@ -42,7 +42,10 @@ describe('updateSourceMessageWithForkLink', () => {
       },
     };
 
-    await updateSourceMessageWithForkLink(client, 'C_SOURCE', '111.222', 'C_FORK');
+    await updateSourceMessageWithForkLink(client, 'C_SOURCE', '111.222', 'C_FORK', {
+      conversationKey: 'C_SOURCE:111.222',
+      turnId: 'turn_1',
+    });
 
     expect(client.conversations.history).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -69,6 +72,7 @@ describe('updateSourceMessageWithForkLink', () => {
     expect(actionsBlock).toBeDefined();
     expect(actionsBlock.elements.some((el: any) => el.action_id?.startsWith('fork_'))).toBe(false);
     expect(actionsBlock.elements.some((el: any) => el.action_id === 'other_action')).toBe(true);
+    expect(actionsBlock.elements.some((el: any) => el.action_id?.startsWith('refresh_fork_'))).toBe(true);
   });
 
   it('uses conversations.replies for thread messages and targets the reply', async () => {
@@ -86,7 +90,11 @@ describe('updateSourceMessageWithForkLink', () => {
       },
     };
 
-    await updateSourceMessageWithForkLink(client, 'C_THREAD', replyTs, 'C_FORK', parentTs);
+    await updateSourceMessageWithForkLink(client, 'C_THREAD', replyTs, 'C_FORK', {
+      threadTs: parentTs,
+      conversationKey: 'C_THREAD:222.000',
+      turnId: 'turn_thread_1',
+    });
 
     expect(client.conversations.replies).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -104,5 +112,63 @@ describe('updateSourceMessageWithForkLink', () => {
         block.elements?.[0]?.text?.includes('Forked to <#C_FORK>')
     );
     expect(contextBlock).toBeDefined();
+  });
+
+  it('restores fork button and removes refresh/context blocks', async () => {
+    const sourceMessageTs = '333.444';
+    const messageWithRefresh = {
+      ts: sourceMessageTs,
+      text: 'Activity log',
+      blocks: [
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: 'Activity log' },
+        },
+        {
+          type: 'context',
+          elements: [{ type: 'mrkdwn', text: ':twisted_rightwards_arrows: Forked to <#C_FORK>' }],
+        },
+        {
+          type: 'actions',
+          elements: [
+            {
+              type: 'button',
+              action_id: 'refresh_fork_C_SOURCE',
+              text: { type: 'plain_text', text: '🔄 Refresh fork' },
+            },
+          ],
+        },
+      ],
+    };
+
+    const client = {
+      conversations: {
+        history: vi.fn().mockResolvedValue({ messages: [messageWithRefresh] }),
+        replies: vi.fn(),
+      },
+      chat: {
+        update: vi.fn().mockResolvedValue({ ok: true }),
+      },
+    };
+
+    await restoreForkHereButton(client, {
+      sourceChannelId: 'C_SOURCE',
+      sourceMessageTs,
+      conversationKey: 'C_SOURCE:333.444',
+      turnId: 'turn_restore_1',
+    });
+
+    const updateCall = client.chat.update.mock.calls[0][0];
+    const hasForkContext = updateCall.blocks.some(
+      (block: any) =>
+        block.type === 'context' &&
+        block.elements?.[0]?.text?.includes('Forked to')
+    );
+    expect(hasForkContext).toBe(false);
+
+    const actionsBlock = updateCall.blocks.find((block: any) => block.type === 'actions');
+    expect(actionsBlock).toBeDefined();
+    expect(actionsBlock.elements.some((el: any) => el.action_id?.startsWith('refresh_fork_'))).toBe(false);
+    expect(actionsBlock.elements.some((el: any) => el.action_id?.startsWith('fork_'))).toBe(true);
   });
 });
