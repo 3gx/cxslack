@@ -243,6 +243,41 @@ describe('flushActivityBatchToThread', () => {
     // Should post new message since there's no existing ts to update
     expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(1);
   });
+
+  it('skips tool_start if tool_complete exists in entries (race condition fix)', async () => {
+    const key = 'C123:race';
+    const toolUseId = 'tool-race-test';
+
+    // Simulate race condition: both tool_start and tool_complete added before flush
+    manager.addEntry(key, {
+      type: 'tool_start',
+      timestamp: Date.now(),
+      tool: 'Bash',
+      toolInput: 'npm test',
+      toolUseId,
+    });
+
+    manager.addEntry(key, {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Bash',
+      toolInput: 'npm test',
+      toolUseId,
+      durationMs: 1000,
+      toolOutputPreview: 'All tests passed',
+    });
+
+    // Flush both at once (simulating race condition where both are pending)
+    await flushActivityBatchToThread(manager, key, mockClient, 'C123', '456.789', { force: true });
+
+    // Should post only ONE message (the tool_complete), not both
+    expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(1);
+
+    // The posted message should be the completed one, not in-progress
+    const postCall = mockClient.chat.postMessage.mock.calls[0][0];
+    expect(postCall.text).not.toContain('[in progress]');
+    expect(postCall.text).toContain('Bash');
+  });
 });
 
 describe('postThinkingToThread', () => {

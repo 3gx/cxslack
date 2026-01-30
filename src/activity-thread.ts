@@ -675,7 +675,21 @@ export async function flushActivityBatchToThread(
   const newEntries = entries.slice(startIndex);
   if (newEntries.length === 0) return;
 
+  // Build set of completed tool IDs from ALL entries to handle race conditions
+  // (tool_complete might arrive before tool_start flush completes)
+  const completedIds = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type === 'tool_complete' && entry.toolUseId) {
+      completedIds.add(entry.toolUseId);
+    }
+  }
+
   for (const entry of newEntries) {
+    // Skip tool_start if tool_complete already exists (race condition fix)
+    if (entry.type === 'tool_start' && entry.toolUseId && completedIds.has(entry.toolUseId)) {
+      if (batch) batch.postedCount += 1;
+      continue;
+    }
     const text = formatThreadActivityEntry(entry);
     if (!text) {
       if (batch) batch.postedCount += 1;
