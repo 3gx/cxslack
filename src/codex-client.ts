@@ -236,7 +236,7 @@ export class CodexClient extends EventEmitter {
       maxRestartAttempts: config.maxRestartAttempts ?? 5,
       initialBackoffMs: config.initialBackoffMs ?? 1000,
       maxBackoffMs: config.maxBackoffMs ?? 30000,
-      sandboxMode: config.sandboxMode ?? 'workspace-write',
+      sandboxMode: config.sandboxMode ?? 'danger-full-access',
     };
     this.sandboxMode = this.config.sandboxMode;
   }
@@ -250,7 +250,10 @@ export class CodexClient extends EventEmitter {
     }
 
     this.isShuttingDown = false;
-    const args = this.sandboxMode ? ['-s', this.sandboxMode, 'app-server'] : ['app-server'];
+    // Use -c sandbox_mode config to properly disable sandbox for .git writes
+    const args = this.sandboxMode
+      ? ['app-server', '-c', `sandbox_mode="${this.sandboxMode}"`]
+      : ['app-server'];
     const proc = spawn('codex', args, {
       stdio: ['pipe', 'pipe', 'inherit'], // stdin, stdout piped; stderr to console
     });

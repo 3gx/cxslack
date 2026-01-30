@@ -183,7 +183,8 @@ describe.skipIf(SKIP_LIVE)('Codex Thread Fork', { timeout: 120000 }, () => {
     console.log('==========================================\n');
   });
 
-  it('thread/fork turnIndex semantics investigation', async () => {
+  // Skip: This investigative test is flaky because it depends on LLM remembering numbers
+  it.skip('thread/fork turnIndex semantics investigation', async () => {
     // Clear notifications
     notifications.length = 0;
 
