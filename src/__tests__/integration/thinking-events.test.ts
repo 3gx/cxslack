@@ -257,4 +257,56 @@ describe('Thinking/Reasoning Events', () => {
 
     streaming.stopStreaming(conversationKey);
   });
+
+  it('thinking content is posted on turn:completed even after streaming header was posted', async () => {
+    const context = createContext();
+    streaming.startStreaming(context);
+    const conversationKey = makeConversationKey(context.channelId, context.threadTs);
+
+    const state = (streaming as any).states.get(conversationKey);
+
+    // Emit thinking:started - this sets thinkingPostedDuringStreaming=true after flush
+    codex.emit('thinking:started', { itemId: 'reasoning-content-test' });
+
+    // Wait for async mutex flush to complete
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Emit thinking:delta with substantial content (> 100 chars required)
+    const thinkingContent = 'This is the actual thinking content that should be posted. '.repeat(5);
+    codex.emit('thinking:delta', { content: thinkingContent });
+
+    // Wait for async mutex flush
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Verify flag was set during streaming (this is what used to block content posting)
+    expect(state.thinkingPostedDuringStreaming).toBe(true);
+
+    // Verify content was accumulated
+    expect(state.thinkingContent).toBe(thinkingContent);
+    expect(state.thinkingContent.length).toBeGreaterThan(100);
+
+    // Clear mock calls from streaming phase
+    (slack.chat.postMessage as any).mockClear();
+
+    // Emit turn:completed - this should post full thinking content
+    codex.emit('turn:completed', {
+      threadId: context.threadId,
+      turnId: context.turnId,
+      status: 'completed',
+    });
+
+    // Wait for async handlers
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // FIX VERIFICATION: postThinkingToThread should have been called
+    // It posts thinking content via chat.postMessage with the full content
+    const postCalls = (slack.chat.postMessage as any).mock.calls;
+    const thinkingPost = postCalls.find((call: any[]) => {
+      const text = call[0]?.text || '';
+      return text.includes(thinkingContent) || text.includes('Thinking');
+    });
+
+    // The fix ensures thinking content is posted even when thinkingPostedDuringStreaming=true
+    expect(thinkingPost).toBeDefined();
+  });
 });

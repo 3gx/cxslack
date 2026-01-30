@@ -651,9 +651,10 @@ export class StreamingManager {
           });
 
           // Integration point 3: Post thinking to thread when thinking completes
-          // NOW safe to check flag - all streaming flushes have completed
-          // Only post if NOT already posted during streaming (fallback for edge cases)
-          if (state.thinkingContent && state.thinkingContent.length > 100 && !state.thinkingPostedDuringStreaming) {
+          // FIX: Always post thinking content here. The streaming flush only posts headers
+          // (":bulb: Thinking... [X chars]"), not actual content. postThinkingToThread posts
+          // the full content as a separate message.
+          if (state.thinkingContent && state.thinkingContent.length > 100) {
             await postThinkingToThread(
               this.slack,
               channelId,
