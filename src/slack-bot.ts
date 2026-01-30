@@ -31,6 +31,7 @@ import {
   recordTurn,
   deleteChannelSession,
   saveModelSettings,
+  saveApprovalPolicy,
 } from './session-manager.js';
 import {
   buildActivityBlocks,
@@ -538,11 +539,7 @@ function setupEventHandlers(): void {
 
     const currentPolicy = getEffectiveApprovalPolicy(channelId, threadTs);
 
-    if (threadTs) {
-      await saveThreadSession(channelId, threadTs, { approvalPolicy: newPolicy });
-    } else {
-      await saveSession(channelId, { approvalPolicy: newPolicy });
-    }
+    await saveApprovalPolicy(channelId, threadTs, newPolicy);
 
     // Update active context for status display (applies next turn)
     const conversationKey = makeConversationKey(channelId, threadTs);

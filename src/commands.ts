@@ -19,6 +19,7 @@ import {
   saveSession,
   getThreadSession,
   saveThreadSession,
+  saveApprovalPolicy,
   clearSession,
   getEffectiveApprovalPolicy,
   getEffectiveWorkingDir,
@@ -149,12 +150,8 @@ export async function handlePolicyCommand(
     };
   }
 
-  // Update session
-  if (threadTs) {
-    await saveThreadSession(channelId, threadTs, { approvalPolicy: newPolicy });
-  } else {
-    await saveSession(channelId, { approvalPolicy: newPolicy });
-  }
+  // Update session (channel + thread for inheritance)
+  await saveApprovalPolicy(channelId, threadTs, newPolicy);
 
   return {
     blocks: buildPolicyStatusBlocks({ currentPolicy, newPolicy }),

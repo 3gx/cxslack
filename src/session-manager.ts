@@ -324,6 +324,21 @@ export async function saveModelSettings(
 }
 
 /**
+ * Save approval policy for both channel and thread (if provided).
+ * Ensures new threads inherit the latest selection.
+ */
+export async function saveApprovalPolicy(
+  channelId: string,
+  threadTs: string | undefined,
+  approvalPolicy: ApprovalPolicy
+): Promise<void> {
+  await saveSession(channelId, { approvalPolicy });
+  if (threadTs) {
+    await saveThreadSession(channelId, threadTs, { approvalPolicy });
+  }
+}
+
+/**
  * Result of getting or creating a thread session.
  */
 export interface ThreadSessionResult {
