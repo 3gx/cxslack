@@ -97,7 +97,8 @@ const TOOL_EMOJI: Record<string, string> = {
  * Get emoji for a tool name.
  */
 export function getToolEmoji(tool: string): string {
-  return TOOL_EMOJI[tool] || ':gear:';
+  const normalized = normalizeToolName(tool);
+  return TOOL_EMOJI[normalized] || ':gear:';
 }
 
 /**

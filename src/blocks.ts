@@ -1632,12 +1632,37 @@ function truncateUrl(url: string): string {
 }
 
 /**
- * Normalize tool name for comparison.
- * Handles MCP-style names like "mcp__claude-code__Read" -> "Read"
+ * Canonical tool name mapping.
+ * Maps alternative/legacy tool names to their display names.
+ */
+const TOOL_NAME_ALIASES: Record<string, string> = {
+  commandexecution: 'Bash',
+  fileread: 'Read',
+  filewrite: 'Write',
+  shell: 'Bash',
+};
+
+/**
+ * Normalize tool name for display and comparison.
+ * Handles:
+ * - MCP-style names like "mcp__claude-code__Read" -> "Read"
+ * - Legacy names like "commandExecution" -> "Bash"
+ * - Case normalization
  */
 export function normalizeToolName(toolName: string): string {
-  if (!toolName.includes('__')) return toolName;
-  return toolName.split('__').pop()!;
+  // Handle MCP-style names first
+  let name = toolName;
+  if (name.includes('__')) {
+    name = name.split('__').pop()!;
+  }
+
+  // Check for aliases (case-insensitive)
+  const alias = TOOL_NAME_ALIASES[name.toLowerCase()];
+  if (alias) {
+    return alias;
+  }
+
+  return name;
 }
 
 /**

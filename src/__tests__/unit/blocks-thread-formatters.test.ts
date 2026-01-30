@@ -355,6 +355,15 @@ describe('normalizeToolName', () => {
     expect(normalizeToolName('mcp__claude-code__Read')).toBe('Read');
     expect(normalizeToolName('mcp__server__ToolName')).toBe('ToolName');
   });
+
+  it('maps legacy tool names to canonical names', () => {
+    expect(normalizeToolName('commandExecution')).toBe('Bash');
+    expect(normalizeToolName('CommandExecution')).toBe('Bash');
+    expect(normalizeToolName('fileRead')).toBe('Read');
+    expect(normalizeToolName('FileRead')).toBe('Read');
+    expect(normalizeToolName('fileWrite')).toBe('Write');
+    expect(normalizeToolName('shell')).toBe('Bash');
+  });
 });
 
 describe('getToolEmoji', () => {
@@ -363,6 +372,13 @@ describe('getToolEmoji', () => {
     expect(getToolEmoji('Edit')).toBe(':memo:');
     expect(getToolEmoji('Bash')).toBe(':computer:');
     expect(getToolEmoji('Task')).toBe(':robot_face:');
+  });
+
+  it('returns correct emoji for legacy tool names', () => {
+    expect(getToolEmoji('commandExecution')).toBe(':computer:');
+    expect(getToolEmoji('CommandExecution')).toBe(':computer:');
+    expect(getToolEmoji('fileRead')).toBe(':mag:');
+    expect(getToolEmoji('shell')).toBe(':computer:');
   });
 
   it('returns default emoji for unknown tools', () => {
