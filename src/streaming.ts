@@ -258,6 +258,7 @@ export function parseConversationKey(key: string): { channelId: string; threadTs
 export class StreamingManager {
   private contexts = new Map<string, StreamingContext>();
   private states = new Map<string, StreamingState>();
+  private turnIdToKey = new Map<string, string>();
   private slack: WebClient;
   private codex: CodexClient;
   private approvalCallback?: (request: ApprovalRequest, context: StreamingContext) => void;
@@ -300,6 +301,9 @@ export class StreamingManager {
       // Remove emoji from OLD message if still present (best effort)
       const existingContext = this.contexts.get(key);
       if (existingContext) {
+        if (existingContext.turnId) {
+          this.turnIdToKey.delete(existingContext.turnId);
+        }
         removeProcessingEmoji(this.slack, existingContext.channelId, existingContext.originalTs)
           .catch(() => { /* ignore - may already be removed */ });
       }
@@ -345,6 +349,9 @@ export class StreamingManager {
 
     this.contexts.set(key, context);
     this.states.set(key, state);
+    if (context.turnId) {
+      this.turnIdToKey.set(context.turnId, key);
+    }
 
     // Add "Analyzing request..." entry
     this.activityManager.addEntry(key, {
@@ -380,6 +387,10 @@ export class StreamingManager {
     }
     cleanupMutex(conversationKey);
     this.activityManager.clearEntries(conversationKey);
+    const context = this.contexts.get(conversationKey);
+    if (context?.turnId) {
+      this.turnIdToKey.delete(context.turnId);
+    }
     this.contexts.delete(conversationKey);
     this.states.delete(conversationKey);
   }
@@ -407,6 +418,7 @@ export class StreamingManager {
     }
     this.contexts.clear();
     this.states.clear();
+    this.turnIdToKey.clear();
   }
 
   /**
@@ -506,8 +518,16 @@ export class StreamingManager {
    * Find context by turn ID.
    */
   findContextByTurnId(turnId: string): { key: string; context: StreamingContext } | undefined {
+    const mappedKey = this.turnIdToKey.get(turnId);
+    if (mappedKey) {
+      const context = this.contexts.get(mappedKey);
+      if (context) {
+        return { key: mappedKey, context };
+      }
+    }
     for (const [key, context] of this.contexts) {
       if (context.turnId === turnId) {
+        this.turnIdToKey.set(turnId, key);
         return { key, context };
       }
     }
@@ -526,12 +546,41 @@ export class StreamingManager {
     return undefined;
   }
 
+  /**
+   * Find the most recently-added context for a thread ID.
+   * This avoids ambiguous matches when multiple Slack threads share a Codex thread.
+   */
+  private findLatestContextByThreadId(threadId: string): { key: string; context: StreamingContext } | undefined {
+    let found: { key: string; context: StreamingContext } | undefined;
+    for (const [key, context] of this.contexts) {
+      if (context.threadId === threadId) {
+        found = { key, context };
+      }
+    }
+    return found;
+  }
+
+  /**
+   * Register a turnId for a given conversation key.
+   * Used by slack-bot after startTurn returns.
+   */
+  registerTurnId(conversationKey: string, turnId: string): void {
+    if (!turnId) return;
+    const context = this.contexts.get(conversationKey);
+    if (!context) return;
+    if (context.turnId && context.turnId !== turnId) {
+      this.turnIdToKey.delete(context.turnId);
+    }
+    context.turnId = turnId;
+    this.turnIdToKey.set(turnId, conversationKey);
+  }
+
   private setupEventHandlers(): void {
     // Turn started - update turnId and check for pending abort
     this.codex.on('turn:started', ({ threadId, turnId }) => {
-      const found = this.findContextByThreadId(threadId);
+      const found = this.findContextByTurnId(turnId) ?? this.findLatestContextByThreadId(threadId);
       if (found) {
-        found.context.turnId = turnId;
+        this.registerTurnId(found.key, turnId);
         const state = this.states.get(found.key);
         if (state?.pendingAbort) {
           console.log(`[streaming] Executing pending abort for turnId: ${turnId}`);
@@ -549,9 +598,9 @@ export class StreamingManager {
 
     // context:turnId - backup source for turnId from exec_command notifications
     this.codex.on('context:turnId', ({ threadId, turnId }) => {
-      const found = this.findContextByThreadId(threadId);
+      const found = this.findContextByTurnId(turnId) ?? this.findLatestContextByThreadId(threadId);
       if (found && !found.context.turnId) {
-        found.context.turnId = turnId;
+        this.registerTurnId(found.key, turnId);
         console.log(`[streaming] Got turnId from context:turnId: ${turnId}`);
         const state = this.states.get(found.key);
         if (state?.pendingAbort) {
@@ -573,7 +622,7 @@ export class StreamingManager {
       console.log(`[streaming] turn:completed HANDLER: threadId="${threadId}" status="${status}"`);
       console.log(`[streaming] Current contexts: ${Array.from(this.contexts.entries()).map(([k, c]) => `${k}→${c.threadId}`).join(', ')}`);
 
-      const found = this.findContextByThreadId(threadId);
+      const found = this.findContextByTurnId(turnId) ?? this.findLatestContextByThreadId(threadId);
       if (!found) {
         console.log(`[streaming] turn:completed: NO CONTEXT FOUND for threadId="${threadId}"`);
         return;
@@ -582,6 +631,9 @@ export class StreamingManager {
       console.log(`[streaming] turn:completed: FOUND context key="${found.key}"`);
       const state = this.states.get(found.key);
       if (state) {
+          if (turnId && found.context.turnId !== turnId) {
+            this.registerTurnId(found.key, turnId);
+          }
           // IMMEDIATELY stop the timer
           if (state.updateTimer) {
             clearInterval(state.updateTimer);
@@ -759,6 +811,9 @@ export class StreamingManager {
           // Without this, multiple top-level messages sharing the same Codex threadId
           // would accumulate contexts, and findContextByThreadId would always return
           // the first (oldest) one, causing turn:completed to be handled on wrong context.
+          if (found.context.turnId) {
+            this.turnIdToKey.delete(found.context.turnId);
+          }
           this.contexts.delete(found.key);
           this.states.delete(found.key);
           console.log(`[streaming] Cleaned up context and state for key="${found.key}"`);

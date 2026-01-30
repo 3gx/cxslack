@@ -1120,8 +1120,8 @@ async function handleUserMessage(
     model: effectiveModel,
   });
 
-  // Update context with turn ID
-  streamingContext.turnId = turnId;
+  // Update context with turn ID (and register for turnId routing)
+  streamingManager.registerTurnId(conversationKey, turnId);
 
   // Record turn for fork tracking
   const turnIndex = (session as { turns?: unknown[] })?.turns?.length ?? 0;
