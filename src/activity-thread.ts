@@ -76,6 +76,8 @@ export interface ActivityEntry {
   thinkingContent?: string;
   thinkingTruncated?: boolean;
   thinkingAttachmentLink?: string;
+  threadMessageTs?: string;
+  threadMessageLink?: string;
 
   // Result metrics (computed from input for Edit/Write, from output for Bash)
   lineCount?: number;           // Read/Write/Bash: lines in result/content
@@ -318,16 +320,17 @@ export class ActivityThreadManager {
   private formatEntry(entry: ActivityEntry): string {
     const emoji = entry.tool ? getToolEmoji(entry.tool) : ':gear:';
     const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
+    const jump = entry.threadMessageLink ? ` (<${entry.threadMessageLink}|jump>)` : '';
 
     switch (entry.type) {
       case 'starting':
-        return ':brain: *Analyzing request...*';
+        return `:brain: *Analyzing request...*${jump}`;
       case 'thinking':
-        return `:brain: *Thinking...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+        return `:brain: *Thinking...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}${jump}`;
       case 'tool_start': {
         // Pass toolInput directly - formatToolInputSummary handles both string and object inputs
         const inputSummary = formatToolInputSummary(entry.tool || '', entry.toolInput);
-        return `${emoji} *${normalizeToolName(entry.tool || '')}*${inputSummary} [in progress]`;
+        return `${emoji} *${normalizeToolName(entry.tool || '')}*${inputSummary} [in progress]${jump}`;
       }
       case 'tool_complete': {
         // Pass toolInput directly - formatToolInputSummary handles both string and object inputs
@@ -344,16 +347,16 @@ export class ActivityThreadManager {
           outputHint = ` → \`${truncated}${ellipsis}\``;
         }
 
-        return `${emoji} *${normalizeToolName(entry.tool || '')}*${inputSummary}${resultSummary}${outputHint}${duration}${errorFlag}`;
+        return `${emoji} *${normalizeToolName(entry.tool || '')}*${inputSummary}${resultSummary}${outputHint}${duration}${errorFlag}${jump}`;
       }
       case 'generating':
-        return `:memo: *Generating...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+        return `:memo: *Generating...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}${jump}`;
       case 'error':
-        return `:x: ${entry.message || 'Error'}`;
+        return `:x: ${entry.message || 'Error'}${jump}`;
       case 'aborted':
-        return ':octagonal_sign: *Aborted by user*';
+        return `:octagonal_sign: *Aborted by user*${jump}`;
       default:
-        return `${emoji} ${entry.message || entry.type}${duration}`;
+        return `${emoji} ${entry.message || entry.type}${duration}${jump}`;
     }
   }
 }
@@ -885,6 +888,17 @@ export async function flushActivityBatchToThread(
 
       if (postedTs && options?.mapActivityTs) {
         options.mapActivityTs(postedTs, entry);
+      }
+
+      if (postedTs) {
+        entry.threadMessageTs = postedTs;
+        if (!entry.threadMessageLink) {
+          try {
+            entry.threadMessageLink = await getMessagePermalink(client, channel, postedTs);
+          } catch (err) {
+            console.error('[flushActivityBatchToThread] permalink failed:', err);
+          }
+        }
       }
     } catch (err) {
       console.error('[flushActivityBatchToThread] Failed:', err);

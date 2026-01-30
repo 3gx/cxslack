@@ -35,6 +35,7 @@ function createMockClient() {
     chat: {
       postMessage: vi.fn().mockResolvedValue({ ts: 'posted-ts-123' }),
       update: vi.fn().mockResolvedValue({ ok: true }),
+      getPermalink: vi.fn().mockResolvedValue({ ok: true, permalink: 'https://slack.com/archives/C123/p123456' }),
       postEphemeral: vi.fn().mockResolvedValue({ ok: true }),
     },
     files: {

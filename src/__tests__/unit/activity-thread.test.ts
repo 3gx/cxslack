@@ -326,6 +326,20 @@ describe('buildActivityLogText', () => {
     expect(text).toContain('2.5s');
   });
 
+  it('adds jump link when threadMessageLink is present', () => {
+    const entries: ActivityEntry[] = [
+      {
+        type: 'starting',
+        timestamp: Date.now(),
+        threadMessageLink: 'https://slack.com/archives/C123/p123456',
+      },
+    ];
+
+    const text = buildActivityLogText(entries);
+
+    expect(text).toContain('<https://slack.com/archives/C123/p123456|jump>');
+  });
+
   it('formats generating entry with char count', () => {
     const entries: ActivityEntry[] = [
       { type: 'generating', timestamp: Date.now(), charCount: 500 },

@@ -255,6 +255,10 @@ interface StreamingState {
   thinkingComplete: boolean;
   /** Thinking message ts for in-place updates (ccslack parity) */
   thinkingMessageTs?: string;
+  /** Response message ts in thread (for jump links) */
+  responseMessageTs?: string;
+  /** Response message permalink (for jump links) */
+  responseMessageLink?: string;
   /** Thinking item ID (for matching complete event) */
   thinkingItemId?: string;
   /** Last posted thinking segment ID (to avoid redundant updates) */
@@ -400,6 +404,8 @@ export class StreamingManager {
       thinkingStartTime: 0,
       thinkingComplete: false,
       thinkingMessageTs: undefined,
+      responseMessageTs: undefined,
+      responseMessageLink: undefined,
       lastThinkingPostedSegmentId: undefined,
       lastThinkingPostedContent: undefined,
       postedThinkingSegmentIds: new Set(),
@@ -896,14 +902,30 @@ export class StreamingManager {
 
           // Integration point 5: Post response to thread
           if (state.text && status === 'completed') {
-            await postResponseToThread(
+            const responseTs = await postResponseToThread(
               this.slack,
               channelId,
               state.threadParentTs || originalTs,
               state.text,
               Date.now() - found.context.startTime,
               threadCharLimit
-            ).catch((err) => console.error('[streaming] Response post failed:', err));
+            ).catch((err) => {
+              console.error('[streaming] Response post failed:', err);
+              return null;
+            });
+
+            if (responseTs) {
+              state.responseMessageTs = responseTs;
+              try {
+                state.responseMessageLink = await getMessagePermalink(
+                  this.slack,
+                  channelId,
+                  responseTs
+                );
+              } catch (err) {
+                console.error('[streaming] Response permalink failed:', err);
+              }
+            }
           }
 
           // Integration point 6: Post error to thread
@@ -1635,7 +1657,11 @@ export class StreamingManager {
       // Add response preview if we have response content
       if (state.text) {
         const preview = state.text.slice(0, 200).replace(/\n/g, ' ');
-        activityText += `\n:speech_balloon: *Response* _[${state.text.length} chars]_\n> ${preview}${state.text.length > 200 ? '...' : ''}`;
+        const responseJump = state.responseMessageLink
+          ? ` (<${state.responseMessageLink}|jump>)`
+          : '';
+        activityText += `\n:speech_balloon: *Response* _[${state.text.length} chars]_` +
+          `${responseJump}\n> ${preview}${state.text.length > 200 ? '...' : ''}`;
       }
 
       const elapsedMs = Date.now() - context.startTime;
