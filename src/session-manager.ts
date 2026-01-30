@@ -308,6 +308,22 @@ export async function saveThreadSession(
 }
 
 /**
+ * Save model + reasoning for both channel and thread (if provided).
+ * Ensures new threads inherit the latest selection.
+ */
+export async function saveModelSettings(
+  channelId: string,
+  threadTs: string | undefined,
+  model: string,
+  reasoningEffort: ReasoningEffort
+): Promise<void> {
+  await saveSession(channelId, { model, reasoningEffort });
+  if (threadTs) {
+    await saveThreadSession(channelId, threadTs, { model, reasoningEffort });
+  }
+}
+
+/**
  * Result of getting or creating a thread session.
  */
 export interface ThreadSessionResult {

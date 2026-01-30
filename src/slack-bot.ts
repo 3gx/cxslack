@@ -30,6 +30,7 @@ import {
   getEffectiveThreadId,
   recordTurn,
   deleteChannelSession,
+  saveModelSettings,
 } from './session-manager.js';
 import {
   buildActivityBlocks,
@@ -674,9 +675,9 @@ function setupEventHandlers(): void {
     }
 
     // Save both model and reasoning to session
-    const reasoningEffort = reasoningValue === 'medium' ? undefined : (reasoningValue as ReasoningEffort);
+    const reasoningEffort = reasoningValue as ReasoningEffort;
     console.log(`[model] Saving to session: channel=${channelId}, thread=${threadTs}, model=${modelValue}, reasoning=${reasoningEffort}`);
-    await saveThreadSession(channelId, threadTs, { model: modelValue, reasoningEffort });
+    await saveModelSettings(channelId, threadTs, modelValue, reasoningEffort);
 
     // Verify save worked
     const savedSession = getThreadSession(channelId, threadTs);

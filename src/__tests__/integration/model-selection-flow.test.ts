@@ -19,8 +19,10 @@ import {
   saveThreadSession,
   getSession,
   saveSession,
+  saveModelSettings,
   loadSessions,
 } from '../../session-manager.js';
+import type { ReasoningEffort } from '../../codex-client.js';
 
 // Mock fs for session persistence tests
 vi.mock('fs');
@@ -256,8 +258,7 @@ describe('Model Selection Flow Integration', () => {
       const reasoningValue = 'xhigh';
 
       // Initial state: channel exists but no thread session
-      mockFs.existsSync.mockReturnValue(true);
-      mockFs.readFileSync.mockReturnValue(JSON.stringify({
+      let sessionStore = {
         channels: {
           [channelId]: {
             threadId: null,
@@ -272,8 +273,13 @@ describe('Model Selection Flow Integration', () => {
             threads: {},
           },
         },
-      }));
-      mockFs.writeFileSync.mockImplementation(() => {});
+      };
+
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockImplementation(() => JSON.stringify(sessionStore));
+      mockFs.writeFileSync.mockImplementation((_, data) => {
+        sessionStore = JSON.parse(data as string);
+      });
 
       // Save model to thread session (simulates reasoning_select handler)
       await saveThreadSession(channelId, threadTs, {
@@ -283,9 +289,47 @@ describe('Model Selection Flow Integration', () => {
 
       // Verify it was written
       expect(mockFs.writeFileSync).toHaveBeenCalled();
-      const writtenData = JSON.parse(mockFs.writeFileSync.mock.calls[0][1] as string);
+      const lastWrite = mockFs.writeFileSync.mock.calls[mockFs.writeFileSync.mock.calls.length - 1];
+      const writtenData = JSON.parse(lastWrite[1] as string);
       expect(writtenData.channels[channelId].threads[threadTs].model).toBe(modelValue);
       expect(writtenData.channels[channelId].threads[threadTs].reasoningEffort).toBe(reasoningValue);
+    });
+
+    it('persists model + reasoning to both channel and thread sessions', async () => {
+      const channelId = 'C123';
+      const threadTs = '1234567890.000001';
+      const modelValue = 'gpt-5.2';
+      const reasoningValue: ReasoningEffort = 'medium';
+
+      let sessionStore = {
+        channels: {
+          [channelId]: {
+            threadId: null,
+            workingDir: '/test',
+            approvalPolicy: 'on-request',
+            createdAt: 1000,
+            lastActiveAt: 2000,
+            pathConfigured: false,
+            configuredPath: null,
+            configuredBy: null,
+            configuredAt: null,
+            threads: {},
+          },
+        },
+      };
+
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockImplementation(() => JSON.stringify(sessionStore));
+      mockFs.writeFileSync.mockImplementation((_, data) => {
+        sessionStore = JSON.parse(data as string);
+      });
+
+      await saveModelSettings(channelId, threadTs, modelValue, reasoningValue);
+
+      expect(sessionStore.channels[channelId].model).toBe(modelValue);
+      expect(sessionStore.channels[channelId].reasoningEffort).toBe(reasoningValue);
+      expect(sessionStore.channels[channelId].threads[threadTs].model).toBe(modelValue);
+      expect(sessionStore.channels[channelId].threads[threadTs].reasoningEffort).toBe(reasoningValue);
     });
 
     it('retrieves model from thread session for subsequent messages', () => {
