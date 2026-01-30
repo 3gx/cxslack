@@ -63,6 +63,9 @@ export interface ActivityEntry {
 
   // In-progress tracking for thinking
   thinkingInProgress?: boolean;      // True while thinking is streaming
+
+  /** Unique ID for thinking segment (like toolUseId for tools) */
+  thinkingSegmentId?: string;
 }
 
 /**
@@ -75,6 +78,7 @@ export interface ActivityBatch {
   lastPostTime: number; // For rate limiting
   postedCount: number; // How many entries have been emitted as thread replies
   toolIdToPostedTs: Map<string, string>; // toolUseId → message ts for update-in-place
+  thinkingIdToPostedTs: Map<string, string>; // thinkingSegmentId → message ts for update-in-place
 }
 
 // Spinner frames for animated status
@@ -117,6 +121,7 @@ export class ActivityThreadManager {
       lastPostTime: 0,
       postedCount: 0,
       toolIdToPostedTs: new Map(),
+      thinkingIdToPostedTs: new Map(),
     };
     batch.entries.push(entry);
     this.batches.set(conversationKey, batch);
@@ -649,10 +654,16 @@ export async function flushActivityBatchToThread(
 
     try {
       // Check if this is a tool_complete and we have an existing message to update
-      const existingTs = entry.type === 'tool_complete' && entry.toolUseId && batch?.toolIdToPostedTs
+      const existingToolTs = entry.type === 'tool_complete' && entry.toolUseId && batch?.toolIdToPostedTs
         ? batch.toolIdToPostedTs.get(entry.toolUseId)
         : undefined;
 
+      // Check for THINKING update-in-place (same pattern as tools)
+      const existingThinkingTs = entry.type === 'thinking' && entry.thinkingSegmentId && batch?.thinkingIdToPostedTs
+        ? batch.thinkingIdToPostedTs.get(entry.thinkingSegmentId)
+        : undefined;
+
+      const existingTs = existingToolTs || existingThinkingTs;
       let postedTs: string | undefined;
 
       if (existingTs) {
@@ -693,6 +704,11 @@ export async function flushActivityBatchToThread(
         // Track tool_start message ts for update-in-place on completion
         if (entry.type === 'tool_start' && entry.toolUseId && postedTs && batch?.toolIdToPostedTs) {
           batch.toolIdToPostedTs.set(entry.toolUseId, postedTs);
+        }
+
+        // Track thinking message ts for update-in-place (same pattern as tools)
+        if (entry.type === 'thinking' && entry.thinkingSegmentId && postedTs && batch?.thinkingIdToPostedTs) {
+          batch.thinkingIdToPostedTs.set(entry.thinkingSegmentId, postedTs);
         }
       }
 

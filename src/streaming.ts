@@ -198,6 +198,12 @@ interface StreamingState {
   postedBatchTs: string | null;
   /** Race condition fix - track posted tool use IDs */
   postedBatchToolUseIds: Set<string>;
+  /** Current thinking segment ID counter (increments when tool starts between thinking) */
+  thinkingSegmentCounter: number;
+  /** Current segment ID being streamed */
+  currentThinkingSegmentId?: string;
+  /** Flag to skip duplicate post in turn:completed (only set on successful flush) */
+  thinkingPostedDuringStreaming: boolean;
 }
 
 /**
@@ -303,6 +309,10 @@ export class StreamingManager {
       lastActivityPostTime: 0,
       postedBatchTs: null,
       postedBatchToolUseIds: new Set(),
+      // Thinking segment tracking for update-in-place
+      thinkingSegmentCounter: 0,
+      currentThinkingSegmentId: undefined,
+      thinkingPostedDuringStreaming: false,
     };
 
     this.contexts.set(key, context);
@@ -633,8 +643,17 @@ export class StreamingManager {
             }
           ).catch((err) => console.error('[streaming] Final batch flush failed:', err));
 
+          // FIX: Wait for any pending thinking flushes to complete before checking flag
+          // turn:completed is async, so we CAN await here (unlike the sync event handlers)
+          const mutex = getUpdateMutex(found.key);
+          await mutex.runExclusive(async () => {
+            // Empty body - just waits for any queued flush work to complete
+          });
+
           // Integration point 3: Post thinking to thread when thinking completes
-          if (state.thinkingContent && state.thinkingContent.length > 100) {
+          // NOW safe to check flag - all streaming flushes have completed
+          // Only post if NOT already posted during streaming (fallback for edge cases)
+          if (state.thinkingContent && state.thinkingContent.length > 100 && !state.thinkingPostedDuringStreaming) {
             await postThinkingToThread(
               this.slack,
               channelId,
@@ -708,6 +727,11 @@ export class StreamingManager {
               displayInput = match ? match[1] : command;
             }
           }
+
+          // FIX: Reset thinking segment tracking so next thinking gets NEW segment ID
+          // This ensures thinking AFTER a tool starts appears as a separate message
+          state.currentThinkingSegmentId = undefined;
+          state.thinkingSegmentCounter = (state.thinkingSegmentCounter || 0) + 1;
 
           // Track tool start (only actual tools now)
           // Store both display input and full toolInput for metrics extraction
@@ -922,21 +946,52 @@ export class StreamingManager {
     });
 
     // Thinking started - Codex detected a Reasoning item started
-    // Add activity entry HERE with early timestamp so it appears in correct chronological order.
-    // The actual thread message is posted by postThinkingToThread on turn completion.
+    // Add activity entry with segment ID for update-in-place.
+    // Flushes immediately to thread so thinking appears during streaming.
     this.codex.on('thinking:started', ({ itemId }) => {
       console.log(`[streaming] thinking:started itemId=${itemId}`);
       for (const [key, state] of this.states) {
         if (state.isStreaming) {
-          const isFirstThinking = !state.thinkingStartTime;
-          if (isFirstThinking) {
-            state.thinkingStartTime = Date.now();
-            state.thinkingItemId = itemId;
-            // Add activity entry with EARLY timestamp (when reasoning actually starts)
+          state.thinkingItemId = itemId;
+
+          // FIX: Check if segment already created by thinking:delta (event ordering)
+          if (!state.currentThinkingSegmentId) {
+            const segmentId = `thinking-${state.thinkingSegmentCounter}`;
+            state.currentThinkingSegmentId = segmentId;
+
+            const isFirstThinking = !state.thinkingStartTime;
+            if (isFirstThinking) {
+              state.thinkingStartTime = Date.now();
+            }
+
+            // Add entry with segment ID (mirrors toolUseId pattern)
             this.activityManager.addEntry(key, {
               type: 'thinking',
               timestamp: Date.now(),
               thinkingInProgress: true,
+              thinkingSegmentId: segmentId,
+            });
+          }
+
+          // FIX: Use existing mutex pattern (fire-and-forget - no await needed in sync handler)
+          // Mutex serializes work internally even without await
+          const context = this.contexts.get(key);
+          if (context) {
+            const mutex = getUpdateMutex(key);
+            mutex.runExclusive(async () => {
+              try {
+                await flushActivityBatchToThread(
+                  this.activityManager,
+                  key,
+                  this.slack,
+                  context.channelId,
+                  state.threadParentTs || context.originalTs,
+                  { force: true }
+                );
+                state.thinkingPostedDuringStreaming = true;
+              } catch (err) {
+                console.error('[thinking:started] Flush failed:', err);
+              }
             });
           }
           break;
@@ -966,34 +1021,62 @@ export class StreamingManager {
       }
     });
 
-    // Thinking delta (reasoning content) - accumulate content only
-    // NOTE: No thread messages here - postThinkingToThread handles posting on turn completion.
-    // This handler just accumulates content and updates activity entry char counts.
+    // Thinking delta (reasoning content) - accumulate content and flush to thread
+    // FIX: Now flushes to thread so thinking appears during streaming (not just on turn completion)
     this.codex.on('thinking:delta', ({ content }) => {
       for (const [key, state] of this.states) {
         if (state.isStreaming) {
-          const isFirstDelta = !state.thinkingStartTime;
+          state.thinkingContent += content;
 
-          if (isFirstDelta) {
-            state.thinkingStartTime = Date.now();
-            // Add thinking entry to activity (will be updated with char count)
+          // FIX: Handle case where thinking:delta fires BEFORE thinking:started
+          if (!state.currentThinkingSegmentId) {
+            const segmentId = `thinking-${state.thinkingSegmentCounter}`;
+            state.currentThinkingSegmentId = segmentId;
+
+            const isFirstThinking = !state.thinkingStartTime;
+            if (isFirstThinking) {
+              state.thinkingStartTime = Date.now();
+            }
+
+            // Create entry since thinking:started hasn't fired yet
             this.activityManager.addEntry(key, {
               type: 'thinking',
               timestamp: Date.now(),
               thinkingInProgress: true,
+              thinkingSegmentId: segmentId,
+              charCount: state.thinkingContent.length,
             });
+          } else {
+            // Update charCount on existing thinking entry (find by segment ID)
+            const entries = this.activityManager.getEntries(key);
+            for (let i = entries.length - 1; i >= 0; i--) {
+              if (entries[i].type === 'thinking' && entries[i].thinkingSegmentId === state.currentThinkingSegmentId) {
+                entries[i].charCount = state.thinkingContent.length;
+                entries[i].thinkingInProgress = true;
+                break;
+              }
+            }
           }
 
-          state.thinkingContent += content;
-
-          // Update char count on latest thinking entry
-          const entries = this.activityManager.getEntries(key);
-          for (let i = entries.length - 1; i >= 0; i--) {
-            if (entries[i].type === 'thinking') {
-              entries[i].charCount = state.thinkingContent.length;
-              entries[i].thinkingInProgress = true;
-              break;
-            }
+          // FIX: Fire-and-forget mutex pattern (no await in sync handler)
+          const context = this.contexts.get(key);
+          if (context) {
+            const mutex = getUpdateMutex(key);
+            mutex.runExclusive(async () => {
+              try {
+                await flushActivityBatchToThread(
+                  this.activityManager,
+                  key,
+                  this.slack,
+                  context.channelId,
+                  state.threadParentTs || context.originalTs
+                  // No force=true, respects 2s rate limit
+                );
+                state.thinkingPostedDuringStreaming = true;
+              } catch (err) {
+                console.error('[thinking:delta] Flush failed:', err);
+              }
+            });
           }
           break;
         }
