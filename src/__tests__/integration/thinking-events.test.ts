@@ -19,6 +19,7 @@ import { EventEmitter } from 'events';
 import type { WebClient } from '@slack/web-api';
 import type { CodexClient } from '../../codex-client.js';
 import { StreamingManager, makeConversationKey, type StreamingContext } from '../../streaming.js';
+import * as ActivityThread from '../../activity-thread.js';
 
 function createSlackMock() {
   return {
@@ -304,28 +305,28 @@ describe('Thinking/Reasoning Events', () => {
     expect(thinkingPost).toBeDefined();
   });
 
-  it('thinking:delta updates thread message with streaming content', async () => {
+  it('thinking updates thread message on update-rate cadence', async () => {
+    vi.useFakeTimers();
+    const thinkingUpdateSpy = vi
+      .spyOn(ActivityThread, 'updateThinkingEntryInThread')
+      .mockResolvedValue(true);
+
     const context = createContext();
     streaming.startStreaming(context);
     const conversationKey = makeConversationKey(context.channelId, context.threadTs);
 
-    const state = (streaming as any).states.get(conversationKey);
-    state.lastThinkingUpdateTime = 0;
-
     codex.emit('thinking:started', { itemId: 'reasoning-stream' });
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
     codex.emit('thinking:delta', { content: 'Streaming thinking content.' });
-    await new Promise((resolve) => setTimeout(resolve, 100));
 
-    const updateCalls = (slack.chat.update as any).mock.calls;
-    const updated = updateCalls.find((call: any[]) => {
-      const text = call[0]?.text || '';
-      return text.includes('Streaming thinking content.');
-    });
+    // No update until the next update-rate tick
+    expect(thinkingUpdateSpy).not.toHaveBeenCalled();
 
-    expect(updated).toBeDefined();
+    // Advance timers to trigger updateActivityMessage interval
+    await vi.advanceTimersByTimeAsync(context.updateRateMs);
+    expect(thinkingUpdateSpy).toHaveBeenCalled();
 
     streaming.stopStreaming(conversationKey);
+    thinkingUpdateSpy.mockRestore();
+    vi.useRealTimers();
   });
 });

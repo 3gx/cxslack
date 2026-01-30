@@ -61,7 +61,6 @@ const MAX_LIVE_ENTRIES = 300; // Threshold for rolling window
 const ROLLING_WINDOW_SIZE = 20; // Show last N entries when exceeded
 const ACTIVITY_LOG_MAX_CHARS = 1000; // Max chars for activity display
 const STATUS_SPINNER_FRAMES = ['\u25D0', '\u25D3', '\u25D1', '\u25D2'];
-const THINKING_UPDATE_MIN_GAP_MS = 500;
 
 function buildThinkingDisplay(content: string, maxChars: number): { display: string; truncated: boolean } {
   if (content.length <= maxChars) {
@@ -205,8 +204,12 @@ interface StreamingState {
   thinkingMessageTs?: string;
   /** Thinking item ID (for matching complete event) */
   thinkingItemId?: string;
-  /** Last thinking message update time (rate limiting - 2s gap) */
-  lastThinkingUpdateTime: number;
+  /** Last posted thinking segment ID (to avoid redundant updates) */
+  lastThinkingPostedSegmentId?: string;
+  /** Last posted thinking content (display text) */
+  lastThinkingPostedContent?: string;
+  /** Track thinking segments already posted to thread */
+  postedThinkingSegmentIds: Set<string>;
   /** Track active tools by itemId */
   activeTools: Map<string, {
     tool: string;
@@ -344,7 +347,9 @@ export class StreamingManager {
       thinkingStartTime: 0,
       thinkingComplete: false,
       thinkingMessageTs: undefined,
-      lastThinkingUpdateTime: 0,
+      lastThinkingPostedSegmentId: undefined,
+      lastThinkingPostedContent: undefined,
+      postedThinkingSegmentIds: new Set(),
       activeTools: new Map(),
       activityMessageTs: context.messageTs, // REUSE initial message!
       spinnerIndex: 0,
@@ -1273,7 +1278,9 @@ export class StreamingManager {
           // FIX: Use existing mutex pattern (fire-and-forget - no await needed in sync handler)
           // Mutex serializes work internally even without await
           const context = this.contexts.get(key);
-          if (context) {
+          const segmentId = state.currentThinkingSegmentId;
+          const alreadyPosted = segmentId ? state.postedThinkingSegmentIds.has(segmentId) : false;
+          if (context && segmentId && !alreadyPosted) {
             const mutex = getUpdateMutex(key);
             mutex.runExclusive(async () => {
               try {
@@ -1286,6 +1293,7 @@ export class StreamingManager {
                   { force: true }
                 );
                 state.thinkingPostedDuringStreaming = true;
+                state.postedThinkingSegmentIds.add(segmentId);
               } catch (err) {
                 console.error('[thinking:started] Flush failed:', err);
               }
@@ -1387,42 +1395,24 @@ export class StreamingManager {
             }
           }
 
-          const now = Date.now();
-          const shouldUpdate = now - state.lastThinkingUpdateTime >= THINKING_UPDATE_MIN_GAP_MS;
-
           // FIX: Fire-and-forget mutex pattern (no await in sync handler)
           const context = this.contexts.get(key);
-          if (context) {
+          if (context && segmentId) {
             const mutex = getUpdateMutex(key);
             mutex.runExclusive(async () => {
               try {
-                await flushActivityBatchToThread(
-                  this.activityManager,
-                  key,
-                  this.slack,
-                  context.channelId,
-                  state.threadParentTs || context.originalTs
-                  // No force=true, respects 2s rate limit
-                );
-                state.thinkingPostedDuringStreaming = true;
-
-                if (shouldUpdate) {
-                  const entries = this.activityManager.getEntries(key);
-                  const currentEntry = entries.find(
-                    (entry) => entry.type === 'thinking' && entry.thinkingSegmentId === state.currentThinkingSegmentId
+                // Only post the initial thinking entry once per segment.
+                if (!state.postedThinkingSegmentIds.has(segmentId)) {
+                  await flushActivityBatchToThread(
+                    this.activityManager,
+                    key,
+                    this.slack,
+                    context.channelId,
+                    state.threadParentTs || context.originalTs
+                    // No force=true, respects 2s rate limit
                   );
-                  if (currentEntry) {
-                    const updated = await updateThinkingEntryInThread(
-                      this.activityManager,
-                      key,
-                      this.slack,
-                      context.channelId,
-                      currentEntry
-                    );
-                    if (updated) {
-                      state.lastThinkingUpdateTime = now;
-                    }
-                  }
+                  state.thinkingPostedDuringStreaming = true;
+                  state.postedThinkingSegmentIds.add(segmentId);
                 }
               } catch (err) {
                 console.error('[thinking:delta] Flush failed:', err);
@@ -1640,6 +1630,36 @@ export class StreamingManager {
         console.error('Error updating activity message:', error);
         // To avoid duplicate activity posts, do not post a new message when an update fails.
         // We rely on the existing message; if it's missing, the next cycle will retry update.
+      }
+
+      // Update thinking thread entry on the SAME cadence as /update-rate
+      const latestThinkingEntry = [...entries].reverse().find(
+        (entry) => entry.type === 'thinking' && entry.thinkingContent
+      );
+      if (latestThinkingEntry && latestThinkingEntry.thinkingSegmentId) {
+        const segmentId = latestThinkingEntry.thinkingSegmentId;
+        const content = latestThinkingEntry.thinkingContent || '';
+        const needsUpdate =
+          segmentId !== state.lastThinkingPostedSegmentId ||
+          content !== state.lastThinkingPostedContent;
+
+        if (needsUpdate) {
+          try {
+            const updated = await updateThinkingEntryInThread(
+              this.activityManager,
+              conversationKey,
+              this.slack,
+              context.channelId,
+              latestThinkingEntry
+            );
+            if (updated) {
+              state.lastThinkingPostedSegmentId = segmentId;
+              state.lastThinkingPostedContent = content;
+            }
+          } catch (err) {
+            console.error('[activity.update] Thinking thread update failed:', err);
+          }
+        }
       }
 
       // Trim entries if too many (memory management)
