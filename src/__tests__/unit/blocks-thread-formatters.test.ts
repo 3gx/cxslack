@@ -236,7 +236,7 @@ describe('formatThreadActivityBatch', () => {
     expect(result).toContain('Read');
     expect(result).toContain('file.ts');
     expect(result).toContain('1.5s');
-    expect(result).toContain(':white_check_mark:');
+    expect(result).toContain(':mag:'); // Thread uses tool emoji, not checkmark
   });
 
   it('skips tool_start if tool_complete exists for same id', () => {
@@ -259,7 +259,7 @@ describe('formatThreadActivityBatch', () => {
     const result = formatThreadActivityBatch(entries);
     // Should NOT contain "in progress" since tool_complete exists
     expect(result).not.toContain('in progress');
-    expect(result).toContain(':white_check_mark:');
+    expect(result).toContain(':mag:'); // Thread uses tool emoji, not checkmark
   });
 
   it('handles empty array', () => {
@@ -582,7 +582,7 @@ describe('formatThreadActivityEntry with metrics', () => {
       durationMs: 1000,
     };
     const result = formatThreadActivityEntry(entry);
-    expect(result).toContain(':white_check_mark:');
+    expect(result).toContain(':memo:'); // Thread uses tool emoji, not checkmark
     expect(result).toContain('Edit');
     expect(result).toContain('• Changed: +5/-3 lines');
     expect(result).toContain('• Duration: 1.0s');

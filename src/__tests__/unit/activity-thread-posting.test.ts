@@ -13,7 +13,9 @@ import {
   uploadMarkdownAndPngWithResponse,
   ActivityThreadManager,
   MESSAGE_SIZE_DEFAULT,
+  ActivityEntry,
 } from '../../activity-thread.js';
+import { formatThreadActivityEntry } from '../../blocks.js';
 
 // Mock markdownToPng
 vi.mock('../../markdown-png.js', () => ({
@@ -160,6 +162,86 @@ describe('flushActivityBatchToThread', () => {
     expect(
       mockClient.chat.postMessage.mock.calls.length + mockClient.chat.update.mock.calls.length
     ).toBeGreaterThanOrEqual(1);
+  });
+
+  it('updates tool_start message in-place when tool_complete arrives', async () => {
+    const key = 'C123:inplace';
+    const toolUseId = 'tool-update-test';
+
+    // Mock postMessage to return consistent ts
+    mockClient.chat.postMessage.mockResolvedValue({ ts: 'tool-msg-ts-123' });
+
+    // Add tool_start entry
+    manager.addEntry(key, {
+      type: 'tool_start',
+      timestamp: Date.now(),
+      tool: 'Grep',
+      toolInput: 'search pattern',
+      toolUseId,
+    });
+
+    // Flush to post tool_start (should post new message)
+    await flushActivityBatchToThread(manager, key, mockClient, 'C123', '456.789', { force: true });
+
+    expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(1);
+    expect(mockClient.chat.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('[in progress]'),
+      })
+    );
+
+    // Reset mocks
+    mockClient.chat.postMessage.mockClear();
+    mockClient.chat.update.mockClear();
+
+    // Add tool_complete entry for same toolUseId
+    manager.addEntry(key, {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Grep',
+      toolInput: 'search pattern',
+      toolUseId,
+      durationMs: 1500,
+      matchCount: 42,
+    });
+
+    // Flush again - should UPDATE existing message, not post new
+    await flushActivityBatchToThread(manager, key, mockClient, 'C123', '456.789', { force: true });
+
+    // Should NOT have posted new message
+    expect(mockClient.chat.postMessage).not.toHaveBeenCalled();
+
+    // Should have UPDATED the existing message
+    expect(mockClient.chat.update).toHaveBeenCalledTimes(1);
+    expect(mockClient.chat.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ts: 'tool-msg-ts-123', // Same ts as the original tool_start message
+        text: expect.stringContaining('Grep'), // Tool name in completion
+      })
+    );
+    // Should NOT have "[in progress]" in the updated text
+    const updateCall = mockClient.chat.update.mock.calls[0][0];
+    expect(updateCall.text).not.toContain('[in progress]');
+  });
+
+  it('posts new message for tool_complete if tool_start was not tracked', async () => {
+    const key = 'C123:nostart';
+    const toolUseId = 'tool-no-start';
+
+    // Add tool_complete without prior tool_start (edge case)
+    manager.addEntry(key, {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Read',
+      toolInput: 'file.txt',
+      toolUseId,
+      durationMs: 500,
+    });
+
+    await flushActivityBatchToThread(manager, key, mockClient, 'C123', '456.789', { force: true });
+
+    // Should post new message since there's no existing ts to update
+    expect(mockClient.chat.postMessage).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -330,5 +412,202 @@ describe('uploadMarkdownAndPngWithResponse', () => {
     );
 
     expect(result).toBeNull();
+  });
+});
+
+// ============================================================================
+// Live Activity formatEntry Tests
+// ============================================================================
+
+describe('Live Activity formatEntry', () => {
+  it('shows arrow with output preview for completed Bash', () => {
+    const manager = new ActivityThreadManager();
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Bash',
+      toolInput: { command: 'npm run build 2>&1' },
+      toolOutputPreview: '> cxslack@1.0.0 build > tsc',
+      durationMs: 1400,
+    };
+
+    const result = (manager as any).formatEntry(entry);
+
+    expect(result).toContain(':white_check_mark:');
+    expect(result).toContain('*Bash*');
+    expect(result).toContain('`npm run build 2>&1`');
+    expect(result).toContain('→');
+    // Output is escaped for mrkdwn safety (< and > are escaped)
+    expect(result).toContain('\\> cxslack@1.0.0 build \\> tsc');
+    expect(result).toContain('[1.4s]');
+  });
+
+  it('truncates output preview to 50 chars', () => {
+    const manager = new ActivityThreadManager();
+    const longOutput = 'a'.repeat(100);
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Bash',
+      toolInput: { command: 'ls' },
+      toolOutputPreview: longOutput,
+      durationMs: 500,
+    };
+
+    const result = (manager as any).formatEntry(entry);
+
+    expect(result).toContain('→');
+    expect(result).toContain('a'.repeat(50));
+    expect(result).toContain('...');
+    expect(result).not.toContain('a'.repeat(51));
+  });
+
+  it('shows warning flag for errors', () => {
+    const manager = new ActivityThreadManager();
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Bash',
+      toolInput: { command: 'invalid-command' },
+      toolIsError: true,
+      toolErrorMessage: 'Command not found',
+      durationMs: 100,
+    };
+
+    const result = (manager as any).formatEntry(entry);
+
+    expect(result).toContain(':warning:');
+    expect(result).not.toContain('→'); // No output preview for errors
+  });
+
+  it('uses clean input summary not raw JSON', () => {
+    const manager = new ActivityThreadManager();
+    const entry: ActivityEntry = {
+      type: 'tool_start',
+      timestamp: Date.now(),
+      tool: 'Bash',
+      toolInput: { command: 'npm test', timeout: 60000, description: 'run tests' },
+    };
+
+    const result = (manager as any).formatEntry(entry);
+
+    expect(result).toContain('`npm test`');
+    expect(result).not.toContain('timeout');
+    expect(result).not.toContain('60000');
+    expect(result).not.toContain('{');
+  });
+
+  it('escapes mrkdwn special chars in output preview', () => {
+    const manager = new ActivityThreadManager();
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Bash',
+      toolInput: { command: 'echo test' },
+      toolOutputPreview: 'error: `unexpected` *token* in <file>',
+      durationMs: 100,
+    };
+
+    const result = (manager as any).formatEntry(entry);
+
+    // Special chars should be escaped
+    expect(result).toContain('\\`unexpected\\`');
+    expect(result).toContain('\\*token\\*');
+    expect(result).toContain('\\<file\\>');
+    // Should still have the arrow
+    expect(result).toContain('→');
+  });
+});
+
+// ============================================================================
+// Thread Activity formatThreadActivityEntry Tests
+// ============================================================================
+
+describe('Thread Activity formatThreadActivityEntry', () => {
+  it('uses tool emoji for completed', () => {
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Edit',
+      toolInput: { file_path: 'src/blocks.ts' },
+      linesAdded: 85,
+      linesRemoved: 54,
+      durationMs: 0,
+    };
+
+    const result = formatThreadActivityEntry(entry);
+
+    expect(result).toContain(':memo:'); // Edit emoji
+    expect(result).not.toContain(':white_check_mark:');
+    expect(result).toContain('• Changed: +85/-54 lines');
+  });
+
+  it('does not have arrow in header', () => {
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Bash',
+      toolInput: { command: 'npm test' },
+      toolOutputPreview: 'All tests passed',
+      durationMs: 5000,
+    };
+
+    const result = formatThreadActivityEntry(entry);
+    const lines = result.split('\n');
+
+    // Header line should NOT have arrow
+    expect(lines[0]).not.toContain('→');
+    // Output should be in bullet detail
+    expect(result).toContain('• Output:');
+  });
+
+  it('formats Read with line count', () => {
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Read',
+      toolInput: { file_path: 'src/activity-thread.ts' },
+      lineCount: 338,
+      toolOutputPreview: '1→/** 2→ * Unit tests',
+      durationMs: 0,
+    };
+
+    const result = formatThreadActivityEntry(entry);
+
+    expect(result).toContain(':mag:'); // Read emoji
+    expect(result).toContain('`src/activity-thread.ts`');
+    expect(result).toContain('• Read: 338 lines');
+    expect(result).toContain('• Output:');
+  });
+});
+
+// ============================================================================
+// Integration: Live vs Thread Format Consistency
+// ============================================================================
+
+describe('Live vs Thread Activity Format Consistency', () => {
+  it('live activity and thread activity have consistent but different formats', () => {
+    const manager = new ActivityThreadManager();
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'Bash',
+      toolInput: { command: 'npm run build' },
+      toolOutputPreview: '> cxslack@1.0.0 build > tsc',
+      durationMs: 1400,
+    };
+
+    const liveFormat = (manager as any).formatEntry(entry);
+    const threadFormat = formatThreadActivityEntry(entry);
+
+    // Live: compact with arrow and duration in header
+    expect(liveFormat).toMatch(/→.*\[1\.4s\]/);
+    expect(liveFormat.split('\n').length).toBe(1); // Single line
+
+    // Thread: detailed with bullets
+    expect(threadFormat).toContain('• Command:');
+    expect(threadFormat).toContain('• Output:');
+    expect(threadFormat).toContain('• Duration:');
+    expect(threadFormat.split('\n').length).toBeGreaterThan(1); // Multi-line
   });
 });

@@ -1910,9 +1910,9 @@ export function formatThreadActivityEntry(entry: ActivityEntry): string {
     case 'tool_start':
       return `${toolEmoji} *${normalizeToolName(entry.tool || '')}*${toolInput} [in progress]`;
     case 'tool_complete': {
-      // Format with bullet point details
       const lines: string[] = [];
-      const header = `:white_check_mark: *${normalizeToolName(entry.tool || '')}*${toolInput}${resultSummary}`;
+      // Use tool emoji instead of :white_check_mark: for thread messages
+      const header = `${toolEmoji} *${normalizeToolName(entry.tool || '')}*${toolInput}`;
       lines.push(header);
 
       // Add bullet point details

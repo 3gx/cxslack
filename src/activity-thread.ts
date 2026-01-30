@@ -19,7 +19,17 @@ import {
   formatThreadResponseMessage,
   formatThreadErrorMessage,
   buildActivityEntryBlocks,
+  formatToolInputSummary,
+  formatToolResultSummary,
+  normalizeToolName,
 } from './blocks.js';
+
+/**
+ * Escape Slack mrkdwn special characters to prevent formatting issues.
+ */
+function escapeSlackMrkdwn(text: string): string {
+  return text.replace(/[`*_~<>]/g, '\\$&');
+}
 
 // Max chars before converting to .md attachment
 const MAX_MESSAGE_LENGTH = 2900;
@@ -64,6 +74,7 @@ export interface ActivityBatch {
   postedToolUseIds: string[]; // Tool use IDs included in posted message (race fix)
   lastPostTime: number; // For rate limiting
   postedCount: number; // How many entries have been emitted as thread replies
+  toolIdToPostedTs: Map<string, string>; // toolUseId → message ts for update-in-place
 }
 
 // Spinner frames for animated status
@@ -99,11 +110,12 @@ export class ActivityThreadManager {
    * Add an activity entry to the batch for a conversation.
    */
   addEntry(conversationKey: string, entry: ActivityEntry): ActivityEntry[] {
-    const batch = this.batches.get(conversationKey) || {
+    const batch: ActivityBatch = this.batches.get(conversationKey) || {
       entries: [],
       postedToolUseIds: [],
       lastPostTime: 0,
       postedCount: 0,
+      toolIdToPostedTs: new Map(),
     };
     batch.entries.push(entry);
     this.batches.set(conversationKey, batch);
@@ -260,22 +272,28 @@ export class ActivityThreadManager {
       case 'thinking':
         return `:brain: *Thinking...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
       case 'tool_start': {
-        const input =
-          typeof entry.toolInput === 'string'
-            ? entry.toolInput
-            : entry.toolInput
-              ? JSON.stringify(entry.toolInput).slice(0, 300)
-              : '';
-        return `${emoji} *${entry.tool}*${input ? ` \`${input}\`` : ''} [in progress]`;
+        // Type guard: only pass object input, not string
+        const inputObj = typeof entry.toolInput === 'object' ? entry.toolInput : undefined;
+        const inputSummary = formatToolInputSummary(entry.tool || '', inputObj);
+        return `${emoji} *${normalizeToolName(entry.tool || '')}*${inputSummary} [in progress]`;
       }
       case 'tool_complete': {
-        const input =
-          typeof entry.toolInput === 'string'
-            ? entry.toolInput
-            : entry.toolInput
-              ? JSON.stringify(entry.toolInput).slice(0, 300)
-              : '';
-        return `:white_check_mark: *${entry.tool}*${input ? ` \`${input}\`` : ''}${duration}`;
+        // Type guard: only pass object input, not string
+        const inputObj = typeof entry.toolInput === 'object' ? entry.toolInput : undefined;
+        const inputSummary = formatToolInputSummary(entry.tool || '', inputObj);
+        const resultSummary = formatToolResultSummary(entry);
+        const errorFlag = entry.toolIsError ? ' :warning:' : '';
+
+        // Add output preview with arrow (escaped for mrkdwn safety)
+        let outputHint = '';
+        if (!entry.toolIsError && entry.toolOutputPreview) {
+          const cleaned = escapeSlackMrkdwn(entry.toolOutputPreview.replace(/\s+/g, ' '));
+          const truncated = cleaned.slice(0, 50);
+          const ellipsis = cleaned.length > 50 ? '...' : '';
+          outputHint = ` → \`${truncated}${ellipsis}\``;
+        }
+
+        return `:white_check_mark: *${normalizeToolName(entry.tool || '')}*${inputSummary}${resultSummary}${outputHint}${duration}${errorFlag}`;
       }
       case 'generating':
         return `:memo: *Generating...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
@@ -629,31 +647,62 @@ export async function flushActivityBatchToThread(
     }
 
     try {
-      // Step 1: post with basic section (no actions yet)
-      const baseBlocks = options?.useBlocks === false
-        ? undefined
-        : buildActivityEntryBlocks({ text });
+      // Check if this is a tool_complete and we have an existing message to update
+      const existingTs = entry.type === 'tool_complete' && entry.toolUseId && batch?.toolIdToPostedTs
+        ? batch.toolIdToPostedTs.get(entry.toolUseId)
+        : undefined;
 
-      const result = await withSlackRetry(
-        () => client.chat.postMessage({
-          channel,
-          thread_ts: threadTs,
-          text,
-          ...(baseBlocks ? { blocks: baseBlocks, unfurl_links: false, unfurl_media: false } : {}),
-        }),
-        'batch.entry.post'
-      );
+      let postedTs: string | undefined;
 
-      const postedTs = (result as any).ts as string | undefined;
+      if (existingTs) {
+        // UPDATE existing tool_start message with completion info (update-in-place)
+        const baseBlocks = options?.useBlocks === false
+          ? undefined
+          : buildActivityEntryBlocks({ text });
 
-      // Step 2: if actions requested, update message with buttons using real ts
+        await withSlackRetry(
+          () => client.chat.update({
+            channel,
+            ts: existingTs,
+            text,
+            ...(baseBlocks ? { blocks: baseBlocks } : {}),
+          }),
+          'batch.entry.update-in-place'
+        );
+
+        postedTs = existingTs;
+      } else {
+        // Post new message
+        const baseBlocks = options?.useBlocks === false
+          ? undefined
+          : buildActivityEntryBlocks({ text });
+
+        const result = await withSlackRetry(
+          () => client.chat.postMessage({
+            channel,
+            thread_ts: threadTs,
+            text,
+            ...(baseBlocks ? { blocks: baseBlocks, unfurl_links: false, unfurl_media: false } : {}),
+          }),
+          'batch.entry.post'
+        );
+
+        postedTs = (result as any).ts as string | undefined;
+
+        // Track tool_start message ts for update-in-place on completion
+        if (entry.type === 'tool_start' && entry.toolUseId && postedTs && batch?.toolIdToPostedTs) {
+          batch.toolIdToPostedTs.set(entry.toolUseId, postedTs);
+        }
+      }
+
+      // Add actions if requested (for both new and updated messages)
       if (postedTs && options?.buildActions) {
         const actions = options.buildActions(entry, postedTs);
         if (actions) {
           const blocks = buildActivityEntryBlocks({ text, actions });
           await withSlackRetry(
-            () => client.chat.update({ channel, ts: postedTs, text, blocks }),
-            'batch.entry.update'
+            () => client.chat.update({ channel, ts: postedTs!, text, blocks }),
+            'batch.entry.actions'
           );
         }
       }
