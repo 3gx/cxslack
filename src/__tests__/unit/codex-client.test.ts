@@ -389,6 +389,29 @@ describe('CodexClient web search notifications', () => {
   });
 });
 
+describe('CodexClient file change notifications', () => {
+  it('emits filechange:delta with itemId and delta', () => {
+    const client = new CodexClient({ requestTimeout: 10 });
+    const listener = vi.fn();
+    client.on('filechange:delta', listener);
+
+    const notification: JsonRpcNotification = {
+      method: 'item/fileChange/outputDelta',
+      params: {
+        itemId: 'change-1',
+        delta: '+++ b/file.ts\n+new line\n',
+      },
+    };
+
+    (client as any).handleNotification(notification);
+
+    expect(listener).toHaveBeenCalledWith({
+      itemId: 'change-1',
+      delta: '+++ b/file.ts\n+new line\n',
+    });
+  });
+});
+
 describe('CodexClient Point-in-Time Fork', () => {
   describe('rollbackThread validation', () => {
     it('rejects numTurns < 1', async () => {

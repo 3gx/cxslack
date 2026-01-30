@@ -68,6 +68,19 @@ const NON_TOOL_ITEM_TYPES = new Set([
   'reasoning',      // Thinking (handled by thinking:delta events)
 ]);
 
+function shortenUrlForActivity(url: string, maxLen = 60): string {
+  try {
+    const parsed = new URL(url);
+    const base = `${parsed.host}${parsed.pathname}`;
+    const withQuery = parsed.search ? `${base}?...` : base;
+    if (withQuery.length <= maxLen) return withQuery;
+    return withQuery.slice(0, Math.max(0, maxLen - 3)) + '...';
+  } catch {
+    if (url.length <= maxLen) return url;
+    return url.slice(0, Math.max(0, maxLen - 3)) + '...';
+  }
+}
+
 /**
  * Check if an item type is a displayable tool.
  * Filters out message lifecycle events that shouldn't appear as tool activity.
@@ -188,6 +201,8 @@ interface StreamingState {
     exitCode?: number;
     // Non-bash tools can store a short output preview (web search URLs, etc.)
     outputPreview?: string;
+    // Non-bash tools can store a full output (e.g., full web search URL)
+    outputFull?: string;
   }>;
   /** The ONE activity message timestamp we update */
   activityMessageTs?: string;
@@ -847,12 +862,29 @@ export class StreamingManager {
             const toolLower = (toolInfo.tool || '').toLowerCase();
             const toolInput = typeof toolInfo.toolInput === 'object' ? toolInfo.toolInput as Record<string, unknown> : undefined;
 
-            // Edit: compute linesAdded/linesRemoved from input
-            if (toolLower === 'edit' && toolInput) {
+            // Edit/FileChange: compute linesAdded/linesRemoved
+            if ((toolLower === 'edit' || toolLower === 'filechange') && toolInput) {
               const oldString = (toolInput.old_string as string) || '';
               const newString = (toolInput.new_string as string) || '';
-              entry.linesRemoved = oldString.split('\n').length;
-              entry.linesAdded = newString.split('\n').length;
+              if (toolLower === 'edit') {
+                entry.linesRemoved = oldString.split('\n').length;
+                entry.linesAdded = newString.split('\n').length;
+              }
+            }
+
+            // FileChange: compute linesAdded/linesRemoved from diff output (if present)
+            if (toolLower === 'filechange' && toolInfo.outputBuffer) {
+              let added = 0;
+              let removed = 0;
+              for (const line of toolInfo.outputBuffer.split('\n')) {
+                if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@')) continue;
+                if (line.startsWith('+')) added += 1;
+                if (line.startsWith('-')) removed += 1;
+              }
+              if (added || removed) {
+                entry.linesAdded = added;
+                entry.linesRemoved = removed;
+              }
             }
 
             // Write: compute lineCount from content
@@ -879,7 +911,7 @@ export class StreamingManager {
                 if (cleaned.length === 0) {
                   entry.toolOutputPreview = '[No output]';
                 } else {
-                entry.toolOutputPreview = cleaned.slice(0, MAX_PREVIEW);
+                  entry.toolOutputPreview = cleaned.slice(0, MAX_PREVIEW);
                   if (cleaned.length > MAX_PREVIEW) {
                     entry.toolOutputPreview += '...';
                   }
@@ -896,8 +928,13 @@ export class StreamingManager {
               }
             }
 
-            if (toolLower !== 'bash' && toolLower !== 'commandexecution' && toolInfo.outputPreview) {
-              entry.toolOutputPreview = toolInfo.outputPreview;
+            if (toolLower !== 'bash' && toolLower !== 'commandexecution') {
+              if (toolInfo.outputPreview) {
+                entry.toolOutputPreview = toolInfo.outputPreview;
+              }
+              if (toolInfo.outputFull) {
+                entry.toolOutput = toolInfo.outputFull;
+              }
             }
 
             // Add the entry with metrics
@@ -1019,7 +1056,8 @@ export class StreamingManager {
 
     this.codex.on('websearch:completed', ({ itemId, url, resultUrls, threadId }) => {
       if (!itemId) return;
-      const previewUrl = (resultUrls && resultUrls.length > 0 ? resultUrls[0] : undefined) || url;
+      const fullUrl = (resultUrls && resultUrls.length > 0 ? resultUrls[0] : undefined) || url;
+      const shortUrl = fullUrl ? shortenUrlForActivity(fullUrl, 60) : undefined;
 
       for (const [key, state] of this.states) {
         if (!state.isStreaming) continue;
@@ -1028,10 +1066,11 @@ export class StreamingManager {
         if (!context) continue;
         if (threadId && context.threadId && context.threadId !== threadId) continue;
 
-        if (previewUrl) {
+        if (fullUrl) {
           const toolInfo = state.activeTools.get(itemId);
           if (toolInfo) {
-            toolInfo.outputPreview = previewUrl;
+            toolInfo.outputPreview = shortUrl || fullUrl;
+            toolInfo.outputFull = fullUrl;
           }
 
           const entries = this.activityManager.getEntries(key);
@@ -1039,8 +1078,29 @@ export class StreamingManager {
             (e) => e.type === 'tool_complete' && e.toolUseId === itemId
           );
           if (completeEntry) {
-            completeEntry.toolOutputPreview = previewUrl;
+            completeEntry.toolOutputPreview = shortUrl || fullUrl;
+            completeEntry.toolOutput = fullUrl;
           }
+        }
+      }
+    });
+
+    // File change output deltas (patch/diff content)
+    this.codex.on('filechange:delta', ({ itemId, delta }) => {
+      for (const [, state] of this.states) {
+        if (state.isStreaming) {
+          const toolInfo = state.activeTools.get(itemId);
+          if (toolInfo) {
+            const MAX_OUTPUT = 100 * 1024;
+            const current = toolInfo.outputBuffer || '';
+            if (current.length < MAX_OUTPUT) {
+              toolInfo.outputBuffer = current + delta;
+              if (toolInfo.outputBuffer.length > MAX_OUTPUT) {
+                toolInfo.outputBuffer = toolInfo.outputBuffer.slice(0, MAX_OUTPUT);
+              }
+            }
+          }
+          break;
         }
       }
     });

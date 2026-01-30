@@ -172,6 +172,7 @@ export interface CodexClientEvents {
   'command:started': (params: { itemId: string; threadId: string; turnId: string }) => void;
   'command:output': (params: { itemId: string; delta: string }) => void;
   'command:completed': (params: { itemId: string; threadId: string; turnId: string; exitCode?: number }) => void;
+  'filechange:delta': (params: { itemId: string; delta: string }) => void;
 
   // Web search lifecycle (from web_search notifications)
   'websearch:started': (params: {
@@ -1039,6 +1040,20 @@ export class CodexClient extends EventEmitter {
         break;
       }
 
+      // File change output streaming (patch/diff content)
+      case 'item/fileChange/outputDelta':
+      case 'item/fileChange/output_delta': {
+        const p = params as Record<string, unknown>;
+        const msg = p.msg as Record<string, unknown> | undefined;
+        const delta = (p.delta || p.content || p.text ||
+          msg?.delta || msg?.content || msg?.text || '') as string;
+        const itemId = (p.itemId || p.item_id || msg?.item_id || msg?.itemId || msg?.id || p.id || '') as string;
+        if (delta) {
+          this.emit('filechange:delta', { itemId, delta });
+        }
+        break;
+      }
+
       // Command execution lifecycle events
       // MITIGATION: Defensive extraction - try multiple field name variants
       // Structure: { id, msg: { turn_id, call_id, ... }, conversationId }
@@ -1164,6 +1179,8 @@ export class CodexClient extends EventEmitter {
       case 'codex/event/agent_reasoning':
       case 'codex/event/agent_reasoning_section_break':
       case 'codex/event/turn_aborted':
+      case 'codex/event/patch_apply_end':
+      case 'codex/event/turn_diff_updated':
       case 'turn/diff/updated':
         // These are informational - no action needed
         break;

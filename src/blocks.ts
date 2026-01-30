@@ -1741,7 +1741,8 @@ const THREAD_TOOL_EMOJI: Record<string, string> = {
   FileRead: ':mag:',
   FileWrite: ':memo:',
   TodoWrite: ':clipboard:',
-  WebSearch: ':mag:',
+  WebSearch: ':globe_with_meridians:',
+  FileChange: ':memo:',
   NotebookEdit: ':notebook:',
   Skill: ':zap:',
   AskUserQuestion: ':question:',
@@ -1784,6 +1785,10 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   fileread: 'Read',
   filewrite: 'Write',
   shell: 'Bash',
+  filechange: 'FileChange',
+  file_change: 'FileChange',
+  websearch: 'WebSearch',
+  web_search: 'WebSearch',
 };
 
 /**
@@ -1850,6 +1855,7 @@ export function formatToolInputSummary(toolName: string, input?: string | Record
     case 'read':
     case 'edit':
     case 'write':
+    case 'filechange':
       return input.file_path ? ` \`${truncatePath(input.file_path as string, 40)}\`` : '';
     case 'grep':
       return input.pattern ? ` \`"${truncateText(input.pattern as string, 25)}"\`` : '';
@@ -1965,7 +1971,7 @@ export function formatToolDetails(entry: ActivityEntry): string[] {
   if (tool === 'read' && entry.lineCount !== undefined) {
     details.push(`Read: ${entry.lineCount} lines`);
   }
-  if (tool === 'edit' && (entry.linesAdded !== undefined || entry.linesRemoved !== undefined)) {
+  if ((tool === 'edit' || tool === 'filechange') && (entry.linesAdded !== undefined || entry.linesRemoved !== undefined)) {
     details.push(`Changed: +${entry.linesAdded || 0}/-${entry.linesRemoved || 0} lines`);
   }
   if (tool === 'write' && entry.lineCount !== undefined) {
@@ -1987,6 +1993,8 @@ export function formatToolDetails(entry: ActivityEntry): string[] {
   }
   if (tool === 'websearch') {
     if (input?.query) details.push(`Query: "${truncateText(input.query as string, 40)}"`);
+    const url = entry.toolOutput || entry.toolOutputPreview;
+    if (url) details.push(`URL: ${url}`);
   }
   if (tool === 'todowrite') {
     const todoItems = Array.isArray(input?.todos) ? input.todos.filter(isTodoItem) : [];
@@ -2026,7 +2034,7 @@ export function formatToolDetails(entry: ActivityEntry): string[] {
   // Add output preview or error message before duration
   if (entry.toolIsError) {
     details.push(`:warning: Error: ${entry.toolErrorMessage?.slice(0, 100) || 'Unknown error'}`);
-  } else if (entry.toolOutputPreview) {
+  } else if (entry.toolOutputPreview && tool !== 'websearch') {
     const outputPreview = formatOutputPreview(tool, entry.toolOutputPreview);
     if (outputPreview) {
       details.push(`Output: ${outputPreview}`);

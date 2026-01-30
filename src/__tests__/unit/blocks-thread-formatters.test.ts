@@ -536,6 +536,35 @@ describe('formatToolDetails (bullet points)', () => {
     expect(details.some(d => d.includes('Task: Search codebase'))).toBe(true);
   });
 
+  it('formats FileChange with line changes', () => {
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'FileChange',
+      linesAdded: 4,
+      linesRemoved: 2,
+      durationMs: 1200,
+    };
+    const details = formatToolDetails(entry);
+    expect(details).toContain('Changed: +4/-2 lines');
+    expect(details).toContain('Duration: 1.2s');
+  });
+
+  it('formats WebSearch with full URL', () => {
+    const entry: ActivityEntry = {
+      type: 'tool_complete',
+      timestamp: Date.now(),
+      tool: 'WebSearch',
+      toolInput: { query: 'example query' },
+      toolOutputPreview: 'example.com/short',
+      toolOutput: 'https://example.com/full/path?query=1',
+    };
+    const details = formatToolDetails(entry);
+    expect(details.some(d => d.includes('Query: "example query"'))).toBe(true);
+    expect(details.some(d => d.includes('URL: https://example.com/full/path?query=1'))).toBe(true);
+    expect(details.some(d => d.includes('Output:'))).toBe(false);
+  });
+
   it('includes error message when tool failed', () => {
     const entry: ActivityEntry = {
       type: 'tool_complete',

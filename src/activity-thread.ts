@@ -92,9 +92,11 @@ const TOOL_EMOJI: Record<string, string> = {
   Grep: ':mag:',
   Edit: ':memo:',
   Write: ':memo:',
+  FileChange: ':memo:',
   Bash: ':computer:',
   Shell: ':computer:',
   WebFetch: ':globe_with_meridians:',
+  WebSearch: ':globe_with_meridians:',
   Task: ':robot_face:',
 };
 
