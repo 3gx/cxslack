@@ -104,6 +104,25 @@ function extractBotMention(text: string, botUserId: string): string {
   return text.replace(mentionPattern, '').trim();
 }
 
+export function getAppMentionRejection(
+  channelId: string,
+  threadTs?: string
+): { text: string; threadTs?: string } | null {
+  if (!channelId.startsWith('C')) {
+    return {
+      text: '❌ This bot only works in channels, not in direct messages.',
+      threadTs,
+    };
+  }
+  if (threadTs) {
+    return {
+      text: '❌ @bot can only be mentioned in the main channel, not in threads.',
+      threadTs,
+    };
+  }
+  return null;
+}
+
 /**
  * Start the Slack bot.
  */
@@ -212,6 +231,15 @@ function setupEventHandlers(): void {
     const replyThreadTs = threadTs ?? messageTs;
 
     try {
+      const rejection = getAppMentionRejection(channelId, threadTs);
+      if (rejection) {
+        await client.chat.postMessage({
+          channel: channelId,
+          thread_ts: rejection.threadTs ?? replyThreadTs,
+          text: rejection.text,
+        });
+        return;
+      }
       const userId: string = event.user || '';
       const botUserId = (await client.auth.test()).user_id as string;
       const text: string = extractBotMention(event.text, botUserId);

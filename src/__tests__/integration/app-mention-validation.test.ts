@@ -3,7 +3,8 @@
  * Tests that @bot is only allowed in main channel, not in threads.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
+import { getAppMentionRejection } from '../../slack-bot.js';
 
 // Mock the slack-bot module to test the validation logic
 // We test the validation logic directly rather than the full handler
@@ -11,56 +12,34 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 describe('@bot Mention Validation', () => {
   describe('Thread detection', () => {
     it('rejects @bot mention in existing thread (thread_ts is set)', () => {
-      // When event.thread_ts exists, the mention is in a thread
-      const event = {
-        channel: 'C123',
-        user: 'U123',
-        text: '<@BOT123> hello',
-        ts: '1234567890.123456',
-        thread_ts: '1234567880.123456', // In a thread - should be rejected
-      };
-
-      // The validation logic: if thread_ts exists, reject
-      const isInThread = !!event.thread_ts;
-      expect(isInThread).toBe(true);
+      const rejection = getAppMentionRejection('C123', '1234567880.123456');
+      expect(rejection?.text).toBe('❌ @bot can only be mentioned in the main channel, not in threads.');
     });
 
     it('allows @bot mention in main channel (no thread_ts)', () => {
-      // When event.thread_ts is undefined, the mention is in main channel
-      const event = {
-        channel: 'C123',
-        user: 'U123',
-        text: '<@BOT123> hello',
-        ts: '1234567890.123456',
-        thread_ts: undefined, // Main channel - should be allowed
-      };
+      const rejection = getAppMentionRejection('C123', undefined);
+      expect(rejection).toBeNull();
+    });
+  });
 
-      const isInThread = !!event.thread_ts;
-      expect(isInThread).toBe(false);
+  describe('Channel type validation', () => {
+    it('rejects @bot mentions outside channels', () => {
+      const rejection = getAppMentionRejection('D123', undefined);
+      expect(rejection?.text).toBe('❌ This bot only works in channels, not in direct messages.');
     });
   });
 
   describe('Error message format', () => {
     it('provides clear error message for thread mentions', () => {
-      const errorMessage = '❌ @bot can only be mentioned in the main channel, not in threads.';
-
-      expect(errorMessage).toContain('@bot');
-      expect(errorMessage).toContain('main channel');
-      expect(errorMessage).toContain('not in threads');
+      const rejection = getAppMentionRejection('C123', '1234567880.123456');
+      expect(rejection?.text).toBe('❌ @bot can only be mentioned in the main channel, not in threads.');
     });
   });
 
   describe('Reply threading behavior', () => {
     it('uses existing thread_ts for error reply when in thread', () => {
-      const event = {
-        channel: 'C123',
-        ts: '1234567890.123456',
-        thread_ts: '1234567880.123456',
-      };
-
-      // Error should be posted to the same thread
-      const replyThreadTs = event.thread_ts ?? event.ts;
-      expect(replyThreadTs).toBe(event.thread_ts);
+      const rejection = getAppMentionRejection('C123', '1234567880.123456');
+      expect(rejection?.threadTs).toBe('1234567880.123456');
     });
 
     it('uses message ts as thread anchor when in main channel', () => {
