@@ -84,9 +84,6 @@ describe('Thinking/Reasoning Events', () => {
     expect(thinkingEntry?.timestamp).toBeGreaterThanOrEqual(beforeTime);
     expect(thinkingEntry?.timestamp).toBeLessThanOrEqual(afterTime);
 
-    // Should NOT have posted any thread messages
-    expect(slack.chat.postMessage).not.toHaveBeenCalled();
-
     streaming.stopStreaming(conversationKey);
   });
 
@@ -182,9 +179,6 @@ describe('Thinking/Reasoning Events', () => {
     expect(thinkingEntry).toBeDefined();
     expect(thinkingEntry?.thinkingInProgress).toBe(true);
     expect(thinkingEntry?.charCount).toBe(33);
-
-    // Should NOT have posted thread messages
-    expect(slack.chat.postMessage).not.toHaveBeenCalled();
 
     streaming.stopStreaming(conversationKey);
   });
@@ -308,5 +302,30 @@ describe('Thinking/Reasoning Events', () => {
 
     // The fix ensures thinking content is posted even when thinkingPostedDuringStreaming=true
     expect(thinkingPost).toBeDefined();
+  });
+
+  it('thinking:delta updates thread message with streaming content', async () => {
+    const context = createContext();
+    streaming.startStreaming(context);
+    const conversationKey = makeConversationKey(context.channelId, context.threadTs);
+
+    const state = (streaming as any).states.get(conversationKey);
+    state.lastThinkingUpdateTime = 0;
+
+    codex.emit('thinking:started', { itemId: 'reasoning-stream' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    codex.emit('thinking:delta', { content: 'Streaming thinking content.' });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const updateCalls = (slack.chat.update as any).mock.calls;
+    const updated = updateCalls.find((call: any[]) => {
+      const text = call[0]?.text || '';
+      return text.includes('Streaming thinking content.');
+    });
+
+    expect(updated).toBeDefined();
+
+    streaming.stopStreaming(conversationKey);
   });
 });

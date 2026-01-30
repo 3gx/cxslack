@@ -46,6 +46,7 @@ import {
   getToolEmoji,
   buildActivityLogText,
   flushActivityBatchToThread,
+  updateThinkingEntryInThread,
   postThinkingToThread,
   postResponseToThread,
   postErrorToThread,
@@ -60,6 +61,17 @@ const MAX_LIVE_ENTRIES = 300; // Threshold for rolling window
 const ROLLING_WINDOW_SIZE = 20; // Show last N entries when exceeded
 const ACTIVITY_LOG_MAX_CHARS = 1000; // Max chars for activity display
 const STATUS_SPINNER_FRAMES = ['\u25D0', '\u25D3', '\u25D1', '\u25D2'];
+const THINKING_UPDATE_MIN_GAP_MS = 500;
+
+function buildThinkingDisplay(content: string, maxChars: number): { display: string; truncated: boolean } {
+  if (content.length <= maxChars) {
+    return { display: content, truncated: false };
+  }
+  const ellipsis = '...';
+  const keep = Math.max(0, maxChars - ellipsis.length);
+  const tail = content.slice(-keep);
+  return { display: `${ellipsis}${tail}`, truncated: true };
+}
 
 // Item types that should NOT be displayed as tool activity
 // These are message lifecycle events, not tool executions
@@ -183,6 +195,8 @@ interface StreamingState {
   costUsd?: number;
   /** Accumulated thinking content */
   thinkingContent: string;
+  /** Per-segment thinking content (streamed display) */
+  thinkingSegments: Map<string, string>;
   /** Thinking start timestamp */
   thinkingStartTime: number;
   /** Whether thinking has completed (for display) */
@@ -326,6 +340,7 @@ export class StreamingManager {
       maxOutputTokens: undefined,
       costUsd: undefined,
       thinkingContent: '',
+      thinkingSegments: new Map(),
       thinkingStartTime: 0,
       thinkingComplete: false,
       thinkingMessageTs: undefined,
@@ -1237,6 +1252,9 @@ export class StreamingManager {
           if (!state.currentThinkingSegmentId) {
             const segmentId = `thinking-${state.thinkingSegmentCounter}`;
             state.currentThinkingSegmentId = segmentId;
+            if (!state.thinkingSegments.has(segmentId)) {
+              state.thinkingSegments.set(segmentId, '');
+            }
 
             const isFirstThinking = !state.thinkingStartTime;
             if (isFirstThinking) {
@@ -1286,12 +1304,32 @@ export class StreamingManager {
         if (state.isStreaming && (state.thinkingItemId === itemId || state.thinkingStartTime)) {
           // Mark thinking as complete in activity entries
           const entries = this.activityManager.getEntries(key);
+          let thinkingEntry: ActivityEntry | undefined;
           for (let i = entries.length - 1; i >= 0; i--) {
             if (entries[i].type === 'thinking') {
               entries[i].thinkingInProgress = false;
               entries[i].durationMs = durationMs;
+              thinkingEntry = entries[i];
               break;
             }
+          }
+
+          const context = this.contexts.get(key);
+          if (context && thinkingEntry) {
+            const mutex = getUpdateMutex(key);
+            mutex.runExclusive(async () => {
+              try {
+                await updateThinkingEntryInThread(
+                  this.activityManager,
+                  key,
+                  this.slack,
+                  context.channelId,
+                  thinkingEntry
+                );
+              } catch (err) {
+                console.error('[thinking:complete] Update failed:', err);
+              }
+            });
           }
           // Reset for next thinking block
           state.thinkingItemId = undefined;
@@ -1311,6 +1349,9 @@ export class StreamingManager {
           if (!state.currentThinkingSegmentId) {
             const segmentId = `thinking-${state.thinkingSegmentCounter}`;
             state.currentThinkingSegmentId = segmentId;
+            if (!state.thinkingSegments.has(segmentId)) {
+              state.thinkingSegments.set(segmentId, '');
+            }
 
             const isFirstThinking = !state.thinkingStartTime;
             if (isFirstThinking) {
@@ -1323,19 +1364,31 @@ export class StreamingManager {
               timestamp: Date.now(),
               thinkingInProgress: true,
               thinkingSegmentId: segmentId,
-              charCount: state.thinkingContent.length,
             });
-          } else {
-            // Update charCount on existing thinking entry (find by segment ID)
+          }
+
+          const segmentId = state.currentThinkingSegmentId;
+          if (segmentId) {
+            const existingSegment = state.thinkingSegments.get(segmentId) || '';
+            const updatedSegment = existingSegment + content;
+            state.thinkingSegments.set(segmentId, updatedSegment);
+
+            const { display, truncated } = buildThinkingDisplay(updatedSegment, THINKING_MESSAGE_SIZE);
+
             const entries = this.activityManager.getEntries(key);
             for (let i = entries.length - 1; i >= 0; i--) {
-              if (entries[i].type === 'thinking' && entries[i].thinkingSegmentId === state.currentThinkingSegmentId) {
-                entries[i].charCount = state.thinkingContent.length;
+              if (entries[i].type === 'thinking' && entries[i].thinkingSegmentId === segmentId) {
+                entries[i].thinkingContent = display;
+                entries[i].thinkingTruncated = truncated;
+                entries[i].charCount = display.length;
                 entries[i].thinkingInProgress = true;
                 break;
               }
             }
           }
+
+          const now = Date.now();
+          const shouldUpdate = now - state.lastThinkingUpdateTime >= THINKING_UPDATE_MIN_GAP_MS;
 
           // FIX: Fire-and-forget mutex pattern (no await in sync handler)
           const context = this.contexts.get(key);
@@ -1352,6 +1405,25 @@ export class StreamingManager {
                   // No force=true, respects 2s rate limit
                 );
                 state.thinkingPostedDuringStreaming = true;
+
+                if (shouldUpdate) {
+                  const entries = this.activityManager.getEntries(key);
+                  const currentEntry = entries.find(
+                    (entry) => entry.type === 'thinking' && entry.thinkingSegmentId === state.currentThinkingSegmentId
+                  );
+                  if (currentEntry) {
+                    const updated = await updateThinkingEntryInThread(
+                      this.activityManager,
+                      key,
+                      this.slack,
+                      context.channelId,
+                      currentEntry
+                    );
+                    if (updated) {
+                      state.lastThinkingUpdateTime = now;
+                    }
+                  }
+                }
               } catch (err) {
                 console.error('[thinking:delta] Flush failed:', err);
               }

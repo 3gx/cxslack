@@ -2091,7 +2091,11 @@ export function formatThreadActivityEntry(entry: ActivityEntry): string {
       // Use :bulb: for thinking (matches ccslack)
       const thinkingStatus = entry.thinkingInProgress ? '...' : '';
       const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
-      return `:bulb: *Thinking${thinkingStatus}*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+      const header = `:bulb: *Thinking${thinkingStatus}*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+      if (entry.thinkingContent) {
+        return `${header}\n${entry.thinkingContent}`;
+      }
+      return header;
     }
     case 'tool_start':
       return `${toolEmoji} *${normalizeToolName(entry.tool || '')}*${toolInput} [in progress]`;

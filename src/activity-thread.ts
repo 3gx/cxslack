@@ -48,6 +48,8 @@ export interface ActivityEntry {
   durationMs?: number;
   message?: string;
   charCount?: number;
+  thinkingContent?: string;
+  thinkingTruncated?: boolean;
 
   // Result metrics (computed from input for Edit/Write, from output for Bash)
   lineCount?: number;           // Read/Write/Bash: lines in result/content
@@ -786,6 +788,52 @@ export async function flushActivityBatchToThread(
     } catch (err) {
       console.error('[flushActivityBatchToThread] Failed:', err);
     }
+  }
+}
+
+/**
+ * Update an existing thinking entry message in the thread with new content.
+ * Uses update-in-place based on thinkingSegmentId -> message ts mapping.
+ */
+export async function updateThinkingEntryInThread(
+  manager: ActivityThreadManager,
+  conversationKey: string,
+  client: WebClient,
+  channel: string,
+  entry: ActivityEntry,
+  options?: {
+    useBlocks?: boolean;
+  }
+): Promise<boolean> {
+  const batch = (manager as any).batches?.get(conversationKey) as ActivityBatch | undefined;
+  const thinkingId = entry.thinkingSegmentId;
+  if (!batch || !thinkingId) return false;
+
+  const existingTs = batch.thinkingIdToPostedTs.get(thinkingId);
+  if (!existingTs) return false;
+
+  const text = formatThreadActivityEntry(entry);
+  if (!text) return false;
+
+  const baseBlocks = options?.useBlocks === false
+    ? undefined
+    : buildActivityEntryBlocks({ text });
+
+  try {
+    await withSlackRetry(
+      () =>
+        client.chat.update({
+          channel,
+          ts: existingTs,
+          text,
+          ...(baseBlocks ? { blocks: baseBlocks } : {}),
+        }),
+      'thinking.update'
+    );
+    return true;
+  } catch (err) {
+    console.error('[updateThinkingEntryInThread] Failed:', err);
+    return false;
   }
 }
 
