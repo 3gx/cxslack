@@ -117,7 +117,7 @@ describe('Streaming status line', () => {
     // Status line SHOULD include policy/model/session/stats
     expect(statusLineText).toContain('on-request');
     expect(statusLineText).toContain('codex-mini [high]');
-    expect(statusLineText).toContain('workspace-write');
+    expect(statusLineText).toContain('danger-full-access');
     expect(statusLineText).toContain('thread-abc');
 
     streaming.stopStreaming(conversationKey);

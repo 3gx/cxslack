@@ -22,7 +22,7 @@ const sessionsMutex = new Mutex();
 /**
  * Default approval policy.
  */
-export const DEFAULT_APPROVAL_POLICY: ApprovalPolicy = 'on-request';
+export const DEFAULT_APPROVAL_POLICY: ApprovalPolicy = 'never';
 
 /**
  * All available approval policies for UI display.

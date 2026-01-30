@@ -543,7 +543,7 @@ describe('Block Kit Builders', () => {
       // Default model: gpt-5.2-codex with xhigh reasoning
       expect(line).toContain('gpt-5.2-codex');
       expect(line).toContain('[xhigh]');
-      expect(line).toContain('workspace-write');
+      expect(line).toContain('danger-full-access');
       // Session shows 'n/a' when not set
       expect(line).toContain('n/a');
     });

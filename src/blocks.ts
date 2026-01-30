@@ -475,8 +475,8 @@ export function buildPolicyStatusBlocks(params: PolicyStatusBlockParams): Block[
     });
   } else {
     const descriptions: Record<ApprovalPolicy, string> = {
-      never: 'Never prompt, auto-approve all actions',
-      'on-request': 'Model decides when to ask (default)',
+      never: 'Never prompt, auto-approve all actions (default)',
+      'on-request': 'Model decides when to ask',
       'on-failure': 'Auto-run in sandbox, prompt only on failure',
       untrusted: 'Prompt for everything except safe reads',
     };
@@ -509,8 +509,8 @@ export function buildPolicyStatusBlocks(params: PolicyStatusBlockParams): Block[
  */
 export function buildPolicySelectionBlocks(currentPolicy: ApprovalPolicy): Block[] {
   const descriptions: Record<ApprovalPolicy, string> = {
-    never: 'Never prompt, auto-approve all actions',
-    'on-request': 'Model decides when to ask (default)',
+    never: 'Never prompt, auto-approve all actions (default)',
+    'on-request': 'Model decides when to ask',
     'on-failure': 'Auto-run in sandbox, prompt only on failure',
     untrusted: 'Prompt for everything except safe reads',
   };
@@ -599,8 +599,8 @@ export function buildSandboxStatusBlocks(params: SandboxStatusBlockParams): Bloc
 
   const descriptions: Record<SandboxMode, string> = {
     'read-only': 'Read-only access (no edits or command execution)',
-    'workspace-write': 'Read/write in workspace (default for most setups)',
-    'danger-full-access': 'Full access to filesystem + network (use with care)',
+    'workspace-write': 'Read/write in workspace',
+    'danger-full-access': 'Full access to filesystem + network (default for this bot)',
   };
 
   if (newMode) {
@@ -1176,7 +1176,7 @@ export function buildUnifiedStatusLine(params: UnifiedStatusLineParams): string 
  const modelLabel = params.model || 'gpt-5.2-codex';
   const reasoningLabel = params.reasoningEffort || 'xhigh';
   const modelWithReasoning = `${modelLabel} [${reasoningLabel}]`;
-  const sandboxLabel = params.sandboxMode || 'workspace-write';
+  const sandboxLabel = params.sandboxMode || 'danger-full-access';
   const sessionLabel = params.sessionId || 'n/a';
 
   line1Parts.push(params.approvalPolicy);

@@ -155,7 +155,7 @@ export async function handlePolicyCommand(
 
   // Handle aliases
   if (normalizedArg === 'default') {
-    newPolicy = 'on-request';
+    newPolicy = 'never';
   } else if (APPROVAL_POLICIES.includes(normalizedArg as ApprovalPolicy)) {
     newPolicy = normalizedArg as ApprovalPolicy;
   } else {
@@ -680,7 +680,7 @@ export function handleHelpCommand(): CommandResult {
 
 *Configuration:*
 \`/policy [policy]\` - View/set approval policy
-  _Policies: never, on-request (default), on-failure, untrusted_
+  _Policies: never (default), on-request, on-failure, untrusted_
 \`/model [model]\` - View/set model
 \`/reasoning [level]\` - View/set reasoning effort
   _Levels: minimal, low, medium, high, xhigh_
@@ -694,8 +694,8 @@ export function handleHelpCommand(): CommandResult {
 \`/help\` - Show this help message
 
 *Approval Policies:*
-• \`never\` - Auto-approve all actions (risky)
-• \`on-request\` - Model decides when to ask (default)
+• \`never\` - Auto-approve all actions (default)
+• \`on-request\` - Model decides when to ask
 • \`on-failure\` - Auto-run in sandbox, prompt on failure
 • \`untrusted\` - Prompt for everything except safe reads
 `.trim();
