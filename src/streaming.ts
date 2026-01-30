@@ -711,7 +711,7 @@ export class StreamingManager {
           }
 
           // Integration point 5: Post response to thread
-          if (state.text && state.text.length > 200 && status === 'completed') {
+          if (state.text && status === 'completed') {
             await postResponseToThread(
               this.slack,
               channelId,
