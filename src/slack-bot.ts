@@ -43,6 +43,7 @@ import {
   buildForkToChannelModalView,
   Block,
 } from './blocks.js';
+import { withSlackRetry } from './slack-retry.js';
 
 // ============================================================================
 // Pending Model Selection Tracking (for emoji cleanup)
@@ -315,25 +316,16 @@ function setupEventHandlers(): void {
         client,
       });
 
-      // Update source message to show fork link
+      // Update source message to show fork link (preserve activity blocks)
       if (metadata.sourceMessageTs && metadata.sourceChannelId) {
         try {
-          await client.chat.update({
-            channel: metadata.sourceChannelId,
-            ts: metadata.sourceMessageTs,
-            text: `:twisted_rightwards_arrows: Forked to <#${result.channelId}>`,
-            blocks: [
-              {
-                type: 'context',
-                elements: [
-                  {
-                    type: 'mrkdwn',
-                    text: `:twisted_rightwards_arrows: Forked to <#${result.channelId}>`,
-                  },
-                ],
-              },
-            ],
-          });
+          await updateSourceMessageWithForkLink(
+            client,
+            metadata.sourceChannelId,
+            metadata.sourceMessageTs,
+            result.channelId,
+            metadata.sourceThreadTs || undefined
+          );
         } catch (updateError) {
           console.warn('Failed to update source message after fork:', updateError);
         }
@@ -997,6 +989,130 @@ async function createForkChannel(params: CreateForkChannelParams): Promise<Creat
   };
 }
 
+interface SlackMessageSummary {
+  ts?: string;
+  text?: string;
+  blocks?: any[];
+}
+
+interface SlackMessagesResult {
+  messages?: SlackMessageSummary[];
+}
+
+// Update source activity message: remove Fork button and add fork link, preserving blocks.
+async function updateSourceMessageWithForkLink(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client: any,
+  channelId: string,
+  messageTs: string,
+  forkChannelId: string,
+  threadTs?: string
+): Promise<void> {
+  const isThreadReply = Boolean(threadTs && threadTs !== messageTs);
+
+  // Fetch the original message to preserve blocks
+  let historyResult: SlackMessagesResult | undefined;
+
+  if (isThreadReply) {
+    historyResult = (await withSlackRetry(
+      () =>
+        client.conversations.replies({
+          channel: channelId,
+          ts: threadTs,
+        }),
+      'fork.replies'
+    )) as SlackMessagesResult;
+  } else {
+    historyResult = (await withSlackRetry(
+      () =>
+        client.conversations.history({
+          channel: channelId,
+          latest: messageTs,
+          inclusive: true,
+          limit: 1,
+        }),
+      'fork.history'
+    )) as SlackMessagesResult;
+  }
+
+  // Fallback to replies if history didn't find the message and we have a thread parent
+  let messages = historyResult?.messages || [];
+  let msg = isThreadReply ? messages.find((m) => m.ts === messageTs) : messages[0];
+  if (!msg && threadTs && threadTs !== messageTs) {
+    const repliesResult = (await withSlackRetry(
+      () =>
+        client.conversations.replies({
+          channel: channelId,
+          ts: threadTs,
+        }),
+      'fork.replies.fallback'
+    )) as SlackMessagesResult;
+    messages = repliesResult?.messages || [];
+    msg = messages.find((m) => m.ts === messageTs);
+  }
+
+  if (!msg?.blocks) {
+    console.warn('[Fork] Source message blocks not found; skipping update');
+    return;
+  }
+
+  const updatedBlocks: any[] = [];
+  let forkContextAdded = false;
+
+  for (const block of msg.blocks) {
+    if (block.type === 'actions' && Array.isArray(block.elements)) {
+      const hadFork = block.elements.some(
+        (el: any) => typeof el.action_id === 'string' && el.action_id.startsWith('fork_')
+      );
+      if (hadFork) {
+        const remainingElements = block.elements.filter(
+          (el: any) => !(typeof el.action_id === 'string' && el.action_id.startsWith('fork_'))
+        );
+        if (!forkContextAdded) {
+          updatedBlocks.push({
+            type: 'context',
+            elements: [
+              {
+                type: 'mrkdwn',
+                text: `:twisted_rightwards_arrows: Forked to <#${forkChannelId}>`,
+              },
+            ],
+          });
+          forkContextAdded = true;
+        }
+        if (remainingElements.length > 0) {
+          updatedBlocks.push({ ...block, elements: remainingElements });
+        }
+        continue;
+      }
+    }
+    updatedBlocks.push(block);
+  }
+
+  if (!forkContextAdded) {
+    updatedBlocks.push({
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: `:twisted_rightwards_arrows: Forked to <#${forkChannelId}>`,
+        },
+      ],
+    });
+  }
+
+  await withSlackRetry(
+    () =>
+      client.chat.update({
+        channel: channelId,
+        ts: messageTs,
+        blocks: updatedBlocks,
+        text: msg.text,
+      }),
+    'fork.update'
+  );
+}
+
 /**
  * Handle fork action (legacy - forks in same thread, not new channel).
  */
@@ -1043,4 +1159,4 @@ async function handleFork(
 }
 
 // Export for testing
-export { app, codex, streamingManager, approvalHandler };
+export { app, codex, streamingManager, approvalHandler, updateSourceMessageWithForkLink };
