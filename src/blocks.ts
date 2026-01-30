@@ -1753,12 +1753,16 @@ export function formatToolInputSummary(toolName: string, input?: string | Record
 /**
  * Format result metrics as inline summary for display.
  * Shows line counts, match counts, or edit diff depending on tool type.
+ * Tool-aware: only shows lineCount for Read/Write, not for Bash.
  */
 export function formatToolResultSummary(entry: ActivityEntry): string {
+  const tool = normalizeToolName(entry.tool || '').toLowerCase();
+
   if (entry.matchCount !== undefined) {
     return ` → ${entry.matchCount} ${entry.matchCount === 1 ? 'match' : 'matches'}`;
   }
-  if (entry.lineCount !== undefined) {
+  // Only show lineCount for Read/Write tools, NOT for Bash commands
+  if (entry.lineCount !== undefined && (tool === 'read' || tool === 'write')) {
     return ` (${entry.lineCount} lines)`;
   }
   if (entry.linesAdded !== undefined || entry.linesRemoved !== undefined) {

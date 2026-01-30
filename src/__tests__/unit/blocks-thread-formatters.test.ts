@@ -447,9 +447,14 @@ describe('formatToolResultSummary', () => {
     expect(formatToolResultSummary(entry)).toBe(' → 1 match');
   });
 
-  it('formats line count', () => {
-    const entry: ActivityEntry = { type: 'tool_complete', timestamp: Date.now(), lineCount: 42 };
+  it('formats line count for Read tool', () => {
+    const entry: ActivityEntry = { type: 'tool_complete', timestamp: Date.now(), tool: 'Read', lineCount: 42 };
     expect(formatToolResultSummary(entry)).toBe(' (42 lines)');
+  });
+
+  it('does NOT show line count for Bash/commandExecution', () => {
+    const entry: ActivityEntry = { type: 'tool_complete', timestamp: Date.now(), tool: 'commandExecution', lineCount: 42 };
+    expect(formatToolResultSummary(entry)).toBe('');
   });
 
   it('formats edit diff', () => {
