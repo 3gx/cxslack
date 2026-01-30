@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { processSlackFiles, SlackFile } from '../../file-handler.js';
+import { processSlackFiles, SlackFile, ResizeResult } from '../../file-handler.js';
 import { buildMessageContent } from '../../content-builder.js';
 import { TurnContent } from '../../codex-client.js';
 
@@ -75,5 +75,31 @@ describe('File upload content handling', () => {
     const textBlocks = content.filter((b) => b.type === 'text') as Array<{ type: 'text'; text: string }>;
     const combined = textBlocks.map((b) => b.text).join('\n');
     expect(combined).toContain('/tmp/cxslack-big.png');
+  });
+
+  it('uses resized buffers for inline images when available', async () => {
+    const largeBuffer = Buffer.alloc(5 * 1024 * 1024, 1);
+    const resizedBuffer = Buffer.from(PNG_BASE64, 'base64');
+
+    const result = await processSlackFiles([{
+      id: 'F4',
+      name: 'large.png',
+      mimetype: 'image/png',
+      size: largeBuffer.length,
+      created: 4000,
+    }], 'token', {
+      downloadFile: async () => largeBuffer,
+      resizeImageIfNeeded: async (): Promise<ResizeResult> => ({
+        buffer: resizedBuffer,
+        mimetype: 'image/jpeg',
+        resized: true,
+        tooLarge: false,
+      }),
+      writeTempFile: async (_buffer, filename, _extension) => `/tmp/${filename}-resized.jpg`,
+    });
+
+    expect(result.files).toHaveLength(1);
+    expect(result.files[0].mimetype).toBe('image/jpeg');
+    expect(result.files[0].base64).toBe(resizedBuffer.toString('base64'));
   });
 });

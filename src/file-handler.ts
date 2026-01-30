@@ -8,12 +8,24 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import sharp from 'sharp';
 
 // Constants
-const MAX_FILE_SIZE = 30 * 1024 * 1024;           // 30MB per file
+const MAX_FILE_SIZE = 25 * 1024 * 1024;           // 25MB per file
 const MAX_FILE_COUNT = 20;                         // 20 files per message
 const DOWNLOAD_TIMEOUT_MS = 30000;                 // 30 seconds
 const MAX_IMAGE_INLINE_BYTES = 3.75 * 1024 * 1024; // ~3.75MB inline image cap
+const IMAGE_RESIZE_STEPS = [
+  { maxDimension: 2048, quality: 85 },
+  { maxDimension: 1024, quality: 80 },
+];
+
+export interface ResizeResult {
+  buffer: Buffer;
+  mimetype: string;
+  resized: boolean;
+  tooLarge: boolean;
+}
 
 /**
  * Slack file object from event payload.
@@ -56,6 +68,7 @@ export interface ProcessFilesResult {
 export interface ProcessSlackFilesOptions {
   downloadFile?: (file: SlackFile, token: string) => Promise<Buffer>;
   writeTempFile?: (buffer: Buffer, filename: string, extension: string) => Promise<string>;
+  resizeImageIfNeeded?: (buffer: Buffer, mimetype: string) => Promise<ResizeResult>;
 }
 
 /**
@@ -190,6 +203,48 @@ export async function writeTempFile(buffer: Buffer, filename: string, extension:
   return tempPath;
 }
 
+async function resizeImageIfNeeded(buffer: Buffer, mimetype: string): Promise<ResizeResult> {
+  if (buffer.length <= MAX_IMAGE_INLINE_BYTES) {
+    return { buffer, mimetype, resized: false, tooLarge: false };
+  }
+
+  let smallest: Buffer | null = null;
+  for (const step of IMAGE_RESIZE_STEPS) {
+    const resized = await sharp(buffer, { failOnError: false })
+      .rotate()
+      .resize(step.maxDimension, step.maxDimension, {
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .jpeg({ quality: step.quality, mozjpeg: true })
+      .toBuffer();
+
+    if (!smallest || resized.length < smallest.length) {
+      smallest = resized;
+    }
+
+    if (resized.length <= MAX_IMAGE_INLINE_BYTES) {
+      return {
+        buffer: resized,
+        mimetype: 'image/jpeg',
+        resized: true,
+        tooLarge: false,
+      };
+    }
+  }
+
+  if (smallest) {
+    return {
+      buffer: smallest,
+      mimetype: 'image/jpeg',
+      resized: true,
+      tooLarge: smallest.length > MAX_IMAGE_INLINE_BYTES,
+    };
+  }
+
+  return { buffer, mimetype, resized: false, tooLarge: true };
+}
+
 /**
  * Process Slack files for Codex consumption.
  */
@@ -219,6 +274,7 @@ export async function processSlackFiles(
 
   const download = options.downloadFile ?? downloadSlackFile;
   const writeTemp = options.writeTempFile ?? writeTempFile;
+  const resizeImage = options.resizeImageIfNeeded ?? resizeImageIfNeeded;
 
   for (let i = 0; i < sortedFiles.length; i++) {
     const { file } = sortedFiles[i];
@@ -240,20 +296,36 @@ export async function processSlackFiles(
 
     if (file.size && file.size > MAX_FILE_SIZE) {
       const sizeMB = (file.size / 1024 / 1024).toFixed(1);
-      warnings.push(`File ${index} (${name}) too large (${sizeMB}MB, max 30MB)`);
+      warnings.push(`File ${index} (${name}) too large (${sizeMB}MB, max 25MB)`);
       continue;
     }
 
     try {
-      const buffer = await download(file, token);
+      let buffer = await download(file, token);
+      let outputMimetype = mimetype;
+      let outputExtension = extension;
       let base64: string | undefined;
       let localPath: string | undefined;
 
       if (isImage) {
-        localPath = await writeTemp(buffer, name, extension);
+        try {
+          const resizeResult = await resizeImage(buffer, mimetype);
+          buffer = resizeResult.buffer;
+          outputMimetype = resizeResult.mimetype;
+          outputExtension = getExtension(outputMimetype);
+          if (resizeResult.resized && resizeResult.tooLarge) {
+            const sizeMB = (buffer.length / 1024 / 1024).toFixed(1);
+            warnings.push(`File ${index} (${name}) image still too large for inline data URL after resize (${sizeMB}MB, max 3.75MB)`);
+          }
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+          warnings.push(`File ${index} (${name}) image resize failed: ${errorMsg}`);
+        }
+
+        localPath = await writeTemp(buffer, name, outputExtension);
         if (buffer.length <= MAX_IMAGE_INLINE_BYTES) {
           base64 = buffer.toString('base64');
-        } else {
+        } else if (!warnings.some((warning) => warning.includes(`File ${index} (${name}) image still too large`))) {
           const sizeMB = (buffer.length / 1024 / 1024).toFixed(1);
           warnings.push(`File ${index} (${name}) image too large for inline data URL (${sizeMB}MB, max 3.75MB)`);
         }
@@ -262,7 +334,7 @@ export async function processSlackFiles(
       processedFiles.push({
         index,
         name,
-        mimetype,
+        mimetype: outputMimetype,
         size: buffer.length,
         buffer,
         base64,
