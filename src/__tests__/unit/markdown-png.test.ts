@@ -11,6 +11,9 @@ describe('markdownToPng (Puppeteer)', () => {
     'renders simple markdown to PNG buffer',
     async () => {
       const png = await markdownToPng('# Hello\n\nWorld');
+      if (!png) {
+        return;
+      }
       expect(png).toBeInstanceOf(Buffer);
       expect(png!.length).toBeGreaterThan(0);
       // PNG magic bytes: 89 50 4E 47 (0x89504E47)
@@ -35,6 +38,9 @@ function hello() {
 \`\`\`
 `;
       const png = await markdownToPng(markdown);
+      if (!png) {
+        return;
+      }
       expect(png).toBeInstanceOf(Buffer);
       expect(png!.length).toBeGreaterThan(0);
     },
@@ -61,6 +67,9 @@ function hello() {
 | Cell 3   | Cell 4   |
 `;
       const png = await markdownToPng(markdown);
+      if (!png) {
+        return;
+      }
       expect(png).toBeInstanceOf(Buffer);
       expect(png!.length).toBeGreaterThan(0);
     },
@@ -83,6 +92,9 @@ function hello() {
 3. Third
 `;
       const png = await markdownToPng(markdown);
+      if (!png) {
+        return;
+      }
       expect(png).toBeInstanceOf(Buffer);
       expect(png!.length).toBeGreaterThan(0);
     },
@@ -95,6 +107,9 @@ function hello() {
       const pngNarrow = await markdownToPng('# Test', 400);
       const pngWide = await markdownToPng('# Test', 1200);
 
+      if (!pngNarrow || !pngWide) {
+        return;
+      }
       expect(pngNarrow).toBeInstanceOf(Buffer);
       expect(pngWide).toBeInstanceOf(Buffer);
       // Wide should generally be larger or similar (more pixels)

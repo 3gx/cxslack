@@ -9,6 +9,7 @@
  * - /status - Show session status
  * - /cwd - Set working directory
  * - /update-rate - Set message update rate
+ * - /message-size - Set message size limit
  * - /help - Show help
  */
 
@@ -20,6 +21,7 @@ import {
   getThreadSession,
   saveThreadSession,
   saveApprovalPolicy,
+  saveThreadCharLimit,
   clearSession,
   getEffectiveApprovalPolicy,
   getEffectiveWorkingDir,
@@ -46,6 +48,14 @@ import fs from 'fs';
 export const DEFAULT_MODEL = 'gpt-5.2-codex';
 export const DEFAULT_MODEL_DISPLAY = 'GPT-5.2 Codex';
 export const DEFAULT_REASONING: ReasoningEffort = 'xhigh';
+
+/**
+ * Message size configuration for thread responses.
+ */
+export const MESSAGE_SIZE_MIN = 100;
+export const MESSAGE_SIZE_MAX = 36000; // ~90% of Slack's 40k char limit
+export const MESSAGE_SIZE_DEFAULT = 500;
+export const THINKING_MESSAGE_SIZE = 3000;
 
 /**
  * Fallback model list when server doesn't provide models.
@@ -385,6 +395,8 @@ export async function handleStatusCommand(
   // Format model like CLI: "gpt-5.2-codex (reasoning xhigh)"
   const modelName = lastUsage?.model || session?.model || DEFAULT_MODEL;
   const reasoning = session?.reasoningEffort || DEFAULT_REASONING;
+  const messageSize = session?.threadCharLimit ?? MESSAGE_SIZE_DEFAULT;
+  const messageSizeSuffix = session?.threadCharLimit === undefined ? ' (default)' : '';
 
   const lines: string[] = [
     ':information_source: *Codex Session Status*',
@@ -392,6 +404,7 @@ export async function handleStatusCommand(
     `*Model:* ${modelName} (reasoning ${reasoning})`,
     `*Directory:* \`${workingDir}\``,
     `*Approval:* ${policy}`,
+    `*Message size:* ${messageSize}${messageSizeSuffix}`,
     `*Account:* ${accountInfo}`,
     `*Session:* \`${effectiveThreadId || 'none'}\``,
   ];
@@ -558,6 +571,56 @@ export async function handleUpdateRateCommand(
 }
 
 /**
+ * Handle /message-size command.
+ * Sets max response chars before truncation/attachment.
+ */
+export async function handleMessageSizeCommand(
+  context: CommandContext
+): Promise<CommandResult> {
+  const { channelId, threadTs, text: args } = context;
+
+  const session = threadTs
+    ? getThreadSession(channelId, threadTs)
+    : getSession(channelId);
+  const currentLimit = session?.threadCharLimit;
+
+  if (!args) {
+    const display = currentLimit ?? MESSAGE_SIZE_DEFAULT;
+    const suffix = currentLimit === undefined ? ' (default)' : '';
+    return {
+      blocks: buildTextBlocks(`:straight_ruler: Message size limit: ${display}${suffix}`),
+      text: `Message size limit: ${display}${suffix}`,
+    };
+  }
+
+  const value = parseInt(args.trim(), 10);
+  if (isNaN(value)) {
+    return {
+      blocks: buildErrorBlocks(
+        `Invalid number. Usage: \`/message-size <${MESSAGE_SIZE_MIN}-${MESSAGE_SIZE_MAX}>\` (default=${MESSAGE_SIZE_DEFAULT})`
+      ),
+      text: 'Invalid message size',
+    };
+  }
+
+  if (value < MESSAGE_SIZE_MIN || value > MESSAGE_SIZE_MAX) {
+    return {
+      blocks: buildErrorBlocks(
+        `Value must be between ${MESSAGE_SIZE_MIN} and ${MESSAGE_SIZE_MAX}. Default is ${MESSAGE_SIZE_DEFAULT}.`
+      ),
+      text: 'Invalid message size',
+    };
+  }
+
+  await saveThreadCharLimit(channelId, threadTs, value);
+
+  return {
+    blocks: buildTextBlocks(`:straight_ruler: Message size limit set to ${value}.`),
+    text: `Message size limit set to ${value}.`,
+  };
+}
+
+/**
  * Handle /help command.
  */
 export function handleHelpCommand(): CommandResult {
@@ -576,6 +639,7 @@ export function handleHelpCommand(): CommandResult {
   _Levels: minimal, low, medium, high, xhigh_
 \`/cwd [path]\` - View/set working directory
 \`/update-rate [1-10]\` - Set message update rate in seconds
+\`/message-size [n]\` - Set message size limit before truncation (100-36000, default=500)
 \`/resume <thread-id>\` - Resume an existing Codex thread
 
 *Help:*
@@ -625,6 +689,8 @@ export async function handleCommand(
       return handleCwdCommand(contextWithArgs);
     case 'update-rate':
       return handleUpdateRateCommand(contextWithArgs);
+    case 'message-size':
+      return handleMessageSizeCommand(contextWithArgs);
     case 'resume':
       return handleResumeCommand(contextWithArgs, codex);
     case 'help':

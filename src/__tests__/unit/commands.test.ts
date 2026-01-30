@@ -8,6 +8,8 @@ import {
   handlePolicyCommand,
   handleModelCommand,
   handleResumeCommand,
+  handleMessageSizeCommand,
+  MESSAGE_SIZE_DEFAULT,
   type CommandContext,
 } from '../../commands.js';
 
@@ -17,6 +19,7 @@ vi.mock('../../session-manager.js', () => ({
   getThreadSession: vi.fn(() => null),
   saveSession: vi.fn(),
   saveThreadSession: vi.fn(),
+  saveThreadCharLimit: vi.fn(),
   clearSession: vi.fn(),
   getEffectiveWorkingDir: vi.fn(() => '/tmp'),
   APPROVAL_POLICIES: ['never', 'on-request', 'on-failure', 'untrusted'],
@@ -153,6 +156,30 @@ describe('Command Handlers', () => {
 
       expect(result.text).toContain('Failed to resume session');
       expect(result.text).toContain('not found');
+    });
+  });
+
+  describe('handleMessageSizeCommand', () => {
+    it('shows default message size when unset', async () => {
+      const result = await handleMessageSizeCommand({ ...baseContext, text: '' });
+
+      expect(result.text).toContain(`${MESSAGE_SIZE_DEFAULT}`);
+      expect(result.text).toContain('default');
+    });
+
+    it('sets message size when valid', async () => {
+      const { saveThreadCharLimit } = await import('../../session-manager.js');
+
+      const result = await handleMessageSizeCommand({ ...baseContext, text: '1000' });
+
+      expect(saveThreadCharLimit).toHaveBeenCalledWith(baseContext.channelId, baseContext.threadTs, 1000);
+      expect(result.text).toContain('1000');
+    });
+
+    it('rejects invalid message size', async () => {
+      const result = await handleMessageSizeCommand({ ...baseContext, text: 'abc' });
+
+      expect(result.text).toContain('Invalid');
     });
   });
 });

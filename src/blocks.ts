@@ -1721,7 +1721,10 @@ export function formatToolInputSummary(toolName: string, input?: string | Record
     case 'webfetch':
       return input.url ? ` \`${truncateUrl(input.url as string)}\`` : '';
     case 'websearch':
-      return input.query ? ` "${truncateText(input.query as string, 30)}"` : '';
+      if (input.query) {
+        return ` "${truncateText(input.query as string, 30)}"`;
+      }
+      return input.url ? ` \`${truncateUrl(input.url as string)}\`` : '';
     case 'todowrite': {
       const todoItems = Array.isArray(input.todos) ? input.todos.filter(isTodoItem) : [];
       if (todoItems.length === 0) return '';
@@ -1790,6 +1793,8 @@ export function formatOutputPreview(tool: string, preview: string): string {
       return matches.length ? matches.map(m => `\`${m.slice(0, 50)}\``).join(', ') : 'No matches';
     case 'read':
       return `\`${cleaned.slice(0, 100)}\`${cleaned.length > 100 ? '...' : ''}`;
+    case 'websearch':
+      return cleaned;
     default:
       return cleaned.length > 100 ? cleaned.slice(0, 100) + '...' : cleaned;
   }

@@ -332,6 +332,63 @@ describe('CodexClient Token Events', () => {
   });
 });
 
+describe('CodexClient web search notifications', () => {
+  it('emits websearch start/end with parsed fields', () => {
+    const client = new CodexClient({ requestTimeout: 10 });
+    const started = vi.fn();
+    const completed = vi.fn();
+
+    client.on('websearch:started', started);
+    client.on('websearch:completed', completed);
+
+    const begin: JsonRpcNotification = {
+      method: 'codex/event/web_search_begin',
+      params: {
+        conversationId: 'thread-1',
+        msg: {
+          call_id: 'search-1',
+          query: 'test query',
+          url: 'https://search.example',
+          turn_id: 'turn-1',
+        },
+      },
+    };
+
+    const end: JsonRpcNotification = {
+      method: 'codex/event/web_search_end',
+      params: {
+        conversationId: 'thread-1',
+        msg: {
+          call_id: 'search-1',
+          results: [{ url: 'https://result.example' }],
+        },
+      },
+    };
+
+    (client as any).handleNotification(begin);
+    (client as any).handleNotification(end);
+
+    expect(started).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: 'search-1',
+        query: 'test query',
+        url: 'https://search.example',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+      })
+    );
+
+    expect(completed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: 'search-1',
+        url: 'https://result.example',
+        resultUrls: ['https://result.example'],
+        threadId: 'thread-1',
+      })
+    );
+  });
+});
+
 describe('CodexClient Point-in-Time Fork', () => {
   describe('rollbackThread validation', () => {
     it('rejects numTurns < 1', async () => {

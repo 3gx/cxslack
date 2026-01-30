@@ -589,6 +589,12 @@ describe('formatOutputPreview', () => {
     const result = formatOutputPreview('Bash', 'clean\x00output');
     expect(result).not.toContain('\x00');
   });
+
+  it('keeps full URL for web search output', () => {
+    const url = 'https://example.com/some/really/long/path?with=query&and=more';
+    const result = formatOutputPreview('webSearch', url);
+    expect(result).toBe(url);
+  });
 });
 
 describe('formatThreadActivityEntry with metrics', () => {

@@ -76,6 +76,8 @@ export interface Session {
   configuredAt: number | null;
   /** Message update rate in seconds (1-10, default 3) */
   updateRateSeconds?: number;
+  /** Max response chars before truncation/attachment */
+  threadCharLimit?: number;
   /** Usage data from last query (for /status and /context) */
   lastUsage?: LastUsage;
   /** Parent thread ID this channel was forked from (for fork-to-channel) */
@@ -113,6 +115,8 @@ export interface ThreadSession {
   configuredAt: number | null;
   /** Message update rate in seconds (inherited from channel) */
   updateRateSeconds?: number;
+  /** Max response chars before truncation/attachment (inherited from channel) */
+  threadCharLimit?: number;
   /** Previous thread IDs (for /resume after /clear) */
   previousThreadIds?: string[];
   /** Usage data from last query (for /status and /context) */
@@ -217,6 +221,7 @@ export async function saveSession(channelId: string, session: Partial<Session>):
       configuredBy: existing?.configuredBy ?? null,
       configuredAt: existing?.configuredAt ?? null,
       updateRateSeconds: existing?.updateRateSeconds,
+      threadCharLimit: existing?.threadCharLimit,
       threads: existing?.threads,
       turns: existing?.turns,
       lastUsage: existing?.lastUsage,
@@ -295,6 +300,7 @@ export async function saveThreadSession(
       configuredBy: existingThread?.configuredBy ?? mainChannel.configuredBy,
       configuredAt: existingThread?.configuredAt ?? mainChannel.configuredAt,
       updateRateSeconds: existingThread?.updateRateSeconds ?? mainChannel.updateRateSeconds,
+      threadCharLimit: existingThread?.threadCharLimit ?? mainChannel.threadCharLimit,
       lastUsage: existingThread?.lastUsage,
       messageTurnMap: existingThread?.messageTurnMap,
       messageToolMap: existingThread?.messageToolMap,
@@ -335,6 +341,21 @@ export async function saveApprovalPolicy(
   await saveSession(channelId, { approvalPolicy });
   if (threadTs) {
     await saveThreadSession(channelId, threadTs, { approvalPolicy });
+  }
+}
+
+/**
+ * Save thread message size limit for both channel and thread (if provided).
+ * Ensures new threads inherit the latest selection.
+ */
+export async function saveThreadCharLimit(
+  channelId: string,
+  threadTs: string | undefined,
+  threadCharLimit: number
+): Promise<void> {
+  await saveSession(channelId, { threadCharLimit });
+  if (threadTs) {
+    await saveThreadSession(channelId, threadTs, { threadCharLimit });
   }
 }
 

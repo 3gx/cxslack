@@ -169,6 +169,24 @@ export interface CodexClientEvents {
   'command:output': (params: { itemId: string; delta: string }) => void;
   'command:completed': (params: { itemId: string; threadId: string; turnId: string; exitCode?: number }) => void;
 
+  // Web search lifecycle (from web_search notifications)
+  'websearch:started': (params: {
+    itemId: string;
+    query?: string;
+    url?: string;
+    threadId?: string;
+    turnId?: string;
+  }) => void;
+  'websearch:completed': (params: {
+    itemId: string;
+    query?: string;
+    url?: string;
+    resultUrls?: string[];
+    durationMs?: number;
+    threadId?: string;
+    turnId?: string;
+  }) => void;
+
   // Context update for abort fix (emitted when we extract valid threadId+turnId)
   'context:turnId': (params: { threadId: string; turnId: string }) => void;
 
@@ -1032,9 +1050,73 @@ export class CodexClient extends EventEmitter {
         break;
       }
 
+      // Web search lifecycle events
+      case 'codex/event/web_search_begin': {
+        const p = params as Record<string, unknown>;
+        const msg = (p.msg as Record<string, unknown> | undefined) ?? p;
+
+        const itemId = (msg.call_id || msg.item_id || msg.itemId || msg.search_id || msg.searchId || p.id || msg.id || '') as string;
+        const query = (msg.query || msg.search_query || msg.searchQuery || msg.q || msg.text || msg.prompt ||
+          (msg.input as Record<string, unknown> | undefined)?.query || msg.input) as string | undefined;
+        const url = (msg.url || msg.search_url || msg.searchUrl || msg.endpoint) as string | undefined;
+        const threadId = (p.conversationId || p.threadId || p.thread_id || msg.thread_id || msg.threadId || '') as string;
+        const turnId = (msg.turn_id || p.turnId || p.turn_id || '') as string;
+
+        if (threadId && turnId) {
+          this.emit('context:turnId', { threadId, turnId });
+        }
+
+        this.emit('websearch:started', {
+          itemId: itemId || `websearch-${Date.now()}`,
+          query,
+          url,
+          threadId: threadId || undefined,
+          turnId: turnId || undefined,
+        });
+        break;
+      }
+
+      case 'codex/event/web_search_end': {
+        const p = params as Record<string, unknown>;
+        const msg = (p.msg as Record<string, unknown> | undefined) ?? p;
+
+        const itemId = (msg.call_id || msg.item_id || msg.itemId || msg.search_id || msg.searchId || p.id || msg.id || '') as string;
+        const query = (msg.query || msg.search_query || msg.searchQuery || msg.q || msg.text || msg.prompt ||
+          (msg.input as Record<string, unknown> | undefined)?.query || msg.input) as string | undefined;
+        const durationMs = (msg.duration_ms || msg.elapsed_ms || msg.latency_ms || p.duration_ms || p.elapsed_ms) as number | undefined;
+        const threadId = (p.conversationId || p.threadId || p.thread_id || msg.thread_id || msg.threadId || '') as string;
+        const turnId = (msg.turn_id || p.turnId || p.turn_id || '') as string;
+
+        const results = (msg.results || (msg.output as Record<string, unknown> | undefined)?.results ||
+          msg.urls || msg.links) as unknown;
+        let resultUrls: string[] | undefined;
+        if (Array.isArray(results)) {
+          resultUrls = results
+            .map((r) => (r as Record<string, unknown>).url || (r as Record<string, unknown>).link || (r as Record<string, unknown>).href)
+            .filter((u): u is string => typeof u === 'string' && u.length > 0);
+        } else if (typeof results === 'string') {
+          resultUrls = [results];
+        }
+
+        const url = (msg.url || msg.search_url || msg.searchUrl || msg.endpoint ||
+          (resultUrls && resultUrls.length > 0 ? resultUrls[0] : undefined)) as string | undefined;
+
+        this.emit('websearch:completed', {
+          itemId: itemId || `websearch-${Date.now()}`,
+          query,
+          url,
+          resultUrls,
+          durationMs,
+          threadId: threadId || undefined,
+          turnId: turnId || undefined,
+        });
+        break;
+      }
+
       // Informational events (log but don't emit)
       case 'thread/started':
       case 'account/rateLimits/updated':
+      case 'codex/event/turn_diff':
       case 'codex/event/mcp_startup_update':
       case 'codex/event/mcp_startup_complete':
       case 'codex/event/user_message':
@@ -1042,6 +1124,7 @@ export class CodexClient extends EventEmitter {
       case 'codex/event/agent_reasoning':
       case 'codex/event/agent_reasoning_section_break':
       case 'codex/event/turn_aborted':
+      case 'turn/diff/updated':
         // These are informational - no action needed
         break;
 

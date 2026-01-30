@@ -19,9 +19,7 @@ import type { WebClient } from '@slack/web-api';
 import { Mutex } from 'async-mutex';
 import type { CodexClient, TurnStatus, ApprovalRequest, ApprovalPolicy, ReasoningEffort } from './codex-client.js';
 import {
-  buildTextBlocks,
   buildActivityBlocks,
-  Block,
   DEFAULT_CONTEXT_WINDOW,
   computeAutoCompactThreshold,
   buildActivityEntryBlocks,
@@ -34,7 +32,7 @@ import {
   markAborted as markAbortedEmoji,
 } from './emoji-reactions.js';
 import { isAborted, clearAborted } from './abort-tracker.js';
-import { saveSession, saveThreadSession, getThreadSession, LastUsage } from './session-manager.js';
+import { saveSession, saveThreadSession, getThreadSession, getSession, LastUsage } from './session-manager.js';
 import {
   ActivityThreadManager,
   ActivityEntry,
@@ -47,6 +45,7 @@ import {
 } from './activity-thread.js';
 import { buildActivityEntryActionParams } from './blocks.js';
 import { withSlackRetry } from './slack-retry.js';
+import { THINKING_MESSAGE_SIZE } from './commands.js';
 
 // Constants matching CCSLACK architecture
 const MAX_LIVE_ENTRIES = 300; // Threshold for rolling window
@@ -178,6 +177,8 @@ interface StreamingState {
     // Bash command output accumulation (via command:output events)
     outputBuffer?: string;
     exitCode?: number;
+    // Non-bash tools can store a short output preview (web search URLs, etc.)
+    outputPreview?: string;
   }>;
   /** The ONE activity message timestamp we update */
   activityMessageTs?: string;
@@ -654,13 +655,19 @@ export class StreamingManager {
           // FIX: Always post thinking content here. The streaming flush only posts headers
           // (":bulb: Thinking... [X chars]"), not actual content. postThinkingToThread posts
           // the full content as a separate message.
+          const sessionForLimit = found.context.threadTs
+            ? getThreadSession(channelId, found.context.threadTs)
+            : getSession(channelId);
+          const threadCharLimit = sessionForLimit?.threadCharLimit;
+
           if (state.thinkingContent && state.thinkingContent.length > 100) {
             await postThinkingToThread(
               this.slack,
               channelId,
               state.threadParentTs || originalTs,
               state.thinkingContent,
-              Date.now() - (state.thinkingStartTime || found.context.startTime)
+              Date.now() - (state.thinkingStartTime || found.context.startTime),
+              THINKING_MESSAGE_SIZE
             ).catch((err) => console.error('[streaming] Thinking post failed:', err));
           }
 
@@ -671,7 +678,8 @@ export class StreamingManager {
               channelId,
               state.threadParentTs || originalTs,
               state.text,
-              Date.now() - found.context.startTime
+              Date.now() - found.context.startTime,
+              threadCharLimit
             ).catch((err) => console.error('[streaming] Response post failed:', err));
           }
 
@@ -687,11 +695,6 @@ export class StreamingManager {
 
           // FINAL update - shows complete status and response
           await this.updateActivityMessage(found.key);
-
-          // Post the full response as a separate message if long
-          if (state.text && status === 'completed') {
-            await this.postResponseMessage(found.key);
-          }
 
           // Clean up activity entries
           this.activityManager.clearEntries(found.key);
@@ -746,6 +749,18 @@ export class StreamingManager {
           // For TodoWrite, store the full structured input for todo extraction
           // For other tools, use the display input string
           const toolInputValue = rawToolInput || displayInput;
+
+          // If this tool was already seeded (e.g., web search begin), just update metadata
+          if (state.activeTools.has(itemId)) {
+            const existingTool = state.activeTools.get(itemId)!;
+            if (!existingTool.input && displayInput) {
+              existingTool.input = displayInput;
+            }
+            if (!existingTool.toolInput && toolInputValue) {
+              existingTool.toolInput = toolInputValue;
+            }
+            break;
+          }
 
           // Add activity entry for actual tools only
           this.activityManager.addEntry(key, {
@@ -843,7 +858,7 @@ export class StreamingManager {
                 if (cleaned.length === 0) {
                   entry.toolOutputPreview = '[No output]';
                 } else {
-                  entry.toolOutputPreview = cleaned.slice(0, MAX_PREVIEW);
+                entry.toolOutputPreview = cleaned.slice(0, MAX_PREVIEW);
                   if (cleaned.length > MAX_PREVIEW) {
                     entry.toolOutputPreview += '...';
                   }
@@ -858,6 +873,10 @@ export class StreamingManager {
                 entry.toolIsError = true;
                 entry.toolErrorMessage = `Exit code ${toolInfo.exitCode}`;
               }
+            }
+
+            if (toolLower !== 'bash' && toolLower !== 'commandexecution' && toolInfo.outputPreview) {
+              entry.toolOutputPreview = toolInfo.outputPreview;
             }
 
             // Add the entry with metrics
@@ -897,6 +916,110 @@ export class StreamingManager {
             }
           }
           break;
+        }
+      }
+    });
+
+    // Web search lifecycle (adds query + URL context)
+    this.codex.on('websearch:started', ({ itemId, query, url, threadId }) => {
+      if (!itemId) return;
+      for (const [key, state] of this.states) {
+        if (!state.isStreaming) continue;
+
+        const context = this.contexts.get(key);
+        if (!context) continue;
+        if (threadId && context.threadId && context.threadId !== threadId) continue;
+
+        const toolInput: Record<string, unknown> = {};
+        if (query) toolInput.query = query;
+        if (url) toolInput.url = url;
+
+        const displayInput = query || url;
+        let created = false;
+
+        if (state.activeTools.has(itemId)) {
+          const existingTool = state.activeTools.get(itemId)!;
+          existingTool.tool = existingTool.tool || 'webSearch';
+          existingTool.toolInput = Object.keys(toolInput).length ? toolInput : existingTool.toolInput;
+          existingTool.input = existingTool.input ?? displayInput;
+        } else {
+          state.activeTools.set(itemId, {
+            tool: 'webSearch',
+            input: displayInput,
+            toolInput: Object.keys(toolInput).length ? toolInput : undefined,
+            startTime: Date.now(),
+          });
+          created = true;
+          this.activityManager.addEntry(key, {
+            type: 'tool_start',
+            timestamp: Date.now(),
+            tool: 'webSearch',
+            toolInput: Object.keys(toolInput).length ? toolInput : displayInput,
+            toolUseId: itemId,
+          });
+        }
+
+        // Update existing tool_start entry with richer input if present
+        const entries = this.activityManager.getEntries(key);
+        const startEntry = entries.find(
+          (e) => e.type === 'tool_start' && e.toolUseId === itemId
+        );
+        if (startEntry && Object.keys(toolInput).length) {
+          startEntry.toolInput = toolInput;
+        }
+
+        if (created) {
+          flushActivityBatchToThread(
+            this.activityManager,
+            key,
+            this.slack,
+            context.channelId,
+            state.threadParentTs || context.originalTs,
+            {
+              force: false,
+              mapActivityTs: (ts, entry) => {
+                const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
+                const messageToolMap = threadSession?.messageToolMap || {};
+                const messageTurnMap = threadSession?.messageTurnMap || {};
+                messageToolMap[ts] = entry.toolUseId || itemId;
+                messageTurnMap[ts] = context.turnId;
+                saveThreadSession(context.channelId, context.threadTs || context.originalTs, {
+                  messageToolMap,
+                  messageTurnMap,
+                }).catch((err) => console.error('[streaming] Failed to save message maps:', err));
+              },
+              buildActions: (entry, slackTs) =>
+                buildActivityEntryActionParams(entry, key, context.turnId, slackTs || context.originalTs, false),
+            }
+          ).catch((err) => console.error('[streaming] Thread batch post failed:', err));
+        }
+      }
+    });
+
+    this.codex.on('websearch:completed', ({ itemId, url, resultUrls, threadId }) => {
+      if (!itemId) return;
+      const previewUrl = (resultUrls && resultUrls.length > 0 ? resultUrls[0] : undefined) || url;
+
+      for (const [key, state] of this.states) {
+        if (!state.isStreaming) continue;
+
+        const context = this.contexts.get(key);
+        if (!context) continue;
+        if (threadId && context.threadId && context.threadId !== threadId) continue;
+
+        if (previewUrl) {
+          const toolInfo = state.activeTools.get(itemId);
+          if (toolInfo) {
+            toolInfo.outputPreview = previewUrl;
+          }
+
+          const entries = this.activityManager.getEntries(key);
+          const completeEntry = entries.find(
+            (e) => e.type === 'tool_complete' && e.toolUseId === itemId
+          );
+          if (completeEntry) {
+            completeEntry.toolOutputPreview = previewUrl;
+          }
         }
       }
     });
@@ -1303,52 +1426,4 @@ export class StreamingManager {
     });
   }
 
-  /**
-   * Post full response message to thread (separate from activity message).
-   * Only posts if response is substantial and turn completed successfully.
-   */
-  private async postResponseMessage(conversationKey: string): Promise<void> {
-    const context = this.contexts.get(conversationKey);
-    const state = this.states.get(conversationKey);
-
-    if (!context || !state || !state.text) {
-      return;
-    }
-
-    // Build response blocks
-    const blocks: Block[] = [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: ':speech_balloon: *Response*',
-        },
-      },
-      ...buildTextBlocks(state.text),
-    ];
-
-    try {
-      const threadTs = context.threadTs || context.originalTs;
-      const result = await withSlackRetry(
-        () =>
-          this.slack.chat.postMessage({
-            channel: context.channelId,
-            thread_ts: threadTs,
-            blocks,
-            text: state.text,
-          }),
-        'response.post'
-      );
-
-      const postedTs = (result as any)?.ts as string | undefined;
-      if (postedTs && context.threadTs) {
-        const session = getThreadSession(context.channelId, context.threadTs);
-        const messageTurnMap = session?.messageTurnMap || {};
-        messageTurnMap[postedTs] = context.turnId;
-        await saveThreadSession(context.channelId, context.threadTs, { messageTurnMap });
-      }
-    } catch (err) {
-      console.error('Failed to post response message:', err);
-    }
-  }
 }

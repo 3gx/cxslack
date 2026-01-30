@@ -8,6 +8,7 @@
 import type { WebClient } from '@slack/web-api';
 import { withSlackRetry } from './slack-retry.js';
 import { markdownToPng } from './markdown-png.js';
+import { MESSAGE_SIZE_DEFAULT, THINKING_MESSAGE_SIZE } from './commands.js';
 import {
   stripMarkdownCodeFence,
   markdownToSlack,
@@ -389,8 +390,8 @@ export function buildActivityLogText(
 // Thread Posting Functions (Ported from ccslack)
 // ============================================================================
 
-// Default message size limit for Slack
-export const MESSAGE_SIZE_DEFAULT = 2900;
+// Default message size limit for Slack responses
+export { MESSAGE_SIZE_DEFAULT };
 
 // Polling config for files.uploadV2 shares (async file sharing)
 const FILE_SHARES_POLL_INTERVAL_MS = 200; // Poll every 200ms
@@ -798,7 +799,7 @@ export async function postThinkingToThread(
   durationMs?: number,
   charLimit?: number
 ): Promise<string | null> {
-  const limit = charLimit ?? MESSAGE_SIZE_DEFAULT;
+  const limit = charLimit ?? THINKING_MESSAGE_SIZE;
 
   // Format header
   const header = formatThreadThinkingMessage(content, durationMs);

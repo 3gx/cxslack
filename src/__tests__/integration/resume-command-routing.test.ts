@@ -16,6 +16,7 @@ vi.mock('../../session-manager.js', () => {
     getThreadSession: vi.fn(() => null),
     saveSession,
     saveThreadSession,
+    saveThreadCharLimit: vi.fn(),
     clearSession: vi.fn(),
     getEffectiveApprovalPolicy: vi.fn(() => 'on-request'),
     getEffectiveWorkingDir: vi.fn(() => '/tmp'),
