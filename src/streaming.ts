@@ -17,7 +17,14 @@
 
 import type { WebClient } from '@slack/web-api';
 import { Mutex } from 'async-mutex';
-import type { CodexClient, TurnStatus, ApprovalRequest, ApprovalPolicy, ReasoningEffort } from './codex-client.js';
+import type {
+  CodexClient,
+  TurnStatus,
+  ApprovalRequest,
+  ApprovalPolicy,
+  ReasoningEffort,
+  SandboxMode,
+} from './codex-client.js';
 import {
   buildActivityBlocks,
   DEFAULT_CONTEXT_WINDOW,
@@ -116,6 +123,8 @@ export interface StreamingContext {
   approvalPolicy: ApprovalPolicy;
   /** Current reasoning effort */
   reasoningEffort?: ReasoningEffort;
+  /** Current sandbox mode */
+  sandboxMode?: SandboxMode;
   /** Update rate in ms */
   updateRateMs: number;
   /** Model being used */
@@ -406,6 +415,18 @@ export class StreamingManager {
    */
   isStreaming(conversationKey: string): boolean {
     return this.states.get(conversationKey)?.isStreaming ?? false;
+  }
+
+  /**
+   * Check if ANY conversation is actively streaming.
+   */
+  isAnyStreaming(): boolean {
+    for (const state of this.states.values()) {
+      if (state.isStreaming) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -1357,6 +1378,7 @@ export class StreamingManager {
         approvalPolicy: context.approvalPolicy,
         model: context.model,
         reasoningEffort: context.reasoningEffort,
+        sandboxMode: context.sandboxMode,
         sessionId: context.threadId,
         contextPercent,
         contextTokens: contextTokens > 0 ? contextTokens : undefined,

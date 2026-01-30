@@ -10,11 +10,12 @@
  * - /cwd - Set working directory
  * - /update-rate - Set message update rate
  * - /message-size - Set message size limit
+ * - /sandbox - Set sandbox mode
  * - /help - Show help
  */
 
 import type { WebClient } from '@slack/web-api';
-import type { CodexClient, ApprovalPolicy, ReasoningEffort } from './codex-client.js';
+import type { CodexClient, ApprovalPolicy, ReasoningEffort, SandboxMode } from './codex-client.js';
 import {
   getSession,
   saveSession,
@@ -37,6 +38,8 @@ import {
   buildTextBlocks,
   buildErrorBlocks,
   buildResumeConfirmationBlocks,
+  buildSandboxSelectionBlocks,
+  buildSandboxStatusBlocks,
   Block,
   ModelInfo,
 } from './blocks.js';
@@ -83,6 +86,7 @@ export interface CommandResult {
   text: string; // Fallback text
   ephemeral?: boolean; // Whether to send as ephemeral message
   showModelSelection?: boolean; // Flag to trigger model picker with emoji tracking
+  sandboxModeChange?: SandboxMode; // Flag to restart app-server with new sandbox mode
 }
 
 /**
@@ -397,6 +401,7 @@ export async function handleStatusCommand(
   const reasoning = session?.reasoningEffort || DEFAULT_REASONING;
   const messageSize = session?.threadCharLimit ?? MESSAGE_SIZE_DEFAULT;
   const messageSizeSuffix = session?.threadCharLimit === undefined ? ' (default)' : '';
+  const sandboxMode = codex.getSandboxMode();
 
   const lines: string[] = [
     ':information_source: *Codex Session Status*',
@@ -404,6 +409,7 @@ export async function handleStatusCommand(
     `*Model:* ${modelName} (reasoning ${reasoning})`,
     `*Directory:* \`${workingDir}\``,
     `*Approval:* ${policy}`,
+    `*Sandbox:* ${sandboxMode ?? 'default'}`,
     `*Message size:* ${messageSize}${messageSizeSuffix}`,
     `*Account:* ${accountInfo}`,
     `*Session:* \`${effectiveThreadId || 'none'}\``,
@@ -571,6 +577,43 @@ export async function handleUpdateRateCommand(
 }
 
 /**
+ * Handle /sandbox command.
+ */
+export async function handleSandboxCommand(
+  context: CommandContext,
+  codex: CodexClient
+): Promise<CommandResult> {
+  const { text: args } = context;
+
+  const currentMode = codex.getSandboxMode();
+
+  if (!args) {
+    return {
+      blocks: buildSandboxSelectionBlocks(currentMode),
+      text: `Select sandbox mode (current: ${currentMode ?? 'default'})`,
+    };
+  }
+
+  const normalized = args.trim().toLowerCase();
+  const allowed: SandboxMode[] = ['read-only', 'workspace-write', 'danger-full-access'];
+  if (!allowed.includes(normalized as SandboxMode)) {
+    return {
+      blocks: buildErrorBlocks(
+        `Invalid sandbox mode: "${args}"\nValid modes: ${allowed.join(', ')}`
+      ),
+      text: `Invalid sandbox mode: ${args}`,
+    };
+  }
+
+  const newMode = normalized as SandboxMode;
+  return {
+    blocks: buildSandboxStatusBlocks({ currentMode, newMode }),
+    text: `Sandbox mode changed: ${currentMode ?? 'default'} → ${newMode}`,
+    sandboxModeChange: newMode,
+  };
+}
+
+/**
  * Handle /message-size command.
  * Sets max response chars before truncation/attachment.
  */
@@ -640,6 +683,7 @@ export function handleHelpCommand(): CommandResult {
 \`/cwd [path]\` - View/set working directory
 \`/update-rate [1-10]\` - Set message update rate in seconds
 \`/message-size [n]\` - Set message size limit before truncation (100-36000, default=500)
+\`/sandbox [mode]\` - Set sandbox mode (read-only, workspace-write, danger-full-access)
 \`/resume <thread-id>\` - Resume an existing Codex thread
 
 *Help:*
@@ -691,6 +735,8 @@ export async function handleCommand(
       return handleUpdateRateCommand(contextWithArgs);
     case 'message-size':
       return handleMessageSizeCommand(contextWithArgs);
+    case 'sandbox':
+      return handleSandboxCommand(contextWithArgs, codex);
     case 'resume':
       return handleResumeCommand(contextWithArgs, codex);
     case 'help':

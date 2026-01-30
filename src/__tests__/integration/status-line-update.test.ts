@@ -33,6 +33,7 @@ describe('Streaming status line', () => {
       turnId: 'turn-1',
       approvalPolicy: 'on-request',
       reasoningEffort: 'high',
+      sandboxMode: 'workspace-write',
       updateRateMs: 1000,
       model: 'codex-mini',
       startTime: Date.now() - 3000,
@@ -116,6 +117,7 @@ describe('Streaming status line', () => {
     // Status line SHOULD include policy/model/session/stats
     expect(statusLineText).toContain('on-request');
     expect(statusLineText).toContain('codex-mini [high]');
+    expect(statusLineText).toContain('workspace-write');
     expect(statusLineText).toContain('thread-abc');
 
     streaming.stopStreaming(conversationKey);
@@ -136,6 +138,7 @@ describe('Streaming status line', () => {
       turnId: 'turn-2',
       approvalPolicy: 'auto-edit',
       reasoningEffort: 'xhigh',
+      sandboxMode: 'workspace-write',
       updateRateMs: 1000,
       model: 'gpt-5.2-codex',
       startTime: Date.now() - 10000,
@@ -173,6 +176,7 @@ describe('Streaming status line', () => {
     // Should show expected metadata
     expect(statusLineText).toContain('auto-edit');
     expect(statusLineText).toContain('gpt-5.2-codex [xhigh]');
+    expect(statusLineText).toContain('workspace-write');
     expect(statusLineText).toContain('thread-xyz');
 
     streaming.stopStreaming(conversationKey);

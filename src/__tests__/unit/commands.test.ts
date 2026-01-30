@@ -9,6 +9,7 @@ import {
   handleModelCommand,
   handleResumeCommand,
   handleMessageSizeCommand,
+  handleSandboxCommand,
   MESSAGE_SIZE_DEFAULT,
   type CommandContext,
 } from '../../commands.js';
@@ -180,6 +181,26 @@ describe('Command Handlers', () => {
       const result = await handleMessageSizeCommand({ ...baseContext, text: 'abc' });
 
       expect(result.text).toContain('Invalid');
+    });
+  });
+
+  describe('handleSandboxCommand', () => {
+    it('shows sandbox selection when no args', async () => {
+      const codex = { getSandboxMode: () => 'workspace-write' } as any;
+      const result = await handleSandboxCommand({ ...baseContext, text: '' }, codex);
+      expect(result.text).toContain('Select sandbox mode');
+    });
+
+    it('returns error for invalid mode', async () => {
+      const codex = { getSandboxMode: () => 'workspace-write' } as any;
+      const result = await handleSandboxCommand({ ...baseContext, text: 'invalid' }, codex);
+      expect(result.text).toContain('Invalid sandbox mode');
+    });
+
+    it('returns sandboxModeChange for valid mode', async () => {
+      const codex = { getSandboxMode: () => 'read-only' } as any;
+      const result = await handleSandboxCommand({ ...baseContext, text: 'danger-full-access' }, codex);
+      expect(result.sandboxModeChange).toBe('danger-full-access');
     });
   });
 });

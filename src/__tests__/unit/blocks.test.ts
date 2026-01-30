@@ -12,6 +12,8 @@ import {
   buildApprovalDeniedBlocks,
   buildPolicyStatusBlocks,
   buildPolicySelectionBlocks,
+  buildSandboxSelectionBlocks,
+  buildSandboxStatusBlocks,
   buildClearBlocks,
   buildTextBlocks,
   buildErrorBlocks,
@@ -248,6 +250,23 @@ describe('Block Kit Builders', () => {
     });
   });
 
+  describe('buildSandboxStatusBlocks', () => {
+    it('shows sandbox change when newMode provided', () => {
+      const blocks = buildSandboxStatusBlocks({ currentMode: 'read-only', newMode: 'danger-full-access' });
+      expect(blocks[0].text?.text).toContain('read-only');
+      expect(blocks[0].text?.text).toContain('danger-full-access');
+    });
+  });
+
+  describe('buildSandboxSelectionBlocks', () => {
+    it('highlights current sandbox mode', () => {
+      const blocks = buildSandboxSelectionBlocks('workspace-write');
+      const actionsBlock = blocks.find((b) => b.block_id === 'sandbox_selection') as any;
+      const button = actionsBlock.elements.find((el: any) => el.action_id === 'sandbox_select_workspace-write');
+      expect(button.style).toBe('primary');
+    });
+  });
+
   describe('buildModelSelectionBlocks (Step 1 - Button-based)', () => {
     const mockModels: ModelInfo[] = [
       { value: 'gpt-5.2-codex', displayName: 'GPT-5.2 Codex', description: 'Latest coding model' },
@@ -457,6 +476,7 @@ describe('Block Kit Builders', () => {
         approvalPolicy: 'on-request',
         model: 'codex-mini',
         reasoningEffort: 'high',
+        sandboxMode: 'workspace-write',
         sessionId: 'thread-123',
         contextPercent: 42.5,
         contextTokens: 85000, // 42.5% of 200k
@@ -470,6 +490,7 @@ describe('Block Kit Builders', () => {
 
       expect(line).toContain('on-request');
       expect(line).toContain('codex-mini [high]');
+      expect(line).toContain('workspace-write');
       expect(line).toContain('thread-123');
       // New format: "X% left, Y used / Z" instead of compact threshold
       expect(line).toContain('58% left'); // 100 - 42.5 = 57.5, rounded to 58
@@ -490,6 +511,7 @@ describe('Block Kit Builders', () => {
       // Default model: gpt-5.2-codex with xhigh reasoning
       expect(line).toContain('gpt-5.2-codex');
       expect(line).toContain('[xhigh]');
+      expect(line).toContain('workspace-write');
       // Session shows 'n/a' when not set
       expect(line).toContain('n/a');
     });
@@ -511,6 +533,7 @@ describe('Block Kit Builders', () => {
         approvalPolicy: 'on-request',
         model: 'codex-mini',
         reasoningEffort: 'high',
+        sandboxMode: 'workspace-write',
         sessionId: 'thread-123',
         contextPercent: 50,
         contextTokens: 100000,
@@ -532,6 +555,7 @@ describe('Block Kit Builders', () => {
       expect(lines.length).toBe(2);
       expect(lines[0]).toContain('on-request');
       expect(lines[0]).toContain('codex-mini [high]');
+      expect(lines[0]).toContain('workspace-write');
       expect(lines[0]).toContain('thread-123');
       expect(lines[1]).toContain('50% left');
       expect(lines[1]).toContain('5.0k/1.0k');
@@ -544,12 +568,13 @@ describe('Block Kit Builders', () => {
         approvalPolicy: 'auto-edit',
         model: 'gpt-5.2-codex',
         reasoningEffort: 'xhigh',
+        sandboxMode: 'workspace-write',
         sessionId: 'abc123',
       });
 
       const lines = line.split('\n');
       // Line 1 should have exact format: _policy | model [reasoning] | session_
-      expect(lines[0]).toBe('_auto-edit | gpt-5.2-codex [xhigh] | abc123_');
+      expect(lines[0]).toBe('_auto-edit | gpt-5.2-codex [xhigh] | workspace-write | abc123_');
     });
 
     it('status line format: ctx | tokens | cost | duration on line 2 (no activity)', () => {

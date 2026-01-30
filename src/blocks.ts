@@ -3,7 +3,7 @@
  * Centralizes construction of interactive message blocks.
  */
 
-import type { ApprovalPolicy, ReasoningEffort } from './codex-client.js';
+import type { ApprovalPolicy, ReasoningEffort, SandboxMode } from './codex-client.js';
 
 // Slack Block Kit types (simplified for our use case)
 export interface Block {
@@ -557,6 +557,96 @@ export function buildPolicySelectionBlocks(currentPolicy: ApprovalPolicy): Block
   ];
 }
 
+export interface SandboxStatusBlockParams {
+  currentMode?: SandboxMode;
+  newMode?: SandboxMode;
+}
+
+function formatSandboxMode(mode?: SandboxMode): string {
+  return mode ?? 'default';
+}
+
+/**
+ * Build blocks for /sandbox command response.
+ */
+export function buildSandboxStatusBlocks(params: SandboxStatusBlockParams): Block[] {
+  const { currentMode, newMode } = params;
+  const blocks: Block[] = [];
+
+  const descriptions: Record<SandboxMode, string> = {
+    'read-only': 'Read-only access (no edits or command execution)',
+    'workspace-write': 'Read/write in workspace (default for most setups)',
+    'danger-full-access': 'Full access to filesystem + network (use with care)',
+  };
+
+  if (newMode) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:shield: Sandbox mode changed: *${formatSandboxMode(currentMode)}* → *${newMode}*`,
+      },
+    });
+  } else {
+    const display = formatSandboxMode(currentMode);
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:shield: *Current Sandbox Mode:* ${display}`,
+      },
+    });
+  }
+
+  blocks.push({
+    type: 'context',
+    elements: [
+      {
+        type: 'mrkdwn',
+        text:
+          `- *read-only* - ${descriptions['read-only']}\n` +
+          `- *workspace-write* - ${descriptions['workspace-write']}\n` +
+          `- *danger-full-access* - ${descriptions['danger-full-access']}`,
+      },
+    ],
+  });
+
+  return blocks;
+}
+
+/**
+ * Build blocks for /sandbox command selection prompt.
+ */
+export function buildSandboxSelectionBlocks(currentMode?: SandboxMode): Block[] {
+  const button = (mode: SandboxMode, label: string) => ({
+    type: 'button',
+    text: { type: 'plain_text', text: label },
+    action_id: `sandbox_select_${mode}`,
+    value: mode,
+    ...(currentMode === mode ? { style: 'primary' as const } : {}),
+    ...(mode === 'danger-full-access' && currentMode !== mode ? { style: 'danger' as const } : {}),
+  });
+
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:shield: *Select Sandbox Mode*\nCurrent: *${formatSandboxMode(currentMode)}*`,
+      },
+    },
+    {
+      type: 'actions',
+      block_id: 'sandbox_selection',
+      elements: [
+        button('read-only', ':lock: read-only'),
+        button('workspace-write', ':memo: workspace-write'),
+        button('danger-full-access', ':warning: danger-full-access'),
+      ],
+    },
+  ];
+}
+
 /**
  * Build blocks for /clear command response.
  */
@@ -1008,6 +1098,7 @@ export interface UnifiedStatusLineParams {
   approvalPolicy: ApprovalPolicy;
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  sandboxMode?: SandboxMode;
   sessionId?: string;
   contextPercent?: number;
   contextTokens?: number;
@@ -1034,13 +1125,15 @@ export function buildUnifiedStatusLine(params: UnifiedStatusLineParams): string 
   const line2Parts: string[] = [];
 
   // Default to gpt-5.2-codex with xhigh reasoning when not explicitly set
-  const modelLabel = params.model || 'gpt-5.2-codex';
+ const modelLabel = params.model || 'gpt-5.2-codex';
   const reasoningLabel = params.reasoningEffort || 'xhigh';
   const modelWithReasoning = `${modelLabel} [${reasoningLabel}]`;
+  const sandboxLabel = params.sandboxMode || 'workspace-write';
   const sessionLabel = params.sessionId || 'n/a';
 
   line1Parts.push(params.approvalPolicy);
   line1Parts.push(modelWithReasoning);
+  line1Parts.push(sandboxLabel);
   line1Parts.push(sessionLabel);
 
   // Show context usage: "X% left, Y used / Z"
@@ -1206,6 +1299,7 @@ export interface ActivityBlockParams {
   approvalPolicy: ApprovalPolicy;
   model?: string;
   reasoningEffort?: ReasoningEffort;
+  sandboxMode?: SandboxMode;
   sessionId?: string;
   contextPercent?: number;
   contextTokens?: number;
@@ -1236,6 +1330,7 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
     approvalPolicy,
     model,
     reasoningEffort,
+    sandboxMode,
     sessionId,
     contextPercent,
     contextTokens,
@@ -1300,6 +1395,7 @@ export function buildActivityBlocks(params: ActivityBlockParams): Block[] {
           approvalPolicy,
           model,
           reasoningEffort,
+          sandboxMode,
           sessionId,
           contextPercent,
           contextTokens,

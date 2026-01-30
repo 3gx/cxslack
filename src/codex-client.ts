@@ -111,6 +111,8 @@ export interface FileChangeApprovalRequest {
 export type ApprovalRequest = CommandApprovalRequest | FileChangeApprovalRequest;
 
 // Client configuration
+export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
+
 export interface CodexClientConfig {
   /** Request timeout in ms (default: 60000) */
   requestTimeout?: number;
@@ -120,6 +122,8 @@ export interface CodexClientConfig {
   initialBackoffMs?: number;
   /** Max backoff delay in ms (default: 30000) */
   maxBackoffMs?: number;
+  /** Sandbox mode for command execution */
+  sandboxMode?: SandboxMode;
 }
 
 /**
@@ -223,6 +227,7 @@ export class CodexClient extends EventEmitter {
 
   private readonly config: Required<CodexClientConfig>;
   private isShuttingDown = false;
+  private sandboxMode?: SandboxMode;
 
   constructor(config: CodexClientConfig = {}) {
     super();
@@ -231,7 +236,9 @@ export class CodexClient extends EventEmitter {
       maxRestartAttempts: config.maxRestartAttempts ?? 5,
       initialBackoffMs: config.initialBackoffMs ?? 1000,
       maxBackoffMs: config.maxBackoffMs ?? 30000,
+      sandboxMode: config.sandboxMode ?? 'workspace-write',
     };
+    this.sandboxMode = this.config.sandboxMode;
   }
 
   /**
@@ -242,22 +249,25 @@ export class CodexClient extends EventEmitter {
       throw new Error('App-Server already running');
     }
 
-    this.process = spawn('codex', ['app-server'], {
+    this.isShuttingDown = false;
+    const args = this.sandboxMode ? ['-s', this.sandboxMode, 'app-server'] : ['app-server'];
+    const proc = spawn('codex', args, {
       stdio: ['pipe', 'pipe', 'inherit'], // stdin, stdout piped; stderr to console
     });
+    this.process = proc;
 
-    this.process.on('error', (err) => {
+    proc.on('error', (err) => {
       this.emit('error', err);
-      this.handleProcessExit(null);
+      this.handleProcessExit(null, proc);
     });
 
-    this.process.on('exit', (code) => {
+    proc.on('exit', (code) => {
       this.emit('server:died', code);
-      this.handleProcessExit(code);
+      this.handleProcessExit(code, proc);
     });
 
     // Handle stdout data (JSON-RPC messages)
-    this.process.stdout?.on('data', (data: Buffer) => {
+    proc.stdout?.on('data', (data: Buffer) => {
       this.handleStdoutData(data);
     });
 
@@ -274,7 +284,7 @@ export class CodexClient extends EventEmitter {
   /**
    * Stop the App-Server process gracefully with escalating signals.
    */
-  async stop(): Promise<void> {
+  async stop(preserveListeners = false): Promise<void> {
     if (this.isShuttingDown) return; // Prevent double-stop
     this.isShuttingDown = true;
 
@@ -290,6 +300,9 @@ export class CodexClient extends EventEmitter {
     if (!this.process) {
       this.initialized = false;
       this.isShuttingDown = false;
+      if (!preserveListeners) {
+        this.removeAllListeners();
+      }
       return;
     }
 
@@ -304,7 +317,7 @@ export class CodexClient extends EventEmitter {
 
     if (await this.waitForExit(proc, 2000)) {
       console.log('[codex-client] Process exited gracefully');
-      this.cleanup();
+      this.cleanup(preserveListeners);
       return;
     }
 
@@ -313,7 +326,7 @@ export class CodexClient extends EventEmitter {
     try { proc.kill('SIGTERM'); } catch { /* ignore */ }
     if (await this.waitForExit(proc, 2000)) {
       console.log('[codex-client] Process exited after SIGTERM');
-      this.cleanup();
+      this.cleanup(preserveListeners);
       return;
     }
 
@@ -322,11 +335,13 @@ export class CodexClient extends EventEmitter {
     try { proc.kill('SIGKILL'); } catch { /* ignore */ }
     await this.waitForExit(proc, 1000);
     console.log('[codex-client] Process killed');
-    this.cleanup();
+    this.cleanup(preserveListeners);
   }
 
-  private cleanup(): void {
-    this.removeAllListeners();
+  private cleanup(preserveListeners = false): void {
+    if (!preserveListeners) {
+      this.removeAllListeners();
+    }
     this.process = null;
     this.initialized = false;
     this.isShuttingDown = false;
@@ -355,6 +370,28 @@ export class CodexClient extends EventEmitter {
    */
   get isConnected(): boolean {
     return this.process !== null && this.initialized;
+  }
+
+  /**
+   * Get the current sandbox mode (if explicitly set).
+   */
+  getSandboxMode(): SandboxMode | undefined {
+    return this.sandboxMode;
+  }
+
+  /**
+   * Restart the app-server with a new sandbox mode.
+   * Preserves event listeners for live Slack integrations.
+   */
+  async restartWithSandbox(mode: SandboxMode): Promise<void> {
+    if (this.sandboxMode === mode && this.process) {
+      return;
+    }
+    this.sandboxMode = mode;
+    if (this.process) {
+      await this.stop(true);
+    }
+    await this.start();
   }
 
   /**
@@ -1146,7 +1183,17 @@ export class CodexClient extends EventEmitter {
     }
   }
 
-  private handleProcessExit(code: number | null): void {
+  private handleProcessExit(code: number | null, proc?: ChildProcess | null): void {
+    const active = this.process;
+    if (!active) {
+      return;
+    }
+
+    if (proc && active !== proc) {
+      // Ignore stale process exits (e.g., during intentional restarts).
+      return;
+    }
+
     // CRITICAL: Don't restart during intentional shutdown
     if (this.isShuttingDown) {
       console.log('[codex-client] Process exited during shutdown, not restarting');

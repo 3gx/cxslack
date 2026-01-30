@@ -7,7 +7,7 @@
 
 import { App, LogLevel } from '@slack/bolt';
 import { Mutex } from 'async-mutex';
-import { CodexClient, ApprovalRequest, TurnContent, ReasoningEffort, ApprovalPolicy } from './codex-client.js';
+import { CodexClient, ApprovalRequest, TurnContent, ReasoningEffort, ApprovalPolicy, SandboxMode } from './codex-client.js';
 import { StreamingManager, makeConversationKey, StreamingContext } from './streaming.js';
 import { ApprovalHandler } from './approval-handler.js';
 import {
@@ -44,6 +44,7 @@ import {
   buildTextBlocks,
   buildAbortConfirmationModalView,
   buildForkToChannelModalView,
+  buildSandboxStatusBlocks,
   Block,
 } from './blocks.js';
 import { withSlackRetry } from './slack-retry.js';
@@ -556,6 +557,52 @@ function setupEventHandlers(): void {
     });
   });
 
+  // Handle /sandbox selection buttons
+  app.action(/^sandbox_select_(read-only|workspace-write|danger-full-access)$/, async ({ action, ack, body, client }) => {
+    await ack();
+
+    const actionId = (action as { action_id: string }).action_id;
+    const newMode = actionId.replace('sandbox_select_', '') as SandboxMode;
+    const channelId = body.channel?.id;
+    const messageTs = (body as { message?: { ts?: string; thread_ts?: string } }).message?.ts;
+
+    if (!channelId || !messageTs) {
+      return;
+    }
+
+    if (streamingManager.isAnyStreaming()) {
+      await client.chat.update({
+        channel: channelId,
+        ts: messageTs,
+        text: 'Cannot change sandbox while processing',
+        blocks: buildErrorBlocks('Cannot change sandbox while a turn is running. Please wait or abort.'),
+      });
+      return;
+    }
+
+    const currentMode = codex.getSandboxMode();
+
+    try {
+      await codex.restartWithSandbox(newMode);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      await client.chat.update({
+        channel: channelId,
+        ts: messageTs,
+        text: `Failed to update sandbox: ${message}`,
+        blocks: buildErrorBlocks(`Failed to update sandbox: ${message}`),
+      });
+      return;
+    }
+
+    await client.chat.update({
+      channel: channelId,
+      ts: messageTs,
+      text: `Sandbox mode changed: ${currentMode ?? 'default'} → ${newMode}`,
+      blocks: buildSandboxStatusBlocks({ currentMode, newMode }),
+    });
+  });
+
   // Handle model button clicks (Step 1 of 2)
   // Pattern matches model_select_<model_value>
   app.action(/^model_select_(.+)$/, async ({ action, ack, body, client }) => {
@@ -780,6 +827,42 @@ async function handleUserMessage(
 
   const commandResult = await handleCommand(commandContext, codex);
   if (commandResult) {
+    if (commandResult.sandboxModeChange) {
+      const newMode = commandResult.sandboxModeChange;
+      const currentMode = codex.getSandboxMode();
+
+      if (streamingManager.isAnyStreaming()) {
+        await app.client.chat.postMessage({
+          channel: channelId,
+          thread_ts: postingThreadTs,
+          blocks: buildErrorBlocks('Cannot change sandbox while a turn is running. Please wait or abort.'),
+          text: 'Cannot change sandbox while a turn is running. Please wait or abort.',
+        });
+        return;
+      }
+
+      try {
+        await codex.restartWithSandbox(newMode);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        await app.client.chat.postMessage({
+          channel: channelId,
+          thread_ts: postingThreadTs,
+          blocks: buildErrorBlocks(`Failed to update sandbox: ${message}`),
+          text: `Failed to update sandbox: ${message}`,
+        });
+        return;
+      }
+
+      await app.client.chat.postMessage({
+        channel: channelId,
+        thread_ts: postingThreadTs,
+        blocks: buildSandboxStatusBlocks({ currentMode, newMode }),
+        text: `Sandbox mode changed: ${currentMode ?? 'default'} → ${newMode}`,
+      });
+      return;
+    }
+
     // Handle /model command with emoji tracking
     if (commandResult.showModelSelection) {
       const response = await app.client.chat.postMessage({
@@ -873,6 +956,7 @@ async function handleUserMessage(
   // Use defaults when model/reasoning not explicitly set
   const effectiveModel = session?.model || DEFAULT_MODEL;
   const effectiveReasoning = session?.reasoningEffort || DEFAULT_REASONING;
+  const effectiveSandbox = codex.getSandboxMode();
 
   // Post initial "processing" message IN THE THREAD using activity format
   const initialResult = await app.client.chat.postMessage({
@@ -886,6 +970,7 @@ async function handleUserMessage(
       approvalPolicy,
       model: effectiveModel,
       reasoningEffort: effectiveReasoning,
+      sandboxMode: effectiveSandbox,
       sessionId: threadId,
       spinner: '\u25D0',
     }),
@@ -909,6 +994,7 @@ async function handleUserMessage(
     updateRateMs: (session?.updateRateSeconds ?? 3) * 1000,
     model: effectiveModel,
     reasoningEffort: effectiveReasoning,
+    sandboxMode: effectiveSandbox,
     startTime: Date.now(),
   };
 
