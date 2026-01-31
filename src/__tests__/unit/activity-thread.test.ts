@@ -326,7 +326,7 @@ describe('buildActivityLogText', () => {
     expect(text).toContain('2.5s');
   });
 
-  it('adds jump link when threadMessageLink is present', () => {
+  it('wraps entry text in a link when threadMessageLink is present', () => {
     const entries: ActivityEntry[] = [
       {
         type: 'starting',
@@ -337,7 +337,23 @@ describe('buildActivityLogText', () => {
 
     const text = buildActivityLogText(entries);
 
-    expect(text).toContain('<https://slack.com/archives/C123/p123456|jump>');
+    expect(text).toContain('<https://slack.com/archives/C123/p123456|');
+    expect(text).toContain('Analyzing request');
+  });
+
+  it('includes thinking content preview when present', () => {
+    const entries: ActivityEntry[] = [
+      {
+        type: 'thinking',
+        timestamp: Date.now(),
+        thinkingContent: 'Short reasoning preview.',
+      },
+    ];
+
+    const text = buildActivityLogText(entries);
+
+    expect(text).toContain('Thinking');
+    expect(text).toContain('Short reasoning preview.');
   });
 
   it('formats generating entry with char count', () => {

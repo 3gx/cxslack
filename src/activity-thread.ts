@@ -35,6 +35,22 @@ function escapeSlackMrkdwn(text: string): string {
 // Max chars before converting to .md attachment
 const MAX_MESSAGE_LENGTH = 2900;
 const THINKING_TRUNCATE_LENGTH = 500;
+const ACTIVITY_THINKING_PREVIEW_MAX = 300;
+
+function stripActivityMrkdwn(text: string): string {
+  return text.replace(/[*_~`]/g, '');
+}
+
+function linkifyActivityLine(line: string, link?: string): string {
+  if (!link) return line;
+  const label = stripActivityMrkdwn(line);
+  return `<${link}|${label}>`;
+}
+
+function truncateActivityThinking(text: string): string {
+  if (text.length <= ACTIVITY_THINKING_PREVIEW_MAX) return text;
+  return '...' + text.slice(-ACTIVITY_THINKING_PREVIEW_MAX);
+}
 
 // Get permalink URL for a message using Slack API (works on iOS)
 export async function getMessagePermalink(
@@ -320,17 +336,26 @@ export class ActivityThreadManager {
   private formatEntry(entry: ActivityEntry): string {
     const emoji = entry.tool ? getToolEmoji(entry.tool) : ':gear:';
     const duration = entry.durationMs ? ` [${(entry.durationMs / 1000).toFixed(1)}s]` : '';
-    const jump = entry.threadMessageLink ? ` (<${entry.threadMessageLink}|jump>)` : '';
+    const link = entry.threadMessageLink;
 
     switch (entry.type) {
-      case 'starting':
-        return `:brain: *Analyzing request...*${jump}`;
-      case 'thinking':
-        return `:brain: *Thinking...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}${jump}`;
+      case 'starting': {
+        const header = ':brain: *Analyzing request...*';
+        return linkifyActivityLine(header, link);
+      }
+      case 'thinking': {
+        const header = `:brain: *Thinking...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+        const lines: string[] = [linkifyActivityLine(header, link)];
+        if (entry.thinkingContent) {
+          lines.push(truncateActivityThinking(entry.thinkingContent));
+        }
+        return lines.join('\n');
+      }
       case 'tool_start': {
         // Pass toolInput directly - formatToolInputSummary handles both string and object inputs
         const inputSummary = formatToolInputSummary(entry.tool || '', entry.toolInput);
-        return `${emoji} *${normalizeToolName(entry.tool || '')}*${inputSummary} [in progress]${jump}`;
+        const line = `${emoji} *${normalizeToolName(entry.tool || '')}*${inputSummary} [in progress]`;
+        return linkifyActivityLine(line, link);
       }
       case 'tool_complete': {
         // Pass toolInput directly - formatToolInputSummary handles both string and object inputs
@@ -347,16 +372,23 @@ export class ActivityThreadManager {
           outputHint = ` → \`${truncated}${ellipsis}\``;
         }
 
-        return `${emoji} *${normalizeToolName(entry.tool || '')}*${inputSummary}${resultSummary}${outputHint}${duration}${errorFlag}${jump}`;
+        const line = `${emoji} *${normalizeToolName(entry.tool || '')}*${inputSummary}${resultSummary}${outputHint}${duration}${errorFlag}`;
+        return linkifyActivityLine(line, link);
       }
-      case 'generating':
-        return `:memo: *Generating...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}${jump}`;
-      case 'error':
-        return `:x: ${entry.message || 'Error'}${jump}`;
-      case 'aborted':
-        return `:octagonal_sign: *Aborted by user*${jump}`;
+      case 'generating': {
+        const line = `:memo: *Generating...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+        return linkifyActivityLine(line, link);
+      }
+      case 'error': {
+        const line = `:x: ${entry.message || 'Error'}`;
+        return linkifyActivityLine(line, link);
+      }
+      case 'aborted': {
+        const line = ':octagonal_sign: *Aborted by user*';
+        return linkifyActivityLine(line, link);
+      }
       default:
-        return `${emoji} ${entry.message || entry.type}${duration}${jump}`;
+        return linkifyActivityLine(`${emoji} ${entry.message || entry.type}${duration}`, link);
     }
   }
 }

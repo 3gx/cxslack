@@ -19,6 +19,7 @@ import { EventEmitter } from 'events';
 import type { WebClient } from '@slack/web-api';
 import type { CodexClient } from '../../codex-client.js';
 import { StreamingManager, makeConversationKey, type StreamingContext } from '../../streaming.js';
+import { buildActivityLogText } from '../../activity-thread.js';
 import * as ActivityThread from '../../activity-thread.js';
 
 function createSlackMock() {
@@ -208,6 +209,25 @@ describe('Thinking/Reasoning Events', () => {
     const thinkingEntries = entries.filter((e: any) => e.type === 'thinking');
     expect(thinkingEntries).toHaveLength(1);
     expect(thinkingEntries[0].charCount).toBe(36);
+
+    streaming.stopStreaming(conversationKey);
+  });
+
+  it('activity log includes thinking content from thinking:delta', async () => {
+    const context = createContext();
+    streaming.startStreaming(context);
+    const conversationKey = makeConversationKey(context.channelId, context.threadTs);
+
+    const activityManager = (streaming as any).activityManager;
+
+    // Emit thinking content
+    codex.emit('thinking:delta', { content: 'Live reasoning snippet.' });
+
+    const entries = activityManager.getEntries(conversationKey);
+    const logText = buildActivityLogText(entries, 20, 1000);
+
+    expect(logText).toContain('Thinking');
+    expect(logText).toContain('Live reasoning snippet.');
 
     streaming.stopStreaming(conversationKey);
   });

@@ -833,25 +833,27 @@ export class StreamingManager {
               (entry) => entry.type === 'thinking' && entry.thinkingSegmentId
             );
 
-            const fullContent = state.thinkingContent;
+            const segmentId = currentEntry?.thinkingSegmentId;
+            const segmentContent = (segmentId && state.thinkingSegments.get(segmentId))
+              ? state.thinkingSegments.get(segmentId)!
+              : state.thinkingContent;
             const durationMs = Date.now() - (state.thinkingStartTime || found.context.startTime);
-            const { display, truncated } = buildThinkingDisplay(fullContent, THINKING_MESSAGE_SIZE);
+            const { display, truncated } = buildThinkingDisplay(segmentContent, THINKING_MESSAGE_SIZE);
 
             if (currentEntry) {
               currentEntry.thinkingInProgress = false;
               currentEntry.durationMs = durationMs;
               currentEntry.thinkingContent = display;
               currentEntry.thinkingTruncated = truncated;
-              currentEntry.charCount = fullContent.length;
+              currentEntry.charCount = segmentContent.length;
             }
 
-            const segmentId = currentEntry?.thinkingSegmentId;
             const thinkingMsgTs = segmentId
               ? getThinkingEntryTs(this.activityManager, found.key, segmentId)
               : undefined;
 
             if (currentEntry && segmentId && thinkingMsgTs) {
-              if (fullContent.length > THINKING_MESSAGE_SIZE) {
+              if (segmentContent.length > THINKING_MESSAGE_SIZE) {
                 try {
                   const thinkingMsgLink = await getMessagePermalink(
                     this.slack,
@@ -862,7 +864,7 @@ export class StreamingManager {
                     this.slack,
                     channelId,
                     state.threadParentTs || originalTs,
-                    fullContent,
+                    segmentContent,
                     `_Content for <${thinkingMsgLink}|this thinking block>._`,
                     found.context.userId
                   );
@@ -893,7 +895,7 @@ export class StreamingManager {
                 this.slack,
                 channelId,
                 state.threadParentTs || originalTs,
-                fullContent,
+                segmentContent,
                 durationMs,
                 THINKING_MESSAGE_SIZE
               ).catch((err) => console.error('[streaming] Thinking post failed:', err));
@@ -1643,25 +1645,14 @@ export class StreamingManager {
         activityText = `_... ${hidden} earlier entries ..._\n` + activityText;
       }
 
-      // Add thinking preview if we have thinking content
-      if (state.thinkingContent) {
-        const thinkingDuration = state.thinkingComplete
-          ? (Date.now() - state.thinkingStartTime)
-          : (Date.now() - state.thinkingStartTime);
-        const thinkingDurationSec = (thinkingDuration / 1000).toFixed(1);
-        const charCount = state.thinkingContent.length;
-        const preview = state.thinkingContent.slice(-200).replace(/\n/g, ' ');
-        activityText += `\n:brain: *Thinking* [${thinkingDurationSec}s] _[${charCount} chars]_\n> ...${preview}`;
-      }
-
       // Add response preview if we have response content
       if (state.text) {
         const preview = state.text.slice(0, 200).replace(/\n/g, ' ');
-        const responseJump = state.responseMessageLink
-          ? ` (<${state.responseMessageLink}|jump>)`
-          : '';
-        activityText += `\n:speech_balloon: *Response* _[${state.text.length} chars]_` +
-          `${responseJump}\n> ${preview}${state.text.length > 200 ? '...' : ''}`;
+        const responseHeader = `:speech_balloon: *Response* _[${state.text.length} chars]_`;
+        const responseLine = state.responseMessageLink
+          ? `<${state.responseMessageLink}|${responseHeader.replace(/[*_~`]/g, '')}>`
+          : responseHeader;
+        activityText += `\n${responseLine}\n> ${preview}${state.text.length > 200 ? '...' : ''}`;
       }
 
       const elapsedMs = Date.now() - context.startTime;
