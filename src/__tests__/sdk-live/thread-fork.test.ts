@@ -183,12 +183,13 @@ describe.skipIf(SKIP_LIVE)('Codex Thread Fork', { timeout: 120000 }, () => {
     console.log('==========================================\n');
   });
 
-  // Skip: This investigative test is flaky because it depends on LLM remembering numbers
-  it.skip('thread/fork turnIndex semantics investigation', async () => {
+  // CRITICAL: Tests point-in-time fork functionality using declarative variable assignments
+  // Uses "assume variable X = Y" approach which is more robust than "remember number" prompts
+  it('fork-at-point excludes content after fork point', async () => {
     // Clear notifications
     notifications.length = 0;
 
-    console.log('\n=== Thread Fork At Turn Index Test ===');
+    console.log('\n=== Fork-at-Point Content Verification Test ===');
 
     // 1. Start original thread
     const threadResult = await rpc<{ thread: ThreadInfo }>('thread/start', {
@@ -198,69 +199,65 @@ describe.skipIf(SKIP_LIVE)('Codex Thread Fork', { timeout: 120000 }, () => {
     expect(originalThreadId).toBeDefined();
     console.log(`Original thread: ${originalThreadId}`);
 
-    // 2. Send multiple turns to build conversation history
-    // Turn 0 (index 0)
+    // 2. Send multiple turns with declarative variable assignments
+    // Use values that won't collide via arithmetic: 1111 + 2222 = 3333 (not 4444)
+    // Turn 0: Assume a = 1111
     await rpc('turn/start', {
       threadId: originalThreadId,
-      input: [{ type: 'text', text: 'Remember the number 42. Just say "remembered 42".' }],
+      input: [{ type: 'text', text: 'Assume variable a has value 1111. Just confirm by saying "a = 1111".' }],
     });
     let complete = await waitForTurnComplete();
     expect(complete).toBe(true);
-    console.log('Turn 0 completed (remembered 42)');
+    console.log('Turn 0 completed (a = 1111)');
     notifications.length = 0;
 
-    // Turn 1 (index 1)
+    // Turn 1: Assume b = 2222
     await rpc('turn/start', {
       threadId: originalThreadId,
-      input: [{ type: 'text', text: 'Now remember the number 99. Just say "remembered 99".' }],
+      input: [{ type: 'text', text: 'Assume variable b has value 2222. Just confirm by saying "b = 2222".' }],
     });
     complete = await waitForTurnComplete();
     expect(complete).toBe(true);
-    console.log('Turn 1 completed (remembered 99)');
+    console.log('Turn 1 completed (b = 2222)');
     notifications.length = 0;
 
-    // Turn 2 (index 2)
+    // Turn 2: Assume c = 4444
     await rpc('turn/start', {
       threadId: originalThreadId,
-      input: [{ type: 'text', text: 'Now remember the number 777. Just say "remembered 777".' }],
+      input: [{ type: 'text', text: 'Assume variable c has value 4444. Just confirm by saying "c = 4444".' }],
     });
     complete = await waitForTurnComplete();
     expect(complete).toBe(true);
-    console.log('Turn 2 completed (remembered 777)');
+    console.log('Turn 2 completed (c = 4444)');
     notifications.length = 0;
 
-    // 3. Fork at turn index 1 (should have 42 and 99, but NOT 777)
-    // ROBUST: Get actual turn count from Codex (source of truth) - not hardcoded!
-    // This is what production code does - handles CLI usage, /resume elsewhere, etc.
+    // 3. Fork at turn index 1 (should have a=101 and b=202, but NOT c=303)
     const forkTurnIndex = 1;
 
-    // Step 1: Query Codex for actual turn count (source of truth)
-    console.log('\nQuerying Codex for actual turn count (thread/read with includeTurns)...');
+    // Query Codex for actual turn count (source of truth)
+    console.log('\nQuerying Codex for turn count...');
     const readResult = await rpc<{ thread: ThreadInfo & { turns?: Array<{ id: string }> } }>('thread/read', {
       threadId: originalThreadId,
       includeTurns: true,
     });
     const totalTurns = readResult.thread.turns?.length ?? 0;
     console.log(`Codex reports ${totalTurns} turns in source thread`);
-    expect(totalTurns).toBe(3); // Verify we created 3 turns
+    expect(totalTurns).toBe(3);
 
     const turnsToRollback = totalTurns - (forkTurnIndex + 1);
-    console.log(`Forking at turn index ${forkTurnIndex} (total turns: ${totalTurns}, rollback: ${turnsToRollback})...`);
+    console.log(`Forking at turn ${forkTurnIndex}, will rollback ${turnsToRollback} turns...`);
 
-    // Step 2: Fork the thread (creates full copy)
+    // Fork the thread (creates full copy)
     const forkResult = await rpc<{ thread: ThreadInfo }>('thread/fork', {
       threadId: originalThreadId,
     });
-
     const forkedThread = forkResult.thread;
-    expect(forkedThread).toBeDefined();
     expect(forkedThread.id).toBeDefined();
     expect(forkedThread.id).not.toBe(originalThreadId);
     console.log(`Forked thread: ${forkedThread.id}`);
 
-    // Step 3: Rollback the forked thread to the desired point
+    // Rollback the forked thread to the desired point
     if (turnsToRollback > 0) {
-      console.log(`Rolling back ${turnsToRollback} turns...`);
       await rpc('thread/rollback', {
         threadId: forkedThread.id,
         numTurns: turnsToRollback,
@@ -268,85 +265,62 @@ describe.skipIf(SKIP_LIVE)('Codex Thread Fork', { timeout: 120000 }, () => {
       console.log('Rollback complete');
     }
 
-    console.log(`Fork metadata: forkedFrom=${forkedThread.forkedFrom}`);
-
-    // Verify fork metadata
-    if (forkedThread.forkedFrom !== undefined) {
-      expect(forkedThread.forkedFrom).toBe(originalThreadId);
-      console.log('✓ VERIFIED: forkedFrom matches original thread');
-    }
-
-    // 4. Verify forked thread content - CRITICAL: must NOT include 777
+    // 4. Verify forked thread only has variables from turns 0 and 1
     notifications.length = 0;
     await rpc('turn/start', {
       threadId: forkedThread.id,
-      input: [{ type: 'text', text: 'What numbers do you remember? List them all.' }],
+      input: [{ type: 'text', text: 'List all the variables I asked you to assume and their values.' }],
     });
 
     const forkTurnComplete = await waitForTurnComplete();
     expect(forkTurnComplete).toBe(true);
 
-    // Capture the assistant's response text
-    console.log(`\nAll notifications received: ${notifications.length}`);
-    const textNotifications = notifications.filter(
-      (n) => n.method === 'codex/event/text' || n.method === 'turn/text' || n.method === 'codex/event/message_delta'
-    );
-    console.log(`Text-like notifications: ${textNotifications.length}`);
-
-    // Try multiple ways to extract text
+    // Extract response text from notifications - match codex/event/agent_message_content_delta format
     let responseText = '';
     for (const n of notifications) {
       const params = n.params as Record<string, unknown>;
-      if (params.text) responseText += params.text;
-      if (params.msg && typeof params.msg === 'object') {
-        const msg = params.msg as Record<string, unknown>;
-        if (msg.text) responseText += msg.text;
-        if (msg.content) responseText += String(msg.content);
-      }
-      if (params.delta && typeof params.delta === 'object') {
-        const delta = params.delta as Record<string, unknown>;
-        if (delta.text) responseText += delta.text;
-      }
-      // Also try content_block_delta format
-      if (n.method === 'codex/event/message_delta' || n.method === 'message/delta') {
-        console.log(`Delta notification: ${JSON.stringify(params).slice(0, 200)}`);
+      const msg = params.msg as Record<string, unknown> | undefined;
+
+      // Extract text from various notification formats:
+      // - params.delta (string) - codex/event/agent_message_content_delta
+      // - params.text, params.content (string)
+      // - msg.delta, msg.text, msg.content (string) - nested in msg object
+      const textContent =
+        (typeof params.delta === 'string' ? params.delta : null) ||
+        (typeof params.text === 'string' ? params.text : null) ||
+        (typeof params.content === 'string' ? params.content : null) ||
+        (msg && typeof msg.delta === 'string' ? msg.delta : null) ||
+        (msg && typeof msg.text === 'string' ? msg.text : null) ||
+        (msg && typeof msg.content === 'string' ? msg.content : null);
+
+      if (textContent) {
+        responseText += textContent;
       }
     }
 
-    // Also look for completion notifications
-    const completionNotifications = notifications.filter(
-      (n) => n.method === 'turn/completed' || n.method === 'codex/event/task_complete'
-    );
-    for (const cn of completionNotifications) {
-      console.log(`Completion: ${JSON.stringify(cn.params).slice(0, 500)}`);
-    }
-
-    console.log(`\nForked thread response: "${responseText}"`);
+    console.log(`\nForked thread response: "${responseText.slice(0, 500)}..."`);
     console.log('\n=== CONTENT VERIFICATION ===');
 
-    // Fork at turn 1 should include:
-    // - Turn 0: remembered 42
-    // - Turn 1: remembered 99
-    // Should NOT include Turn 2: 777
+    // Check for variable values (1111, 2222, 4444 chosen to avoid arithmetic collisions)
+    const has1111 = responseText.includes('1111');
+    const has2222 = responseText.includes('2222');
+    const has4444 = responseText.includes('4444');
 
-    const has42 = responseText.includes('42');
-    const has99 = responseText.includes('99');
-    const has777 = responseText.includes('777');
+    console.log(`Contains 1111 (a): ${has1111} (expected: true)`);
+    console.log(`Contains 2222 (b): ${has2222} (expected: true)`);
+    console.log(`Contains 4444 (c): ${has4444} (expected: false - should NOT be in fork at turn 1)`);
 
-    console.log(`Contains 42: ${has42} (expected: true)`);
-    console.log(`Contains 99: ${has99} (expected: true)`);
-    console.log(`Contains 777: ${has777} (expected: false - should NOT be in fork at turn 1)`);
+    // CRITICAL assertions: fork at turn 1 should include turns 0,1 but NOT turn 2
+    // Include responseText in error message for debugging
+    expect(has1111, `Expected response to contain '1111'. Response was: "${responseText.slice(0, 300)}..."`).toBe(true);   // Turn 0: a = 1111 should exist
+    expect(has2222, `Expected response to contain '2222'. Response was: "${responseText.slice(0, 300)}..."`).toBe(true);   // Turn 1: b = 2222 should exist
+    expect(has4444, `Expected response to NOT contain '4444'. Response was: "${responseText.slice(0, 300)}..."`).toBe(false);  // Turn 2: c = 4444 must NOT exist (after fork point)
 
-    if (!has777) {
-      console.log('✓ VERIFIED: Fork-at-point correctly excludes turn 2 content (777)');
+    if (!has4444) {
+      console.log('✓ VERIFIED: Fork-at-point correctly excludes content after fork point');
     } else {
-      console.log('✗ FAILED: Fork includes turn 2 content (777) - point-in-time fork NOT working!');
+      console.log('✗ FAILED: Fork includes content after fork point - rollback NOT working!');
     }
-
-    // These are the critical assertions
-    expect(has42).toBe(true);
-    expect(has99).toBe(true);
-    expect(has777).toBe(false); // CRITICAL: Must NOT include content after fork point
 
     console.log('==========================================\n');
   });
