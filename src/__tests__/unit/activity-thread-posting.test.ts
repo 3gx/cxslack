@@ -471,7 +471,7 @@ describe('Live Activity formatEntry', () => {
 
     expect(result).toContain(':computer:'); // Tool emoji, not checkmark
     expect(result).not.toContain(':white_check_mark:');
-    expect(result).toContain(':computer: Bash');
+    expect(result).toContain(':computer: *Bash*'); // Label is bold
     expect(result).toContain('`npm run build 2>&1`');
     expect(result).toContain('→');
     // Output is escaped for mrkdwn safety (< and > are escaped)

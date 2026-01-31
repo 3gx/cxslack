@@ -340,11 +340,11 @@ export class ActivityThreadManager {
     switch (entry.type) {
       case 'starting': {
         const label = linkifyActivityLabel('Analyzing request', link);
-        return `:brain: ${label}...`;
+        return `:brain: *${label}*...`;
       }
       case 'thinking': {
         const label = linkifyActivityLabel('Thinking', link);
-        const header = `:brain: ${label}...${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+        const header = `:brain: *${label}*...${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
         const lines: string[] = [header];
         if (entry.thinkingContent) {
           lines.push(truncateActivityThinking(entry.thinkingContent));
@@ -355,7 +355,7 @@ export class ActivityThreadManager {
         // Pass toolInput directly - formatToolInputSummary handles both string and object inputs
         const inputSummary = formatToolInputSummary(entry.tool || '', entry.toolInput);
         const label = linkifyActivityLabel(normalizeToolName(entry.tool || ''), link);
-        return `${emoji} ${label}${inputSummary} [in progress]`;
+        return `${emoji} *${label}*${inputSummary} [in progress]`;
       }
       case 'tool_complete': {
         // Pass toolInput directly - formatToolInputSummary handles both string and object inputs
@@ -373,23 +373,23 @@ export class ActivityThreadManager {
         }
 
         const label = linkifyActivityLabel(normalizeToolName(entry.tool || ''), link);
-        return `${emoji} ${label}${inputSummary}${resultSummary}${outputHint}${duration}${errorFlag}`;
+        return `${emoji} *${label}*${inputSummary}${resultSummary}${outputHint}${duration}${errorFlag}`;
       }
       case 'generating': {
         const label = linkifyActivityLabel('Generating', link);
-        return `:memo: ${label}...${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+        return `:memo: *${label}*...${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
       }
       case 'error': {
         const label = linkifyActivityLabel('Error', link);
         const suffix = entry.message ? ` ${entry.message}` : '';
-        return `:x: ${label}${suffix}`;
+        return `:x: *${label}*${suffix}`;
       }
       case 'aborted': {
         const label = linkifyActivityLabel('Aborted', link);
-        return `:octagonal_sign: ${label} by user`;
+        return `:octagonal_sign: *${label}* by user`;
       }
       default:
-        return `${emoji} ${linkifyActivityLabel(entry.message || entry.type, link)}${duration}`;
+        return `${emoji} *${linkifyActivityLabel(entry.message || entry.type, link)}*${duration}`;
     }
   }
 }

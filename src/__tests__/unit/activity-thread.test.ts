@@ -337,7 +337,8 @@ describe('buildActivityLogText', () => {
 
     const text = buildActivityLogText(entries);
 
-    expect(text).toContain(':brain: <https://slack.com/archives/C123/p123456|Analyzing request>...');
+    // Label should be bold and linked: *<url|label>*
+    expect(text).toContain(':brain: *<https://slack.com/archives/C123/p123456|Analyzing request>*...');
     expect(text).not.toContain('<https://slack.com/archives/C123/p123456|:brain:');
   });
 
@@ -354,7 +355,8 @@ describe('buildActivityLogText', () => {
 
     const text = buildActivityLogText(entries);
 
-    expect(text).toContain(':computer: <https://slack.com/archives/C123/p123456|Bash>');
+    // Label should be bold and linked: *<url|label>*
+    expect(text).toContain(':computer: *<https://slack.com/archives/C123/p123456|Bash>*');
   });
 
   it('includes thinking content preview when present', () => {
@@ -381,5 +383,187 @@ describe('buildActivityLogText', () => {
 
     expect(text).toContain(':memo:'); // Generating uses memo emoji now
     expect(text).toContain('500');
+  });
+
+  describe('bold formatting in live rolling window', () => {
+    it('formats starting entry with bold label', () => {
+      const entries: ActivityEntry[] = [
+        { type: 'starting', timestamp: Date.now() },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      expect(text).toContain(':brain: *Analyzing request*...');
+    });
+
+    it('formats starting entry with bold linked label', () => {
+      const entries: ActivityEntry[] = [
+        {
+          type: 'starting',
+          timestamp: Date.now(),
+          threadMessageLink: 'https://slack.com/archives/C123/p123',
+        },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      // Bold wraps the entire link: *<url|label>*
+      expect(text).toContain(':brain: *<https://slack.com/archives/C123/p123|Analyzing request>*...');
+    });
+
+    it('formats thinking entry with bold label', () => {
+      const entries: ActivityEntry[] = [
+        { type: 'thinking', timestamp: Date.now() },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      expect(text).toContain(':brain: *Thinking*...');
+    });
+
+    it('formats thinking entry with bold linked label', () => {
+      const entries: ActivityEntry[] = [
+        {
+          type: 'thinking',
+          timestamp: Date.now(),
+          threadMessageLink: 'https://slack.com/archives/C123/p123',
+        },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      expect(text).toContain(':brain: *<https://slack.com/archives/C123/p123|Thinking>*...');
+    });
+
+    it('formats tool_start entry with bold label', () => {
+      const entries: ActivityEntry[] = [
+        { type: 'tool_start', timestamp: Date.now(), tool: 'Read', toolInput: '/path/to/file.ts' },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      expect(text).toContain(':mag: *Read*');
+      expect(text).toContain('[in progress]');
+    });
+
+    it('formats tool_start entry with bold linked label', () => {
+      const entries: ActivityEntry[] = [
+        {
+          type: 'tool_start',
+          timestamp: Date.now(),
+          tool: 'Bash',
+          toolInput: 'npm test',
+          threadMessageLink: 'https://slack.com/archives/C123/p123',
+        },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      expect(text).toContain(':computer: *<https://slack.com/archives/C123/p123|Bash>*');
+      expect(text).toContain('[in progress]');
+    });
+
+    it('formats tool_complete entry with bold label', () => {
+      const entries: ActivityEntry[] = [
+        { type: 'tool_complete', timestamp: Date.now(), tool: 'Edit', durationMs: 1500 },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      expect(text).toContain(':memo: *Edit*');
+      expect(text).toContain('[1.5s]');
+    });
+
+    it('formats tool_complete entry with bold linked label', () => {
+      const entries: ActivityEntry[] = [
+        {
+          type: 'tool_complete',
+          timestamp: Date.now(),
+          tool: 'Grep',
+          durationMs: 800,
+          threadMessageLink: 'https://slack.com/archives/C123/p123',
+        },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      expect(text).toContain(':mag: *<https://slack.com/archives/C123/p123|Grep>*');
+      expect(text).toContain('[0.8s]');
+    });
+
+    it('formats generating entry with bold label', () => {
+      const entries: ActivityEntry[] = [
+        { type: 'generating', timestamp: Date.now(), charCount: 1000 },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      expect(text).toContain(':memo: *Generating*...');
+    });
+
+    it('formats generating entry with bold linked label', () => {
+      const entries: ActivityEntry[] = [
+        {
+          type: 'generating',
+          timestamp: Date.now(),
+          charCount: 1000,
+          threadMessageLink: 'https://slack.com/archives/C123/p123',
+        },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      expect(text).toContain(':memo: *<https://slack.com/archives/C123/p123|Generating>*...');
+    });
+
+    it('formats error entry with bold label', () => {
+      const entries: ActivityEntry[] = [
+        { type: 'error', timestamp: Date.now(), message: 'Something went wrong' },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      expect(text).toContain(':x: *Error*');
+      expect(text).toContain('Something went wrong');
+    });
+
+    it('formats error entry with bold linked label', () => {
+      const entries: ActivityEntry[] = [
+        {
+          type: 'error',
+          timestamp: Date.now(),
+          message: 'Timeout',
+          threadMessageLink: 'https://slack.com/archives/C123/p123',
+        },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      expect(text).toContain(':x: *<https://slack.com/archives/C123/p123|Error>*');
+    });
+
+    it('formats aborted entry with bold label', () => {
+      const entries: ActivityEntry[] = [
+        { type: 'aborted', timestamp: Date.now() },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      expect(text).toContain(':octagonal_sign: *Aborted* by user');
+    });
+
+    it('formats aborted entry with bold linked label', () => {
+      const entries: ActivityEntry[] = [
+        {
+          type: 'aborted',
+          timestamp: Date.now(),
+          threadMessageLink: 'https://slack.com/archives/C123/p123',
+        },
+      ];
+
+      const text = buildActivityLogText(entries);
+
+      expect(text).toContain(':octagonal_sign: *<https://slack.com/archives/C123/p123|Aborted>* by user');
+    });
   });
 });
