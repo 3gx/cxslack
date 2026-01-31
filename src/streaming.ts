@@ -563,6 +563,51 @@ export class StreamingManager {
   }
 
   /**
+   * Mark a turn as failed before startTurn completes.
+   * Cleans up timers, updates the activity message, and clears state.
+   */
+  async failTurnStart(conversationKey: string, message?: string): Promise<void> {
+    const context = this.contexts.get(conversationKey);
+    const state = this.states.get(conversationKey);
+    if (!context || !state) {
+      return;
+    }
+
+    if (state.updateTimer) {
+      clearInterval(state.updateTimer);
+      state.updateTimer = null;
+    }
+    if (state.pendingAbortTimeout) {
+      clearTimeout(state.pendingAbortTimeout);
+      state.pendingAbortTimeout = undefined;
+    }
+    state.pendingAbort = false;
+    state.isStreaming = false;
+    state.status = 'failed';
+
+    this.activityManager.addEntry(conversationKey, {
+      type: 'error',
+      timestamp: Date.now(),
+      message: message || 'Failed to start turn',
+    });
+
+    try {
+      await markError(this.slack, context.channelId, context.originalTs);
+    } catch (err) {
+      console.error('[streaming] Failed to mark error emoji:', err);
+    }
+
+    await this.updateActivityMessage(conversationKey);
+
+    this.activityManager.clearEntries(conversationKey);
+    if (context.turnId) {
+      this.turnIdToKey.delete(context.turnId);
+    }
+    this.contexts.delete(conversationKey);
+    this.states.delete(conversationKey);
+  }
+
+  /**
    * Queue an abort request. If turnId is available, executes immediately.
    * Otherwise, queues the abort to be executed when turn:started arrives.
    */

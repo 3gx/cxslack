@@ -1175,11 +1175,22 @@ async function handleUserMessage(
   }
 
   // Start the turn
-  const turnId = await codex.startTurn(threadId, input, {
-    approvalPolicy,
-    reasoningEffort: effectiveReasoning,
-    model: effectiveModel,
-  });
+  let turnId: string;
+  try {
+    turnId = await codex.startTurn(threadId, input, {
+      approvalPolicy,
+      reasoningEffort: effectiveReasoning,
+      model: effectiveModel,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to start turn';
+    console.error('[message] startTurn failed:', err);
+    await streamingManager.failTurnStart(
+      conversationKey,
+      `Start failed: ${message}`
+    );
+    return;
+  }
 
   // Update context with turn ID (and register for turnId routing)
   streamingManager.registerTurnId(conversationKey, turnId);
