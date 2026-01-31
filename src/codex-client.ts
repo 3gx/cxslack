@@ -1024,7 +1024,7 @@ export class CodexClient extends EventEmitter {
           // codex/event/token_count: wrapped in msg
           msg?: {
             info?: {
-              total_token_usage?: { input_tokens?: number; output_tokens?: number; cached_input_tokens?: number };
+              total_token_usage?: { input_tokens?: number; output_tokens?: number; cached_input_tokens?: number; total_tokens?: number };
               model_context_window?: number | null;
             };
           };
@@ -1046,7 +1046,7 @@ export class CodexClient extends EventEmitter {
         // Prefer explicit input/output when present; avoid defaulting to 0 when totalTokens exists.
         const inputTokens = msgUsage?.input_tokens ?? threadUsage?.inputTokens;
         const outputTokens = msgUsage?.output_tokens ?? threadUsage?.outputTokens;
-        const totalTokens = threadUsage?.totalTokens;
+        const totalTokens = msgUsage?.total_tokens ?? threadUsage?.totalTokens;
         const cacheReadInputTokens = msgUsage?.cached_input_tokens ?? threadUsage?.cachedInputTokens;
         const contextWindow = msgInfo?.model_context_window ?? p.tokenUsage?.modelContextWindow;
 

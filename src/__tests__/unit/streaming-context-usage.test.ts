@@ -1,6 +1,6 @@
 /**
- * Regression test: activity status line should use per-turn token deltas,
- * not cumulative thread totals (avoids 5M/0% context displays).
+ * Regression test: activity status line should use cumulative totals,
+ * matching Codex CLI context usage.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -23,7 +23,7 @@ vi.mock('../../blocks.js', async () => {
 });
 
 describe('StreamingManager context usage (activity line)', () => {
-  it('uses per-turn deltas instead of cumulative totals', async () => {
+  it('uses cumulative totals for context usage', async () => {
     const { StreamingManager } = await import('../../streaming.js');
 
     const slack = {
@@ -61,8 +61,7 @@ describe('StreamingManager context usage (activity line)', () => {
       lastUpdateTime: 0,
       updateTimer: null,
       status: 'completed',
-      // Cumulative totals from Codex (before baseline)
-      inputTokens: 0,
+      inputTokens: 132_000,
       outputTokens: 0,
       cacheReadInputTokens: 0,
       cacheCreationInputTokens: 0,
@@ -92,14 +91,11 @@ describe('StreamingManager context usage (activity line)', () => {
     const call = buildActivityBlocks.mock.calls.at(-1)?.[0];
     expect(call).toBeDefined();
 
-    // Without token updates, no context usage should be shown
-    expect(call.contextTokens).toBeUndefined();
-    expect(call.contextPercent).toBeUndefined();
-    expect(call.inputTokens).toBeUndefined();
-    expect(call.outputTokens).toBeUndefined();
+    expect(call.contextTokens).toBe(132_000);
+    expect(call.contextPercent).toBeCloseTo(51.2, 1);
   });
 
-  it('ignores total-only token updates for baseline until input/output arrive', async () => {
+  it('uses totalTokens when input/output are missing', async () => {
     const { StreamingManager } = await import('../../streaming.js');
 
     const slack = {
@@ -174,9 +170,8 @@ describe('StreamingManager context usage (activity line)', () => {
     const call = buildActivityBlocks.mock.calls.at(-1)?.[0];
     expect(call).toBeDefined();
 
-    // Should not show usage yet because baseline isn't captured from total-only update
-    expect(call.contextTokens).toBeUndefined();
-    expect(call.contextPercent).toBeUndefined();
+    expect(call.contextTokens).toBe(150_000);
+    expect(call.contextPercent).toBeCloseTo(58.1, 1);
 
     buildActivityBlocks.mockClear();
 
@@ -191,7 +186,7 @@ describe('StreamingManager context usage (activity line)', () => {
 
     const followup = buildActivityBlocks.mock.calls.at(-1)?.[0];
     expect(followup).toBeDefined();
-    expect(followup.contextTokens).toBeUndefined();
-    expect(followup.contextPercent).toBeUndefined();
+    expect(followup.contextTokens).toBe(160_000);
+    expect(followup.contextPercent).toBeCloseTo(62.0, 1);
   });
 });

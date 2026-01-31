@@ -233,6 +233,8 @@ interface StreamingState {
   inputTokens: number;
   /** Accumulated output tokens */
   outputTokens: number;
+  /** Cumulative total tokens (if provided) */
+  totalTokens?: number;
   /** Cache read input tokens (if provided) */
   cacheReadInputTokens: number;
   /** Cache creation input tokens (if provided) */
@@ -396,6 +398,7 @@ export class StreamingManager {
       status: 'running',
       inputTokens: 0,
       outputTokens: 0,
+      totalTokens: undefined,
       cacheReadInputTokens: 0,
       cacheCreationInputTokens: 0,
       contextWindow: undefined,
@@ -1682,8 +1685,10 @@ export class StreamingManager {
             state.baseCacheCreationInputTokens = cacheCreationInputTokens;
           }
 
-          if (!hasIoTokens && totalTokens !== undefined && totalTokens > 0) {
-            // Total-only updates are insufficient for per-turn deltas; ignore for baseline & display.
+          if (totalTokens !== undefined && totalTokens > 0) {
+            state.totalTokens = totalTokens;
+          } else if (hasIoTokens) {
+            state.totalTokens = inputTokens + outputTokens;
           }
           if (cacheReadInputTokens !== undefined) {
             state.cacheReadInputTokens = cacheReadInputTokens;
@@ -1763,14 +1768,10 @@ export class StreamingManager {
       // Compute context usage - VERIFIED from Codex API:
       // total_tokens = input_tokens + output_tokens
       // (cached_input_tokens is a SUBSET of input_tokens, not additional)
-      const hasBaseline =
-        state.baseInputTokens !== undefined || state.baseOutputTokens !== undefined;
-      const adjInput = hasBaseline ? Math.max(0, state.inputTokens - (state.baseInputTokens ?? 0)) : 0;
-      const adjOutput = hasBaseline ? Math.max(0, state.outputTokens - (state.baseOutputTokens ?? 0)) : 0;
-      const contextTokens = hasBaseline ? adjInput + adjOutput : 0;
+      const contextTokens = state.totalTokens ?? (state.inputTokens + state.outputTokens);
       const contextWindow = state.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
       const contextPercent =
-        hasBaseline && contextTokens > 0
+        contextTokens > 0
           ? Math.min(100, Math.max(0, Number(((contextTokens / contextWindow) * 100).toFixed(1))))
           : undefined;
       const autoCompactThreshold = computeAutoCompactThreshold(
@@ -1789,9 +1790,9 @@ export class StreamingManager {
         compactBase && contextTokens > 0 ? Math.max(0, compactBase - contextTokens) : undefined;
 
       const includeFinalStats = state.status !== 'running';
-      const hasTokenCounts = hasBaseline && (state.inputTokens > 0 || state.outputTokens > 0);
-      const inputTokensForStats = includeFinalStats && hasTokenCounts ? adjInput : undefined;
-      const outputTokensForStats = includeFinalStats && hasTokenCounts ? adjOutput : undefined;
+      const hasTokenCounts = state.inputTokens > 0 || state.outputTokens > 0;
+      const inputTokensForStats = includeFinalStats && hasTokenCounts ? state.inputTokens : undefined;
+      const outputTokensForStats = includeFinalStats && hasTokenCounts ? state.outputTokens : undefined;
 
       const threadTs = context.threadTs || context.originalTs;
 
