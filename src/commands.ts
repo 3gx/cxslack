@@ -183,9 +183,9 @@ export async function handlePolicyCommand(
 export async function handleClearCommand(
   context: CommandContext
 ): Promise<CommandResult> {
-  const { channelId, threadTs } = context;
+  const { channelId, threadTs, userId } = context;
 
-  await clearSession(channelId, threadTs);
+  await clearSession(channelId, threadTs, userId);
 
   return {
     blocks: buildClearBlocks(),

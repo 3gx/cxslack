@@ -679,8 +679,10 @@ describe('Session Manager', () => {
         })
       );
       mockFs.writeFileSync.mockImplementation(() => {});
+      mockFs.realpathSync.mockReturnValue('/test');
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(3000);
 
-      await clearSession('C123');
+      await clearSession('C123', undefined, 'U999');
 
       const writtenData = JSON.parse(
         mockFs.writeFileSync.mock.calls[0][1] as string
@@ -691,6 +693,12 @@ describe('Session Manager', () => {
       expect(writtenData.channels.C123.previousThreadIds).toContain('thread-100');
       expect(writtenData.channels.C123.lastUsage).toBeUndefined();
       expect(writtenData.channels.C123.turns).toEqual([]);
+      expect(writtenData.channels.C123.pathConfigured).toBe(true);
+      expect(writtenData.channels.C123.configuredPath).toBe('/test');
+      expect(writtenData.channels.C123.workingDir).toBe('/test');
+      expect(writtenData.channels.C123.configuredBy).toBe('U999');
+      expect(writtenData.channels.C123.configuredAt).toBe(3000);
+      nowSpy.mockRestore();
     });
   });
 
