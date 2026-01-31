@@ -289,6 +289,10 @@ export async function handleResumeCommand(
   try {
     const threadInfo = await codex.resumeThread(resumeThreadId);
 
+    if (!threadInfo.workingDirectory) {
+      throw new Error('Codex did not return a working directory for this session.');
+    }
+
     // Load existing sessions to preserve previous thread IDs and path metadata
     const channelSession = getSession(channelId);
     const threadSession = threadTs ? getThreadSession(channelId, threadTs) : null;
@@ -299,16 +303,17 @@ export async function handleResumeCommand(
     const oldChannelThreadId = channelSession?.threadId;
     const oldThreadThreadId = threadSession?.threadId;
 
-    // Prefer workingDirectory from Codex; fall back to existing configured path or cwd
-    const workingDir =
-      threadInfo.workingDirectory ||
-      threadSession?.configuredPath ||
-      threadSession?.workingDir ||
-      channelSession?.configuredPath ||
-      channelSession?.workingDir ||
-      process.cwd();
-
+    const workingDir = threadInfo.workingDirectory;
     const now = Date.now();
+
+    const isNewContext = threadTs ? !threadSession?.pathConfigured : !channelSession?.pathConfigured;
+    const previousPath = threadTs
+      ? (threadSession?.configuredPath ?? threadSession?.workingDir)
+      : (channelSession?.configuredPath ?? channelSession?.workingDir);
+    const pathChanged =
+      !!(threadTs ? threadSession?.pathConfigured : channelSession?.pathConfigured) &&
+      !!previousPath &&
+      previousPath !== workingDir;
 
     // Update channel-level session (fallback for main-channel mentions)
     await saveSession(channelId, {
@@ -326,12 +331,13 @@ export async function handleResumeCommand(
 
     // Update thread-level session if applicable
     if (threadTs) {
+      const threadIsNew = !threadSession?.pathConfigured;
       await saveThreadSession(channelId, threadTs, {
         threadId: resumeThreadId,
         workingDir,
         configuredPath: workingDir,
         configuredBy: userId,
-        configuredAt: threadSession?.configuredAt ?? now,
+        configuredAt: threadSession?.configuredAt ?? (threadIsNew ? now : threadSession?.configuredAt),
         pathConfigured: true,
         previousThreadIds:
           oldThreadThreadId && oldThreadThreadId !== resumeThreadId
@@ -340,18 +346,22 @@ export async function handleResumeCommand(
       });
     }
 
+    const previousThreadId =
+      oldThreadThreadId && oldThreadThreadId !== resumeThreadId
+        ? oldThreadThreadId
+        : oldChannelThreadId && oldChannelThreadId !== resumeThreadId
+          ? oldChannelThreadId
+          : undefined;
+
     return {
       blocks: buildResumeConfirmationBlocks({
         resumedThreadId: resumeThreadId,
         workingDir,
-        previousThreadId:
-          oldThreadThreadId && oldThreadThreadId !== resumeThreadId
-            ? oldThreadThreadId
-            : oldChannelThreadId && oldChannelThreadId !== resumeThreadId
-              ? oldChannelThreadId
-              : undefined,
+        previousThreadId,
+        isNewChannel: isNewContext,
+        previousPath: pathChanged ? previousPath : undefined,
       }),
-      text: `Resumed session ${resumeThreadId} in ${workingDir}. Your next message will continue this session.`,
+      text: `Resuming session ${resumeThreadId} in ${workingDir}. Your next message will continue this session.`,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';

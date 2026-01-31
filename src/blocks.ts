@@ -1086,45 +1086,36 @@ export interface ResumeConfirmationParams {
   resumedThreadId: string;
   workingDir: string;
   previousThreadId?: string;
+  isNewChannel: boolean;
+  previousPath?: string;
 }
 
 /**
  * Build blocks for a resume confirmation message.
- * Mirrors ccslack style with bookmark affordances and a clear next-step hint.
+ * Mirrors ccslack style with explicit path lock/change messaging.
  */
 export function buildResumeConfirmationBlocks(params: ResumeConfirmationParams): Block[] {
-  const { resumedThreadId, workingDir, previousThreadId } = params;
-  const blocks: Block[] = [];
-
-  blocks.push({
-    type: 'section',
-    text: {
-      type: 'mrkdwn',
-      text: `:bookmark_tabs: Resumed session \`${resumedThreadId}\` in \`${workingDir}\``,
-    },
-  });
+  const { resumedThreadId, workingDir, previousThreadId, isNewChannel, previousPath } = params;
+  const lines: string[] = [];
 
   if (previousThreadId) {
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `:bookmark: Previous session: \`${previousThreadId}\`\n• _Use_ \`/resume ${previousThreadId}\` _to return_`,
-      },
-    });
+    lines.push(`:bookmark: Previous session: \`${previousThreadId}\``);
+    lines.push(`_Use_ \`/resume ${previousThreadId}\` _to return_`);
+    lines.push('');
   }
 
-  blocks.push({
-    type: 'context',
-    elements: [
-      {
-        type: 'mrkdwn',
-        text: 'Your next message will continue this session.',
-      },
-    ],
-  });
+  lines.push(`Resuming session \`${resumedThreadId}\` in \`${workingDir}\``);
 
-  return blocks;
+  if (isNewChannel) {
+    lines.push(`Path locked to \`${workingDir}\``);
+  } else if (previousPath && previousPath !== workingDir) {
+    lines.push(`Path changed from \`${previousPath}\` to \`${workingDir}\``);
+  }
+
+  lines.push('');
+  lines.push('Your next message will continue this session.');
+
+  return buildTextBlocks(lines.join('\n'));
 }
 
 /**

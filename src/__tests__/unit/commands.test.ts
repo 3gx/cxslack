@@ -141,7 +141,7 @@ describe('Command Handlers', () => {
       expect(threadArgs.previousThreadIds).toContain('old-thread-thread');
       expect(threadArgs.configuredPath).toBe('/proj');
 
-      expect(result.text).toContain('Resumed session');
+      expect(result.text).toContain('Resuming session');
       expect(result.text).toContain(mockResumeId);
       expect(result.text).toContain('/proj');
       const blocksJson = JSON.stringify(result.blocks);
@@ -158,6 +158,18 @@ describe('Command Handlers', () => {
 
       expect(result.text).toContain('Failed to resume session');
       expect(result.text).toContain('not found');
+    });
+
+    it('fails when Codex resumeThread does not return a working directory', async () => {
+      (codex.resumeThread as vi.Mock).mockResolvedValue({ id: 'thread-xyz', workingDirectory: '' });
+
+      const result = await handleResumeCommand(
+        { ...baseContext, text: 'thread-xyz' },
+        codex
+      );
+
+      expect(result.text).toContain('Failed to resume session');
+      expect(result.text).toContain('working directory');
     });
   });
 
