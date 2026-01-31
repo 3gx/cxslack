@@ -3,8 +3,8 @@
 help:
 	@echo "Available commands:"
 	@echo "  make setup         - Install npm dependencies"
-	@echo "  make setup-tools   - Verify native dependencies"
-	@echo "  make verify-tools  - Verify all dependencies"
+	@echo "  make setup-tools   - Install native dependencies (Puppeteer/Chromium on Linux)"
+	@echo "  make verify-tools  - Verify all dependencies are installed"
 	@echo "  make dev           - Development server"
 	@echo "  make build         - Build TypeScript"
 	@echo "  make start         - Run production server"
@@ -17,12 +17,41 @@ help:
 setup:
 	npm install
 
-# Verify native tools/dependencies
+# Install native tools/dependencies for Puppeteer and Sharp
 setup-tools:
-	@echo "Verifying Codex CLI is installed..."
-	@which codex || (echo "ERROR: Codex CLI not found. Install from https://github.com/openai/codex" && exit 1)
-	@codex --version
-	@echo "Done!"
+	@echo "Detecting OS and installing native dependencies..."
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		echo "macOS detected - Puppeteer will auto-download Chromium"; \
+		echo "No additional setup required."; \
+	elif [ -f /etc/os-release ]; then \
+		. /etc/os-release; \
+		if [ "$$ID" = "ubuntu" ] || [ "$$ID" = "debian" ]; then \
+			echo "$$ID $$VERSION_ID detected"; \
+			if [ "$$(echo $$VERSION_ID | cut -d. -f1)" -ge 24 ] 2>/dev/null; then \
+				echo "Installing dependencies for Ubuntu 24.04+..."; \
+				sudo apt-get update && sudo apt-get install -y \
+					libx11-xcb1 libxcomposite1 libxcursor1 libxdamage1 libxi6 libxtst6 \
+					libnss3 libnspr4 libcups2 libxss1 libxrandr2 libasound2t64 libatk1.0-0 \
+					libatk-bridge2.0-0 libgtk-3-0 libgbm1 libpango-1.0-0 libpangocairo-1.0-0 \
+					libcairo2 libfontconfig1 libdbus-1-3 libexpat1 libglib2.0-0; \
+			else \
+				echo "Installing dependencies for Ubuntu 22.04 and earlier..."; \
+				sudo apt-get update && sudo apt-get install -y \
+					libx11-xcb1 libxcomposite1 libxcursor1 libxdamage1 libxi6 libxtst6 \
+					libnss3 libnspr4 libcups2 libxss1 libxrandr2 libasound2 libatk1.0-0 \
+					libatk-bridge2.0-0 libgtk-3-0 libgbm1 libpango-1.0-0 libpangocairo-1.0-0 \
+					libcairo2 libfontconfig1 libdbus-1-3 libexpat1 libglib2.0-0; \
+			fi; \
+		else \
+			echo "Unsupported Linux distribution: $$ID"; \
+			echo "Please install Chromium dependencies manually."; \
+			exit 1; \
+		fi; \
+	else \
+		echo "Unknown OS. Please install dependencies manually."; \
+		exit 1; \
+	fi
+	@echo "Done! Run 'make verify-tools' to verify installation."
 
 # Verify native tools are installed
 verify-tools:
@@ -37,9 +66,39 @@ verify-tools:
 	@echo "   OK"
 	@echo ""
 	@echo "3. Checking Codex CLI..."
-	@which codex || (echo "ERROR: Codex CLI not found" && exit 1)
+	@which codex || (echo "ERROR: Codex CLI not found. Install from https://github.com/openai/codex" && exit 1)
 	@codex --version
 	@echo "   OK"
+	@echo ""
+	@echo "4. Checking Puppeteer Chromium..."
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		CHROME_PATH=$$(find ~/.cache/puppeteer -name "Google Chrome for Testing.app" -type d 2>/dev/null | head -1); \
+		if [ -z "$$CHROME_PATH" ]; then \
+			echo "   Chromium not yet downloaded (will download on first npm install)"; \
+		else \
+			echo "   Found: $$CHROME_PATH"; \
+			echo "   OK"; \
+		fi; \
+	else \
+		CHROME_PATH=$$(find ~/.cache/puppeteer -name "chrome" -type f 2>/dev/null | head -1); \
+		if [ -z "$$CHROME_PATH" ]; then \
+			echo "   Chromium not yet downloaded (will download on first npm install)"; \
+		else \
+			echo "   Found: $$CHROME_PATH"; \
+			MISSING=$$(ldd "$$CHROME_PATH" 2>/dev/null | grep "not found" || true); \
+			if [ -n "$$MISSING" ]; then \
+				echo "   ERROR: Missing libraries:"; \
+				echo "$$MISSING"; \
+				echo "   Run 'make setup-tools' to install missing dependencies."; \
+				exit 1; \
+			else \
+				echo "   OK - All Chromium dependencies satisfied"; \
+			fi; \
+		fi; \
+	fi
+	@echo ""
+	@echo "5. Checking Sharp..."
+	@node -e "require('sharp')" 2>/dev/null && echo "   OK" || echo "   Not installed (run 'npm install' first)"
 	@echo ""
 	@echo "All checks passed!"
 

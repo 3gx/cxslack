@@ -1402,6 +1402,28 @@ async function createForkChannel(params: CreateForkChannelParams): Promise<Creat
     throw new Error('Cannot fork: Turn not found in Codex thread.');
   }
 
+  // Inherit working directory lock from source session
+  const sourceThreadSession = sourceConvThreadTs
+    ? getThreadSession(sourceConvChannelId, sourceConvThreadTs)
+    : null;
+  const sourceChannelSession = getSession(sourceConvChannelId);
+  const sourceWorkingDir =
+    sourceThreadSession?.configuredPath ||
+    sourceThreadSession?.workingDir ||
+    sourceChannelSession?.configuredPath ||
+    sourceChannelSession?.workingDir ||
+    process.env.DEFAULT_WORKING_DIR ||
+    process.cwd();
+  const configuredBy =
+    sourceThreadSession?.configuredBy ??
+    sourceChannelSession?.configuredBy ??
+    userId ??
+    null;
+  const configuredAt =
+    sourceThreadSession?.configuredAt ??
+    sourceChannelSession?.configuredAt ??
+    Date.now();
+
   // 1. Create new Slack channel
   let createResult;
   try {
@@ -1463,6 +1485,11 @@ async function createForkChannel(params: CreateForkChannelParams): Promise<Creat
     threadId: forkedThread.id,
     forkedFrom: sourceThreadId,
     forkedAtTurnIndex: turnIndex,
+    pathConfigured: true,
+    configuredPath: sourceWorkingDir,
+    workingDir: sourceWorkingDir,
+    configuredBy,
+    configuredAt,
   });
 
   // 5. Post initial message in the new channel

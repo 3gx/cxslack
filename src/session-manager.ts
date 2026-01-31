@@ -539,35 +539,90 @@ export async function deleteChannelSession(channelId: string): Promise<void> {
  * Clear the current session (for /clear command).
  * Preserves the thread ID in previousThreadIds for potential resume.
  */
-export async function clearSession(channelId: string, threadTs?: string): Promise<void> {
+export async function clearSession(
+  channelId: string,
+  threadTs?: string,
+  userId?: string
+): Promise<void> {
   // Always clear channel session's threadId (since main channel mentions use fallback)
   const channelSession = getSession(channelId);
+  const threadSession = threadTs ? getThreadSession(channelId, threadTs) : null;
+
+  // /clear implies /set-current-path in the previous session's directory
+  const fallbackPath =
+    threadSession?.configuredPath ||
+    threadSession?.workingDir ||
+    channelSession?.configuredPath ||
+    channelSession?.workingDir ||
+    process.env.DEFAULT_WORKING_DIR ||
+    process.cwd();
+
+  let normalizedPath = fallbackPath;
+  try {
+    normalizedPath = fs.realpathSync(fallbackPath);
+  } catch {
+    // Keep fallback path if realpath fails
+  }
+
+  const shouldLockChannel = !channelSession?.pathConfigured;
+  const channelLockUpdate = shouldLockChannel
+    ? {
+        pathConfigured: true,
+        configuredPath: normalizedPath,
+        workingDir: normalizedPath,
+        configuredBy: channelSession?.configuredBy ?? userId ?? null,
+        configuredAt: channelSession?.configuredAt ?? Date.now(),
+      }
+    : {};
+
   if (channelSession?.threadId) {
     await saveSession(channelId, {
       threadId: null,
       previousThreadIds: [...(channelSession.previousThreadIds || []), channelSession.threadId],
       lastUsage: undefined,
       turns: [],
+      ...channelLockUpdate,
     });
   } else if (channelSession) {
     // No active thread, still clear contextual usage/turns to start fresh
     await saveSession(channelId, {
       lastUsage: undefined,
       turns: [],
+      ...channelLockUpdate,
+    });
+  } else if (shouldLockChannel) {
+    // Create a minimal session so future messages can proceed
+    await saveSession(channelId, {
+      ...channelLockUpdate,
     });
   }
 
   // Also clear thread session if specified
   if (threadTs) {
-    const existing = getThreadSession(channelId, threadTs);
+    const existing = threadSession;
+    const shouldLockThread = !!existing && !existing.pathConfigured;
+    const threadLockUpdate = shouldLockThread
+      ? {
+          pathConfigured: true,
+          configuredPath: normalizedPath,
+          workingDir: normalizedPath,
+          configuredBy: existing?.configuredBy ?? userId ?? null,
+          configuredAt: existing?.configuredAt ?? Date.now(),
+        }
+      : {};
+
     if (existing?.threadId) {
       await saveThreadSession(channelId, threadTs, {
         threadId: null,
         previousThreadIds: [...(existing.previousThreadIds || []), existing.threadId],
         lastUsage: undefined,
+        ...threadLockUpdate,
       });
     } else if (existing) {
-      await saveThreadSession(channelId, threadTs, { lastUsage: undefined });
+      await saveThreadSession(channelId, threadTs, {
+        lastUsage: undefined,
+        ...threadLockUpdate,
+      });
     }
   }
 }
