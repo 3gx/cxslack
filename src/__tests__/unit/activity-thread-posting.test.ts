@@ -643,7 +643,7 @@ describe('Thread Activity formatThreadActivityEntry', () => {
     };
 
     const result = formatThreadActivityEntry(entry);
-    expect(result).toContain('_Full content attached._');
+    expect(result).toContain('_Full content not attached._');
   });
 });
 

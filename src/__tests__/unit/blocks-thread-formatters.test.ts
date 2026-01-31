@@ -657,6 +657,19 @@ describe('formatThreadActivityEntry with metrics', () => {
     expect(result).toContain('500 chars');
   });
 
+  it('marks truncated thinking as not attached when no link', () => {
+    const entry: ActivityEntry = {
+      type: 'thinking',
+      timestamp: Date.now(),
+      charCount: 1200,
+      thinkingInProgress: false,
+      thinkingTruncated: true,
+      thinkingContent: '...tail',
+    };
+    const result = formatThreadActivityEntry(entry);
+    expect(result).toContain('Full content not attached');
+  });
+
   it('formats generating with memo emoji (matches main activity message)', () => {
     const entry: ActivityEntry = {
       type: 'generating',

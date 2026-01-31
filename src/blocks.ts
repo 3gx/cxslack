@@ -423,6 +423,38 @@ export function buildActivityEntryBlocks(params: ActivityEntryBlockParams): Bloc
   return blocks;
 }
 
+export interface AttachThinkingButtonValue {
+  threadParentTs: string;
+  channelId: string;
+  activityMsgTs: string;
+  thinkingCharCount: number;
+}
+
+export function buildAttachThinkingFileButton(
+  activityMsgTs: string,
+  threadParentTs: string,
+  channelId: string,
+  thinkingCharCount: number
+): Block {
+  const value: AttachThinkingButtonValue = {
+    threadParentTs,
+    channelId,
+    activityMsgTs,
+    thinkingCharCount,
+  };
+
+  return {
+    type: 'actions',
+    block_id: `attach_thinking_${activityMsgTs}`,
+    elements: [{
+      type: 'button',
+      text: { type: 'plain_text', text: ':page_facing_up: Attach thinking', emoji: true },
+      action_id: `attach_thinking_file_${activityMsgTs}`,
+      value: JSON.stringify(value),
+    }],
+  } as Block;
+}
+
 // Helper for mapping tool/thinking entries to block actions in thread activity
 // NOTE: Fork button should ONLY appear on the main activity/status panel (buildActivityBlocks),
 // NOT on individual per-entry thread posts. This matches ccslack behavior.
@@ -2101,7 +2133,7 @@ export function formatThreadActivityEntry(entry: ActivityEntry): string {
         if (entry.thinkingAttachmentLink) {
           lines.push(`_Full response <${entry.thinkingAttachmentLink}|attached>._`);
         } else {
-          lines.push('_Full content attached._');
+          lines.push('_Full content not attached._');
         }
       }
       return lines.join('\n');

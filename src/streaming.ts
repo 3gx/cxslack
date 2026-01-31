@@ -31,6 +31,8 @@ import {
   computeAutoCompactThreshold,
   buildActivityEntryBlocks,
   buildForkButton,
+  buildAttachThinkingFileButton,
+  formatThreadActivityEntry,
 } from './blocks.js';
 import {
   markProcessingStart,
@@ -898,6 +900,18 @@ export class StreamingManager {
               : undefined;
 
             if (currentEntry && segmentId && thinkingMsgTs) {
+              const threadSessionKey = found.context.threadTs || found.context.originalTs;
+              if (segmentContent.length > THINKING_MESSAGE_SIZE && threadSessionKey) {
+                await saveThreadSession(channelId, threadSessionKey, {
+                  lastThinkingContent: segmentContent,
+                  lastThinkingDisplay: display,
+                  lastThinkingCharCount: segmentContent.length,
+                  lastThinkingDurationMs: durationMs,
+                  lastThinkingMessageTs: thinkingMsgTs,
+                }).catch((err) => console.error('[streaming] Failed to save lastThinkingContent:', err));
+              }
+
+              let attachmentFailed = false;
               if (segmentContent.length > THINKING_MESSAGE_SIZE) {
                 try {
                   const thinkingMsgLink = await getMessagePermalink(
@@ -921,19 +935,49 @@ export class StreamingManager {
                       uploadResult.fileMessageTs
                     );
                     currentEntry.thinkingAttachmentLink = fileMsgLink;
+                  } else {
+                    attachmentFailed = true;
                   }
                 } catch (err) {
                   console.error('[streaming] Thinking attachment upload failed:', err);
+                  attachmentFailed = true;
                 }
               }
 
-              await updateThinkingEntryInThread(
-                this.activityManager,
-                found.key,
-                this.slack,
-                channelId,
-                currentEntry
-              ).catch((err) => console.error('[streaming] Thinking update failed:', err));
+              if (attachmentFailed) {
+                const text = formatThreadActivityEntry(currentEntry);
+                const blocks = [
+                  {
+                    type: 'section',
+                    text: { type: 'mrkdwn', text },
+                    expand: true,
+                  },
+                  buildAttachThinkingFileButton(
+                    thinkingMsgTs,
+                    state.threadParentTs || originalTs,
+                    channelId,
+                    segmentContent.length
+                  ),
+                ];
+                await withSlackRetry(
+                  () =>
+                    this.slack.chat.update({
+                      channel: channelId,
+                      ts: thinkingMsgTs,
+                      text,
+                      blocks,
+                    }),
+                  'thinking.attach.retry'
+                ).catch((err) => console.error('[streaming] Thinking retry button update failed:', err));
+              } else {
+                await updateThinkingEntryInThread(
+                  this.activityManager,
+                  found.key,
+                  this.slack,
+                  channelId,
+                  currentEntry
+                ).catch((err) => console.error('[streaming] Thinking update failed:', err));
+              }
             } else {
               // Fallback: no existing thinking message; post a standalone message
               await postThinkingToThread(

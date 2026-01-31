@@ -127,6 +127,14 @@ export interface ThreadSession {
   messageToolMap?: Record<string, string>;
   /** Last thinking content (for attach-thinking action) */
   lastThinkingContent?: string;
+  /** Last thinking preview (for attach-thinking message updates) */
+  lastThinkingDisplay?: string;
+  /** Last thinking content length (for attach-thinking validation) */
+  lastThinkingCharCount?: number;
+  /** Last thinking duration in ms (for attach-thinking display) */
+  lastThinkingDurationMs?: number;
+  /** Slack ts of the thinking message to update */
+  lastThinkingMessageTs?: string;
   /** Turn counter for this thread (incremented per turn) */
   turnCounter?: number;
 }
@@ -305,6 +313,10 @@ export async function saveThreadSession(
       messageTurnMap: existingThread?.messageTurnMap,
       messageToolMap: existingThread?.messageToolMap,
       lastThinkingContent: existingThread?.lastThinkingContent,
+      lastThinkingDisplay: existingThread?.lastThinkingDisplay,
+      lastThinkingCharCount: existingThread?.lastThinkingCharCount,
+      lastThinkingDurationMs: existingThread?.lastThinkingDurationMs,
+      lastThinkingMessageTs: existingThread?.lastThinkingMessageTs,
       turnCounter: existingThread?.turnCounter ?? 0,
       ...session,
     };

@@ -24,6 +24,7 @@ import {
   buildForkToChannelModalView,
   buildActivityBlocks,
   buildActivityEntryBlocks,
+  buildAttachThinkingFileButton,
   buildModelSelectionBlocks,
   buildReasoningSelectionBlocks,
   buildModelConfirmationBlocks,
@@ -995,6 +996,29 @@ describe('Block Kit Builders', () => {
       const blocks = buildActivityEntryBlocks({ text: ':brain: Thinking...' });
       const sectionBlock = blocks[0] as unknown as { expand?: boolean };
       expect(sectionBlock.expand).toBe(true);
+    });
+  });
+
+  describe('buildAttachThinkingFileButton', () => {
+    it('builds retry button with encoded metadata', () => {
+      const block = buildAttachThinkingFileButton(
+        'activity-ts-123',
+        'thread-ts-456',
+        'C123',
+        999
+      ) as any;
+
+      expect(block.type).toBe('actions');
+      expect(block.block_id).toBe('attach_thinking_activity-ts-123');
+      expect(block.elements?.[0]?.action_id).toBe('attach_thinking_file_activity-ts-123');
+
+      const value = JSON.parse(block.elements?.[0]?.value);
+      expect(value).toEqual({
+        threadParentTs: 'thread-ts-456',
+        channelId: 'C123',
+        activityMsgTs: 'activity-ts-123',
+        thinkingCharCount: 999,
+      });
     });
   });
 });

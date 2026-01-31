@@ -47,12 +47,16 @@ import {
   buildAbortConfirmationModalView,
   buildForkToChannelModalView,
   buildSandboxStatusBlocks,
+  buildActivityEntryBlocks,
+  formatThreadActivityEntry,
   Block,
 } from './blocks.js';
 import { withSlackRetry } from './slack-retry.js';
 import { markProcessingStart, markApprovalWait, removeProcessingEmoji } from './emoji-reactions.js';
 import { processSlackFiles, SlackFile } from './file-handler.js';
 import { buildMessageContent } from './content-builder.js';
+import { uploadFilesToThread, getMessagePermalink, type ActivityEntry } from './activity-thread.js';
+import { THINKING_MESSAGE_SIZE } from './commands.js';
 
 // ============================================================================
 // Pending Model Selection Tracking (for emoji cleanup)
@@ -521,6 +525,132 @@ function setupEventHandlers(): void {
         text: toUserMessage(error),
       });
     }
+  });
+
+  // Handle attach-thinking retry button
+  app.action(/^attach_thinking_file_(.+)$/, async ({ action, ack, body, client }) => {
+    await ack();
+
+    const rawValue = (action as { value?: string }).value;
+    const channelId = body.channel?.id;
+    const userId = body.user?.id;
+
+    if (!rawValue || !channelId) {
+      console.error('[attach_thinking] Missing action value or channel');
+      return;
+    }
+
+    let payload: {
+      threadParentTs: string;
+      channelId: string;
+      activityMsgTs: string;
+      thinkingCharCount: number;
+    };
+
+    try {
+      payload = JSON.parse(rawValue);
+    } catch (error) {
+      console.error('[attach_thinking] Failed to parse action value:', error);
+      return;
+    }
+
+    const { threadParentTs, activityMsgTs, thinkingCharCount } = payload;
+
+    const threadSession = getThreadSession(channelId, threadParentTs);
+    const content = threadSession?.lastThinkingContent;
+
+    if (!content) {
+      if (userId) {
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: userId,
+          text: 'Thinking content is no longer available for attachment.',
+        });
+      }
+      return;
+    }
+
+    if (thinkingCharCount && content.length !== thinkingCharCount) {
+      if (userId) {
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: userId,
+          text: 'Thinking content has changed and cannot be attached. Please re-run the request.',
+        });
+      }
+      return;
+    }
+
+    let thinkingMsgLink: string | undefined;
+    try {
+      thinkingMsgLink = await getMessagePermalink(client, channelId, activityMsgTs);
+    } catch (error) {
+      console.error('[attach_thinking] Failed to get thinking permalink:', error);
+    }
+
+    const uploadResult = await uploadFilesToThread(
+      client,
+      channelId,
+      threadParentTs,
+      content,
+      thinkingMsgLink ? `_Content for <${thinkingMsgLink}|this thinking block>._` : undefined,
+      userId
+    );
+
+    if (!uploadResult.success || !uploadResult.fileMessageTs) {
+      if (userId) {
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: userId,
+          text: 'Failed to attach thinking files. Please try again.',
+        });
+      }
+      return;
+    }
+
+    let fileMsgLink: string | undefined;
+    try {
+      fileMsgLink = await getMessagePermalink(client, channelId, uploadResult.fileMessageTs);
+    } catch (error) {
+      console.error('[attach_thinking] Failed to get file permalink:', error);
+    }
+
+    if (!fileMsgLink) {
+      if (userId) {
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: userId,
+          text: 'Attached files, but could not generate link.',
+        });
+      }
+      return;
+    }
+
+    const display = threadSession?.lastThinkingDisplay
+      ?? (content.length > THINKING_MESSAGE_SIZE
+        ? `...${content.slice(-THINKING_MESSAGE_SIZE)}`
+        : content);
+
+    const entry: ActivityEntry = {
+      type: 'thinking',
+      timestamp: Date.now(),
+      thinkingInProgress: false,
+      thinkingContent: display,
+      thinkingTruncated: content.length > THINKING_MESSAGE_SIZE,
+      thinkingAttachmentLink: fileMsgLink,
+      charCount: threadSession?.lastThinkingCharCount ?? content.length,
+      durationMs: threadSession?.lastThinkingDurationMs,
+    };
+
+    const text = formatThreadActivityEntry(entry);
+    const blocks = buildActivityEntryBlocks({ text });
+
+    await client.chat.update({
+      channel: channelId,
+      ts: activityMsgTs,
+      text,
+      blocks,
+    });
   });
 
   // Handle "Refresh fork" button click - restore Fork here if forked channel was deleted
