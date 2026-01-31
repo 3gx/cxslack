@@ -37,14 +37,13 @@ const MAX_MESSAGE_LENGTH = 2900;
 const THINKING_TRUNCATE_LENGTH = 500;
 const ACTIVITY_THINKING_PREVIEW_MAX = 300;
 
-function stripActivityMrkdwn(text: string): string {
-  return text.replace(/[*_~`]/g, '');
+function escapeLinkLabel(label: string): string {
+  return label.replace(/\|/g, '¦');
 }
 
-function linkifyActivityLine(line: string, link?: string): string {
-  if (!link) return line;
-  const label = stripActivityMrkdwn(line);
-  return `<${link}|${label}>`;
+function linkifyActivityLabel(label: string, link?: string): string {
+  if (!link) return label;
+  return `<${link}|${escapeLinkLabel(label)}>`;
 }
 
 function truncateActivityThinking(text: string): string {
@@ -340,12 +339,13 @@ export class ActivityThreadManager {
 
     switch (entry.type) {
       case 'starting': {
-        const header = ':brain: *Analyzing request...*';
-        return linkifyActivityLine(header, link);
+        const label = linkifyActivityLabel('Analyzing request', link);
+        return `:brain: ${label}...`;
       }
       case 'thinking': {
-        const header = `:brain: *Thinking...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
-        const lines: string[] = [linkifyActivityLine(header, link)];
+        const label = linkifyActivityLabel('Thinking', link);
+        const header = `:brain: ${label}...${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
+        const lines: string[] = [header];
         if (entry.thinkingContent) {
           lines.push(truncateActivityThinking(entry.thinkingContent));
         }
@@ -354,8 +354,8 @@ export class ActivityThreadManager {
       case 'tool_start': {
         // Pass toolInput directly - formatToolInputSummary handles both string and object inputs
         const inputSummary = formatToolInputSummary(entry.tool || '', entry.toolInput);
-        const line = `${emoji} *${normalizeToolName(entry.tool || '')}*${inputSummary} [in progress]`;
-        return linkifyActivityLine(line, link);
+        const label = linkifyActivityLabel(normalizeToolName(entry.tool || ''), link);
+        return `${emoji} ${label}${inputSummary} [in progress]`;
       }
       case 'tool_complete': {
         // Pass toolInput directly - formatToolInputSummary handles both string and object inputs
@@ -372,23 +372,24 @@ export class ActivityThreadManager {
           outputHint = ` → \`${truncated}${ellipsis}\``;
         }
 
-        const line = `${emoji} *${normalizeToolName(entry.tool || '')}*${inputSummary}${resultSummary}${outputHint}${duration}${errorFlag}`;
-        return linkifyActivityLine(line, link);
+        const label = linkifyActivityLabel(normalizeToolName(entry.tool || ''), link);
+        return `${emoji} ${label}${inputSummary}${resultSummary}${outputHint}${duration}${errorFlag}`;
       }
       case 'generating': {
-        const line = `:memo: *Generating...*${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
-        return linkifyActivityLine(line, link);
+        const label = linkifyActivityLabel('Generating', link);
+        return `:memo: ${label}...${duration}${entry.charCount ? ` _[${entry.charCount} chars]_` : ''}`;
       }
       case 'error': {
-        const line = `:x: ${entry.message || 'Error'}`;
-        return linkifyActivityLine(line, link);
+        const label = linkifyActivityLabel('Error', link);
+        const suffix = entry.message ? ` ${entry.message}` : '';
+        return `:x: ${label}${suffix}`;
       }
       case 'aborted': {
-        const line = ':octagonal_sign: *Aborted by user*';
-        return linkifyActivityLine(line, link);
+        const label = linkifyActivityLabel('Aborted', link);
+        return `:octagonal_sign: ${label} by user`;
       }
       default:
-        return linkifyActivityLine(`${emoji} ${entry.message || entry.type}${duration}`, link);
+        return `${emoji} ${linkifyActivityLabel(entry.message || entry.type, link)}${duration}`;
     }
   }
 }

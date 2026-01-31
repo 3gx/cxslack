@@ -23,6 +23,7 @@ import {
   buildAbortConfirmationModalView,
   buildForkToChannelModalView,
   buildActivityBlocks,
+  buildActivityEntryBlocks,
   buildModelSelectionBlocks,
   buildReasoningSelectionBlocks,
   buildModelConfirmationBlocks,
@@ -986,6 +987,14 @@ describe('Block Kit Builders', () => {
         // expand: true ensures Slack won't collapse this section
         expect((sectionBlock as unknown as { expand: boolean }).expand).toBe(true);
       });
+    });
+  });
+
+  describe('buildActivityEntryBlocks', () => {
+    it('includes expand: true on the entry section block', () => {
+      const blocks = buildActivityEntryBlocks({ text: ':brain: Thinking...' });
+      const sectionBlock = blocks[0] as unknown as { expand?: boolean };
+      expect(sectionBlock.expand).toBe(true);
     });
   });
 });

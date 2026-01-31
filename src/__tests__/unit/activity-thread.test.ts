@@ -326,7 +326,7 @@ describe('buildActivityLogText', () => {
     expect(text).toContain('2.5s');
   });
 
-  it('wraps entry text in a link when threadMessageLink is present', () => {
+  it('links only the label word when threadMessageLink is present', () => {
     const entries: ActivityEntry[] = [
       {
         type: 'starting',
@@ -337,8 +337,24 @@ describe('buildActivityLogText', () => {
 
     const text = buildActivityLogText(entries);
 
-    expect(text).toContain('<https://slack.com/archives/C123/p123456|');
-    expect(text).toContain('Analyzing request');
+    expect(text).toContain(':brain: <https://slack.com/archives/C123/p123456|Analyzing request>...');
+    expect(text).not.toContain('<https://slack.com/archives/C123/p123456|:brain:');
+  });
+
+  it('keeps emoji outside the link for tool lines', () => {
+    const entries: ActivityEntry[] = [
+      {
+        type: 'tool_complete',
+        timestamp: Date.now(),
+        tool: 'Bash',
+        toolInput: 'ls',
+        threadMessageLink: 'https://slack.com/archives/C123/p123456',
+      },
+    ];
+
+    const text = buildActivityLogText(entries);
+
+    expect(text).toContain(':computer: <https://slack.com/archives/C123/p123456|Bash>');
   });
 
   it('includes thinking content preview when present', () => {

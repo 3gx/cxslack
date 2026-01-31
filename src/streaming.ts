@@ -1648,10 +1648,10 @@ export class StreamingManager {
       // Add response preview if we have response content
       if (state.text) {
         const preview = state.text.slice(0, 200).replace(/\n/g, ' ');
-        const responseHeader = `:speech_balloon: *Response* _[${state.text.length} chars]_`;
-        const responseLine = state.responseMessageLink
-          ? `<${state.responseMessageLink}|${responseHeader.replace(/[*_~`]/g, '')}>`
-          : responseHeader;
+        const responseLabel = state.responseMessageLink
+          ? `<${state.responseMessageLink}|Response>`
+          : 'Response';
+        const responseLine = `:speech_balloon: ${responseLabel} _[${state.text.length} chars]_`;
         activityText += `\n${responseLine}\n> ${preview}${state.text.length > 200 ? '...' : ''}`;
       }
 

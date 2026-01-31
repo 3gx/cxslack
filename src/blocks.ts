@@ -414,7 +414,8 @@ export function buildActivityEntryBlocks(params: ActivityEntryBlockParams): Bloc
     {
       type: 'section',
       text: { type: 'mrkdwn', text: params.text },
-    },
+      expand: true,
+    } as Block,
   ];
   if (params.actions) {
     blocks.push(buildActivityEntryActions(params.actions));
