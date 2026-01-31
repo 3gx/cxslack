@@ -1003,30 +1003,34 @@ export class StreamingManager {
           state.currentThinkingSegmentId = undefined;
           state.thinkingSegmentCounter = (state.thinkingSegmentCounter || 0) + 1;
 
-          // Track tool start (only actual tools now)
-          // Store both display input and full toolInput for metrics extraction
-          state.activeTools.set(itemId, {
-            tool: itemType,
-            input: displayInput,
-            toolInput: rawToolInput || displayInput,  // Full input for metrics
-            startTime: Date.now(),
-          });
-
           // For TodoWrite, store the full structured input for todo extraction
           // For other tools, use the display input string
           const toolInputValue = rawToolInput || displayInput;
 
           // If this tool was already seeded (e.g., web search begin), just update metadata
-          if (state.activeTools.has(itemId)) {
-            const existingTool = state.activeTools.get(itemId)!;
+          const existingTool = state.activeTools.get(itemId);
+          if (existingTool) {
+            existingTool.tool = existingTool.tool || itemType;
             if (!existingTool.input && displayInput) {
               existingTool.input = displayInput;
             }
             if (!existingTool.toolInput && toolInputValue) {
               existingTool.toolInput = toolInputValue;
             }
+            if (!existingTool.startTime) {
+              existingTool.startTime = Date.now();
+            }
             break;
           }
+
+          // Track tool start (only actual tools now)
+          // Store both display input and full toolInput for metrics extraction
+          state.activeTools.set(itemId, {
+            tool: itemType,
+            input: displayInput,
+            toolInput: toolInputValue, // Full input for metrics
+            startTime: Date.now(),
+          });
 
           // Add activity entry for actual tools only
           this.activityManager.addEntry(key, {
