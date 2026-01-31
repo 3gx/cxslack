@@ -162,6 +162,7 @@ export interface CodexClientEvents {
     cacheReadInputTokens?: number;
     cacheCreationInputTokens?: number;
     costUsd?: number;
+    totalTokens?: number;
   }) => void;
 
   // Thinking/reasoning events
@@ -1042,14 +1043,17 @@ export class CodexClient extends EventEmitter {
         const threadUsage = p.tokenUsage?.total;
 
         // Merge both sources
-        const inputTokens = msgUsage?.input_tokens ?? threadUsage?.inputTokens ?? 0;
-        const outputTokens = msgUsage?.output_tokens ?? threadUsage?.outputTokens ?? 0;
+        // Prefer explicit input/output when present; avoid defaulting to 0 when totalTokens exists.
+        const inputTokens = msgUsage?.input_tokens ?? threadUsage?.inputTokens;
+        const outputTokens = msgUsage?.output_tokens ?? threadUsage?.outputTokens;
+        const totalTokens = threadUsage?.totalTokens;
         const cacheReadInputTokens = msgUsage?.cached_input_tokens ?? threadUsage?.cachedInputTokens;
         const contextWindow = msgInfo?.model_context_window ?? p.tokenUsage?.modelContextWindow;
 
         this.emit('tokens:updated', {
-          inputTokens,
-          outputTokens,
+          inputTokens: inputTokens ?? 0,
+          outputTokens: outputTokens ?? 0,
+          totalTokens: totalTokens ?? undefined,
           contextWindow: contextWindow ?? undefined,
           cacheReadInputTokens,
         });
