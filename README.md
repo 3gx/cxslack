@@ -204,4 +204,4 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture documentation.
 
 ## License
 
-Proprietary
+BSD-3-Clause - see [LICENSE](LICENSE) for details.
