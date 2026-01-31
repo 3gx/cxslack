@@ -25,6 +25,13 @@ import {
 import { sendDmNotification } from './dm-notifications.js';
 import { makeConversationKey } from './streaming.js';
 
+// Tool approval reminder configuration (matches ccslack behavior)
+export const TOOL_APPROVAL_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+export const TOOL_APPROVAL_REMINDER_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+export const TOOL_APPROVAL_MAX_REMINDERS = Math.floor(
+  TOOL_APPROVAL_EXPIRY_MS / TOOL_APPROVAL_REMINDER_INTERVAL_MS
+); // 42 reminders
+
 /**
  * Pending approval request.
  */
@@ -53,6 +60,9 @@ export class ApprovalHandler {
   private codex: CodexClient;
   private pendingApprovals = new Map<number, PendingApproval>();
   private requestIdCounter = 0;
+  private reminderIntervals = new Map<number, NodeJS.Timeout>();
+  private reminderCounts = new Map<number, number>();
+  private reminderStartTimes = new Map<number, number>();
 
   constructor(slack: WebClient, codex: CodexClient) {
     this.slack = slack;
@@ -64,6 +74,96 @@ export class ApprovalHandler {
    */
   private generateRequestId(): number {
     return ++this.requestIdCounter;
+  }
+
+  private formatTimeRemaining(ms: number): string {
+    if (ms <= 0) return '0 mins';
+
+    const days = Math.floor(ms / (24 * 60 * 60 * 1000));
+    const hours = Math.floor((ms % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+    const mins = Math.floor((ms % (60 * 60 * 1000)) / (60 * 1000));
+
+    const parts: string[] = [];
+    if (days > 0) parts.push(`${days} day${days !== 1 ? 's' : ''}`);
+    if (hours > 0) parts.push(`${hours} hour${hours !== 1 ? 's' : ''}`);
+    if (mins > 0 || parts.length === 0) parts.push(`${mins} min${mins !== 1 ? 's' : ''}`);
+
+    return parts.join(' ');
+  }
+
+  private getApprovalLabel(request: ApprovalRequest): string {
+    if (request.method === 'item/commandExecution/requestApproval') {
+      const cmdRequest = request as CommandApprovalRequest;
+      return `\`${cmdRequest.params.parsedCmd}\``;
+    }
+    const fileRequest = request as FileChangeApprovalRequest;
+    return `\`${fileRequest.params.filePath}\``;
+  }
+
+  private clearApprovalReminder(requestId: number): void {
+    const interval = this.reminderIntervals.get(requestId);
+    if (interval) {
+      clearInterval(interval);
+      this.reminderIntervals.delete(requestId);
+    }
+    this.reminderCounts.delete(requestId);
+    this.reminderStartTimes.delete(requestId);
+  }
+
+  private startApprovalReminder(requestId: number, label: string): void {
+    const startTime = Date.now();
+    this.reminderStartTimes.set(requestId, startTime);
+    this.reminderCounts.set(requestId, 0);
+
+    const interval = setInterval(async () => {
+      const pending = this.pendingApprovals.get(requestId);
+      if (!pending) {
+        this.clearApprovalReminder(requestId);
+        return;
+      }
+
+      const count = this.reminderCounts.get(requestId) || 0;
+      if (count >= TOOL_APPROVAL_MAX_REMINDERS) {
+        this.clearApprovalReminder(requestId);
+        this.pendingApprovals.delete(requestId);
+
+        try {
+          await this.codex.respondToApproval(requestId, 'decline');
+        } catch (error) {
+          console.error('[approval] Failed to auto-decline expired approval:', error);
+        }
+
+        try {
+          await this.slack.chat.update({
+            channel: pending.channelId,
+            ts: pending.messageTs,
+            text: `⏰ Expired: ${label} (no response after 7 days)`,
+            blocks: [],
+          });
+        } catch (error) {
+          console.error('[approval] Failed to update expired approval message:', error);
+        }
+        return;
+      }
+
+      const elapsedMs = Date.now() - startTime;
+      const remainingMs = TOOL_APPROVAL_EXPIRY_MS - elapsedMs;
+      const expiresIn = this.formatTimeRemaining(remainingMs);
+
+      try {
+        await this.slack.chat.postMessage({
+          channel: pending.channelId,
+          thread_ts: pending.threadTs,
+          text: `⏰ *Reminder:* Still waiting for approval of ${label}\nExpires in ${expiresIn}`,
+        });
+      } catch (error) {
+        console.error('[approval] Error posting reminder:', error);
+      }
+
+      this.reminderCounts.set(requestId, count + 1);
+    }, TOOL_APPROVAL_REMINDER_INTERVAL_MS);
+
+    this.reminderIntervals.set(requestId, interval);
   }
 
   /**
@@ -132,6 +232,8 @@ export class ApprovalHandler {
       createdAt: Date.now(),
     });
 
+    this.startApprovalReminder(requestId, this.getApprovalLabel(request));
+
     // Send DM notification if userId is provided
     if (userId) {
       const conversationKey = makeConversationKey(channelId, threadTs);
@@ -182,6 +284,7 @@ export class ApprovalHandler {
 
     // Remove from pending
     this.pendingApprovals.delete(requestId);
+    this.clearApprovalReminder(requestId);
     return true;
   }
 
