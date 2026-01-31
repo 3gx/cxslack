@@ -163,6 +163,7 @@ export interface CodexClientEvents {
     cacheCreationInputTokens?: number;
     costUsd?: number;
     totalTokens?: number;
+    source?: 'token_count' | 'thread_token_usage';
   }) => void;
 
   // Thinking/reasoning events
@@ -1049,6 +1050,7 @@ export class CodexClient extends EventEmitter {
         const totalTokens = msgUsage?.total_tokens ?? threadUsage?.totalTokens;
         const cacheReadInputTokens = msgUsage?.cached_input_tokens ?? threadUsage?.cachedInputTokens;
         const contextWindow = msgInfo?.model_context_window ?? p.tokenUsage?.modelContextWindow;
+        const source = method === 'codex/event/token_count' ? 'token_count' : 'thread_token_usage';
 
         this.emit('tokens:updated', {
           inputTokens: inputTokens ?? 0,
@@ -1056,6 +1058,7 @@ export class CodexClient extends EventEmitter {
           totalTokens: totalTokens ?? undefined,
           contextWindow: contextWindow ?? undefined,
           cacheReadInputTokens,
+          source,
         });
         break;
       }

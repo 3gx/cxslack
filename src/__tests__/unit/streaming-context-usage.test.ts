@@ -63,12 +63,12 @@ describe('StreamingManager context usage (activity line)', () => {
       status: 'completed',
       inputTokens: 150_000,
       outputTokens: 20_000,
-      cacheReadInputTokens: 0,
+      cacheReadInputTokens: 15_000,
       cacheCreationInputTokens: 2_000,
       baseInputTokens: 100_000,
       baseOutputTokens: 10_000,
       baseCacheCreationInputTokens: 1_000,
-      baseCacheReadInputTokens: 0,
+      baseCacheReadInputTokens: 5_000,
       baseTotalTokens: undefined,
       contextWindow: 258_000,
       maxOutputTokens: undefined,
@@ -93,8 +93,8 @@ describe('StreamingManager context usage (activity line)', () => {
     const call = buildActivityBlocks.mock.calls.at(-1)?.[0];
     expect(call).toBeDefined();
 
-    expect(call.contextTokens).toBe(61_000);
-    expect(call.contextPercent).toBeCloseTo(23.6, 1);
+    expect(call.contextTokens).toBe(71_000);
+    expect(call.contextPercent).toBeCloseTo(27.5, 1);
   });
 
   it('uses totalTokens deltas when input/output are missing', async () => {

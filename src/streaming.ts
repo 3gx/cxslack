@@ -245,6 +245,8 @@ interface StreamingState {
   baseCacheReadInputTokens?: number;
   baseCacheCreationInputTokens?: number;
   baseTotalTokens?: number;
+  /** Token source for this turn (prevents mixing) */
+  tokenSource?: 'token_count' | 'thread_token_usage';
   /** Context window size (if provided) */
   contextWindow?: number;
   /** Max output tokens (if provided) */
@@ -405,6 +407,7 @@ export class StreamingManager {
       cacheCreationInputTokens: 0,
       baseCacheReadInputTokens: undefined,
       baseTotalTokens: undefined,
+      tokenSource: undefined,
       contextWindow: undefined,
       maxOutputTokens: undefined,
       costUsd: undefined,
@@ -1670,9 +1673,17 @@ export class StreamingManager {
     });
 
     // Token usage updates
-    this.codex.on('tokens:updated', ({ inputTokens, outputTokens, totalTokens, contextWindow, maxOutputTokens, cacheReadInputTokens, cacheCreationInputTokens, costUsd }) => {
+    this.codex.on('tokens:updated', ({ inputTokens, outputTokens, totalTokens, contextWindow, maxOutputTokens, cacheReadInputTokens, cacheCreationInputTokens, costUsd, source }) => {
       for (const [, state] of this.states) {
         if (state.isStreaming) {
+          if (source) {
+            if (state.tokenSource === undefined) {
+              state.tokenSource = source;
+            } else if (state.tokenSource !== source) {
+              // Ignore token updates from a different source to avoid mixing semantics.
+              continue;
+            }
+          }
           // VERIFIED: Codex sends CUMULATIVE TOTALS, not deltas (test-token-accumulation.ts)
           // Capture baseline on first token update so we can compute deltas per turn
           const hasIoTokens = inputTokens > 0 || outputTokens > 0;
@@ -1791,6 +1802,10 @@ export class StreamingManager {
         state.baseCacheCreationInputTokens !== undefined
           ? Math.max(0, state.cacheCreationInputTokens - state.baseCacheCreationInputTokens)
           : undefined;
+      const adjCacheReadTokens =
+        state.baseCacheReadInputTokens !== undefined
+          ? Math.max(0, state.cacheReadInputTokens - state.baseCacheReadInputTokens)
+          : undefined;
       const adjTotalTokens =
         state.baseTotalTokens !== undefined && state.totalTokens !== undefined
           ? Math.max(0, state.totalTokens - state.baseTotalTokens)
@@ -1799,7 +1814,10 @@ export class StreamingManager {
       // Prefer total token deltas when available (covers cases where input/output aren't sent)
       // Otherwise, use per-turn input/output (+ cache creation) deltas.
       const contextTokens = adjTotalTokens ?? (
-        (adjInputTokens ?? 0) + (adjOutputTokens ?? 0) + (adjCacheCreationTokens ?? 0)
+        (adjInputTokens ?? 0)
+        + (adjOutputTokens ?? 0)
+        + (adjCacheCreationTokens ?? 0)
+        + (adjCacheReadTokens ?? 0)
       );
       const contextWindow = state.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
       const contextPercent =
