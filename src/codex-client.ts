@@ -13,6 +13,7 @@
 
 import { spawn, ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
+import * as fs from 'fs';
 import {
   createRequest,
   serializeMessage,
@@ -51,6 +52,16 @@ export interface ThreadInfo {
   id: string;
   workingDirectory: string;
   createdAt: string;
+  path?: string;  // Session file path (for reading token usage)
+}
+
+// Token usage data from Codex session file
+export interface SessionTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens?: number;
+  totalTokens: number;
+  contextWindow: number;
 }
 
 // Account information
@@ -155,6 +166,7 @@ export interface CodexClientEvents {
   'item:completed': (params: { itemId: string }) => void;
   'approval:requested': (request: ApprovalRequestWithId) => void;
   'tokens:updated': (params: {
+    threadId?: string;  // Thread ID to match token update to correct streaming state
     inputTokens: number;
     outputTokens: number;
     contextWindow?: number;
@@ -523,6 +535,82 @@ export class CodexClient extends EventEmitter {
   async getThreadTurnCount(threadId: string): Promise<number> {
     const { turns } = await this.readThread(threadId, true);
     return turns?.length ?? 0;
+  }
+
+  /**
+   * Read token usage from Codex session file (source of truth).
+   * This is the authoritative source for token usage that correctly tracks
+   * usage across multiple clients (bot, CLI, etc.).
+   *
+   * @param threadId - The thread to get token usage for
+   * @returns Token usage data or null if not available
+   */
+  async getThreadTokenUsage(threadId: string): Promise<SessionTokenUsage | null> {
+    try {
+      // Get session file path from thread/read
+      const { thread } = await this.readThread(threadId);
+      if (!thread.path) {
+        console.log('[codex] No session path in thread/read response');
+        return null;
+      }
+
+      // Read and parse session file
+      return this.parseSessionFileTokens(thread.path);
+    } catch (err) {
+      console.error('[codex] Failed to get thread token usage:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Parse token usage from a Codex session file.
+   * Reads the file and finds the last token_count entry.
+   *
+   * @param sessionPath - Path to the session .jsonl file
+   * @returns Token usage data or null if not found
+   */
+  parseSessionFileTokens(sessionPath: string): SessionTokenUsage | null {
+    try {
+      if (!fs.existsSync(sessionPath)) {
+        console.log(`[codex] Session file not found: ${sessionPath}`);
+        return null;
+      }
+
+      const content = fs.readFileSync(sessionPath, 'utf-8');
+      const lines = content.trim().split('\n');
+
+      // Read backwards to find the last token_count entry
+      // CRITICAL: Use last_token_usage (per-thread), NOT total_token_usage (global across all threads)
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const entry = JSON.parse(lines[i]);
+          // Check for event_msg with token_count payload
+          if (entry.type === 'event_msg' && entry.payload?.type === 'token_count') {
+            // last_token_usage = per-thread cumulative (what CLI uses)
+            // total_token_usage = global across all threads in app-server (WRONG for per-thread display)
+            const usage = entry.payload.info?.last_token_usage;
+            const contextWindow = entry.payload.info?.model_context_window;
+            if (usage) {
+              return {
+                inputTokens: usage.input_tokens ?? 0,
+                outputTokens: usage.output_tokens ?? 0,
+                cachedInputTokens: usage.cached_input_tokens,
+                totalTokens: usage.total_tokens ?? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
+                contextWindow: contextWindow ?? 258400,  // Default to Codex default
+              };
+            }
+          }
+        } catch {
+          // Skip malformed JSON lines
+        }
+      }
+
+      console.log(`[codex] No token_count entry found in session file: ${sessionPath}`);
+      return null;
+    } catch (err) {
+      console.error(`[codex] Failed to parse session file ${sessionPath}:`, err);
+      return null;
+    }
   }
 
   /**
@@ -1028,6 +1116,9 @@ export class CodexClient extends EventEmitter {
       case 'thread/tokenUsage/updated':
       case 'codex/event/token_count': {
         const p = params as {
+          // Thread identification (for matching to correct streaming state)
+          threadId?: string;        // thread/tokenUsage/updated uses threadId
+          conversationId?: string;  // codex/event/token_count uses conversationId
           // codex/event/token_count: wrapped in msg
           msg?: {
             info?: {
@@ -1042,6 +1133,9 @@ export class CodexClient extends EventEmitter {
             modelContextWindow?: number;
           };
         };
+
+        // Extract threadId from either source
+        const threadId = p.threadId ?? p.conversationId;
 
         // Extract from codex/event/token_count (msg.info, snake_case)
         const msgInfo = p.msg?.info;
@@ -1065,6 +1159,7 @@ export class CodexClient extends EventEmitter {
         const lastCacheReadInputTokens = msgLastUsage?.cached_input_tokens;
 
         this.emit('tokens:updated', {
+          threadId,
           inputTokens: inputTokens ?? 0,
           outputTokens: outputTokens ?? 0,
           totalTokens: totalTokens ?? undefined,

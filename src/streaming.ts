@@ -1683,78 +1683,85 @@ export class StreamingManager {
       }
     });
 
-    // Token usage updates
-    this.codex.on('tokens:updated', ({ inputTokens, outputTokens, totalTokens, contextWindow, maxOutputTokens, cacheReadInputTokens, cacheCreationInputTokens, lastInputTokens, lastOutputTokens, lastTotalTokens, lastCacheReadInputTokens, lastCacheCreationInputTokens, costUsd, source }) => {
-      for (const [, state] of this.states) {
-        if (state.isStreaming) {
-          if (source) {
-            if (state.tokenSource === undefined) {
-              state.tokenSource = source;
-            } else if (state.tokenSource !== source) {
-              // Ignore token updates from a different source to avoid mixing semantics.
-              continue;
-            }
-          }
-          // VERIFIED: Codex sends CUMULATIVE TOTALS, not deltas (test-token-accumulation.ts)
-          // Capture baseline on first token update so we can compute deltas per turn
-          const hasIoTokens = inputTokens > 0 || outputTokens > 0;
-          if (hasIoTokens) {
-            if (state.baseInputTokens === undefined && inputTokens > 0) {
-              state.baseInputTokens = inputTokens;
-            }
-            if (state.baseOutputTokens === undefined && outputTokens > 0) {
-              state.baseOutputTokens = outputTokens;
-            }
-            state.inputTokens = inputTokens;
-            state.outputTokens = outputTokens;
-          }
-          if (lastInputTokens !== undefined) {
-            state.lastInputTokens = lastInputTokens;
-          }
-          if (lastOutputTokens !== undefined) {
-            state.lastOutputTokens = lastOutputTokens;
-          }
-          if (lastTotalTokens !== undefined) {
-            state.lastTotalTokens = lastTotalTokens;
-          }
-          if (lastCacheReadInputTokens !== undefined) {
-            state.lastCacheReadInputTokens = lastCacheReadInputTokens;
-          }
-          if (lastCacheCreationInputTokens !== undefined) {
-            state.lastCacheCreationInputTokens = lastCacheCreationInputTokens;
-          }
-          if (state.baseCacheCreationInputTokens === undefined && cacheCreationInputTokens !== undefined) {
-            state.baseCacheCreationInputTokens = cacheCreationInputTokens;
-          }
-          if (state.baseCacheReadInputTokens === undefined && cacheReadInputTokens !== undefined) {
-            state.baseCacheReadInputTokens = cacheReadInputTokens;
-          }
-          if (state.baseTotalTokens === undefined && totalTokens !== undefined && totalTokens > 0) {
-            state.baseTotalTokens = totalTokens;
-          }
+    // Token usage updates - now includes threadId to match to correct streaming state
+    this.codex.on('tokens:updated', ({ threadId, inputTokens, outputTokens, totalTokens, contextWindow, maxOutputTokens, cacheReadInputTokens, cacheCreationInputTokens, lastInputTokens, lastOutputTokens, lastTotalTokens, lastCacheReadInputTokens, lastCacheCreationInputTokens, costUsd, source }) => {
+      for (const [key, state] of this.states) {
+        if (!state.isStreaming) continue;
 
-          if (totalTokens !== undefined && totalTokens > 0) {
-            state.totalTokens = totalTokens;
-          } else if (hasIoTokens) {
-            state.totalTokens = inputTokens + outputTokens;
-          }
-          if (cacheReadInputTokens !== undefined) {
-            state.cacheReadInputTokens = cacheReadInputTokens;
-          }
-          if (cacheCreationInputTokens !== undefined) {
-            state.cacheCreationInputTokens = cacheCreationInputTokens;
-          }
-          if (contextWindow) {
-            state.contextWindow = contextWindow;
-          }
-          if (maxOutputTokens) {
-            state.maxOutputTokens = maxOutputTokens;
-          }
-          if (costUsd !== undefined) {
-            state.costUsd = costUsd;
-          }
-          break;
+        // Match token event to correct state by threadId
+        const context = this.contexts.get(key);
+        if (threadId && context?.threadId && context.threadId !== threadId) {
+          // Token event is for a different thread - skip this state
+          continue;
         }
+
+        if (source) {
+          if (state.tokenSource === undefined) {
+            state.tokenSource = source;
+          } else if (state.tokenSource !== source) {
+            // Ignore token updates from a different source to avoid mixing semantics.
+            continue;
+          }
+        }
+        // VERIFIED: Codex sends CUMULATIVE TOTALS, not deltas (test-token-accumulation.ts)
+        // Capture baseline on first token update so we can compute deltas per turn
+        const hasIoTokens = inputTokens > 0 || outputTokens > 0;
+        if (hasIoTokens) {
+          if (state.baseInputTokens === undefined && inputTokens > 0) {
+            state.baseInputTokens = inputTokens;
+          }
+          if (state.baseOutputTokens === undefined && outputTokens > 0) {
+            state.baseOutputTokens = outputTokens;
+          }
+          state.inputTokens = inputTokens;
+          state.outputTokens = outputTokens;
+        }
+        if (lastInputTokens !== undefined) {
+          state.lastInputTokens = lastInputTokens;
+        }
+        if (lastOutputTokens !== undefined) {
+          state.lastOutputTokens = lastOutputTokens;
+        }
+        if (lastTotalTokens !== undefined) {
+          state.lastTotalTokens = lastTotalTokens;
+        }
+        if (lastCacheReadInputTokens !== undefined) {
+          state.lastCacheReadInputTokens = lastCacheReadInputTokens;
+        }
+        if (lastCacheCreationInputTokens !== undefined) {
+          state.lastCacheCreationInputTokens = lastCacheCreationInputTokens;
+        }
+        if (state.baseCacheCreationInputTokens === undefined && cacheCreationInputTokens !== undefined) {
+          state.baseCacheCreationInputTokens = cacheCreationInputTokens;
+        }
+        if (state.baseCacheReadInputTokens === undefined && cacheReadInputTokens !== undefined) {
+          state.baseCacheReadInputTokens = cacheReadInputTokens;
+        }
+        if (state.baseTotalTokens === undefined && totalTokens !== undefined && totalTokens > 0) {
+          state.baseTotalTokens = totalTokens;
+        }
+
+        if (totalTokens !== undefined && totalTokens > 0) {
+          state.totalTokens = totalTokens;
+        } else if (hasIoTokens) {
+          state.totalTokens = inputTokens + outputTokens;
+        }
+        if (cacheReadInputTokens !== undefined) {
+          state.cacheReadInputTokens = cacheReadInputTokens;
+        }
+        if (cacheCreationInputTokens !== undefined) {
+          state.cacheCreationInputTokens = cacheCreationInputTokens;
+        }
+        if (contextWindow) {
+          state.contextWindow = contextWindow;
+        }
+        if (maxOutputTokens) {
+          state.maxOutputTokens = maxOutputTokens;
+        }
+        if (costUsd !== undefined) {
+          state.costUsd = costUsd;
+        }
+        break;
       }
     });
   }
@@ -1813,21 +1820,31 @@ export class StreamingManager {
       state.spinnerIndex = (state.spinnerIndex + 1) % STATUS_SPINNER_FRAMES.length;
       const spinner = STATUS_SPINNER_FRAMES[state.spinnerIndex];
 
-      // Compute context usage from cumulative totals (matches Codex CLI).
-      // total_tokens = input_tokens + output_tokens
-      // cached_input_tokens is a SUBSET of input_tokens (never additive).
+      // Compute context usage from PER-THREAD values (matches Codex CLI).
+      // CRITICAL: Use last* values (per-thread) NOT total* values (global across all threads)
+      // - state.lastTotalTokens / state.lastInputTokens = per-thread cumulative (correct)
+      // - state.totalTokens / state.inputTokens = global across app-server (wrong for display)
       const adjInputTokens =
-        state.baseInputTokens !== undefined
-          ? Math.max(0, state.inputTokens - state.baseInputTokens)
-          : undefined;
+        state.lastInputTokens !== undefined
+          ? state.lastInputTokens
+          : (state.baseInputTokens !== undefined
+              ? Math.max(0, state.inputTokens - state.baseInputTokens)
+              : undefined);
       const adjOutputTokens =
-        state.baseOutputTokens !== undefined
-          ? Math.max(0, state.outputTokens - state.baseOutputTokens)
-          : undefined;
+        state.lastOutputTokens !== undefined
+          ? state.lastOutputTokens
+          : (state.baseOutputTokens !== undefined
+              ? Math.max(0, state.outputTokens - state.baseOutputTokens)
+              : undefined);
+      // Prefer per-thread last values over global total values
       const totalContextTokens =
-        state.totalTokens !== undefined
-          ? state.totalTokens
-          : (state.inputTokens + state.outputTokens);
+        state.lastTotalTokens !== undefined
+          ? state.lastTotalTokens
+          : (state.lastInputTokens !== undefined && state.lastOutputTokens !== undefined
+              ? state.lastInputTokens + state.lastOutputTokens
+              : (state.totalTokens !== undefined
+                  ? state.totalTokens
+                  : (state.inputTokens + state.outputTokens)));
       const contextTokens = totalContextTokens > 0 ? totalContextTokens : undefined;
       const contextTokensValue = contextTokens ?? 0;
       const hasContextTokens = contextTokensValue > 0;

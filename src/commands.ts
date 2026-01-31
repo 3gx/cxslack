@@ -406,11 +406,22 @@ export async function handleStatusCommand(
   // Get effective threadId (may come from channel session via fallback)
   const effectiveThreadId = session?.threadId || getSession(channelId)?.threadId;
 
-  // Get lastUsage from thread session or channel session
-  const lastUsage = session?.lastUsage || getSession(channelId)?.lastUsage;
+  // Get token usage from Codex session file (source of truth)
+  // This correctly tracks usage across multiple clients (bot, CLI, etc.)
+  let tokenUsage: { inputTokens: number; outputTokens: number; totalTokens: number; contextWindow: number } | null = null;
+  if (effectiveThreadId) {
+    try {
+      tokenUsage = await codex.getThreadTokenUsage(effectiveThreadId);
+    } catch (err) {
+      console.error('[status] Failed to get token usage from Codex:', err);
+    }
+  }
+
+  // Fallback to bot's session storage only if Codex session file unavailable
+  const lastUsage = tokenUsage ? null : (session?.lastUsage || getSession(channelId)?.lastUsage);
 
   // Format model like CLI: "gpt-5.2-codex (reasoning xhigh)"
-  const modelName = lastUsage?.model || session?.model || DEFAULT_MODEL;
+  const modelName = session?.model || DEFAULT_MODEL;
   const reasoning = session?.reasoningEffort || DEFAULT_REASONING;
   const messageSize = session?.threadCharLimit ?? MESSAGE_SIZE_DEFAULT;
   const messageSizeSuffix = session?.threadCharLimit === undefined ? ' (default)' : '';
@@ -428,9 +439,18 @@ export async function handleStatusCommand(
     `*Session:* \`${effectiveThreadId || 'none'}\``,
   ];
 
-  // Show context window info if available
-  if (lastUsage) {
-    // Align with Codex CLI: total tokens (input + output)
+  // Show context window info - prefer Codex session file (source of truth)
+  if (tokenUsage) {
+    // Use token usage from Codex session file
+    const totalTokens = tokenUsage.totalTokens;
+    const contextWindow = tokenUsage.contextWindow;
+    const contextPercent = contextWindow > 0
+      ? Math.min(100, Math.max(0, Math.round((totalTokens / contextWindow) * 100)))
+      : 0;
+    const percentLeft = 100 - contextPercent;
+    lines.push(`*Context window:* ${percentLeft}% left (${(totalTokens / 1000).toFixed(1)}K used / ${(contextWindow / 1000).toFixed(0)}K)`);
+  } else if (lastUsage) {
+    // Fallback to bot's session storage
     const totalTokens = lastUsage.totalTokens
       ?? (lastUsage.inputTokens + lastUsage.outputTokens);
     const contextPercent = lastUsage.contextWindow > 0
