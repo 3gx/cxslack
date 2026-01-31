@@ -1,13 +1,14 @@
 # Slack Bot Setup Guide
 
-This guide walks you through creating and configuring a Slack app for the Claude Code Slack Bot from scratch.
+This guide walks you through creating and configuring a Slack app for the Codex Slack Bot from scratch.
 
 ## Prerequisites
 
 - A Slack workspace where you have admin permissions (or permission to install apps)
 - Node.js 18+ installed
-- The Claude Code Slack Bot code cloned to your machine
+- The Codex Slack Bot code cloned to your machine
 - Native dependencies installed (see [Install Native Dependencies](#install-native-dependencies))
+- Codex CLI installed and authenticated (`codex auth login`)
 
 ## Table of Contents
 
@@ -93,7 +94,7 @@ If no output, all dependencies are installed.
 2. Click **Create New App**
 3. Select **From scratch**
 4. Enter your app details:
-   - **App Name:** `Claude Code Bot` (or your preferred name)
+   - **App Name:** `Codex Bot` (or your preferred name)
    - **Pick a workspace:** Select your Slack workspace
 5. Click **Create App**
 
@@ -309,12 +310,12 @@ The bot needs to be invited to channels before it can see messages there.
 ### Option A: Invite via Slack UI
 
 1. Open the channel where you want to use the bot
-2. Type `/invite @Claude Code Bot` (or your bot's name)
+2. Type `/invite @Codex Bot` (or your bot's name)
 3. Press Enter
 
 ### Option B: Mention to Auto-Join
 
-1. In any public channel, type `@Claude Code Bot hello`
+1. In any public channel, type `@Codex Bot hello`
 2. The bot will be invited automatically (if `chat:write.public` scope is enabled)
 
 ---
@@ -324,7 +325,7 @@ The bot needs to be invited to channels before it can see messages there.
 Test that everything is working:
 
 1. Go to a channel where the bot is present
-2. Type: `@Claude Code Bot /status`
+2. Type: `@Codex Bot /status`
 3. You should see a response with session information
 
 If you see an error or no response, check:
@@ -402,12 +403,12 @@ For quick setup, you can use an app manifest. Create a new app and paste this ma
 
 ```yaml
 display_information:
-  name: Claude Code Bot
-  description: Claude Code assistant for Slack
+  name: Codex Bot
+  description: OpenAI Codex assistant for Slack
   background_color: "#4a154b"
 features:
   bot_user:
-    display_name: Claude Code Bot
+    display_name: Codex Bot
     always_online: true
 oauth_config:
   scopes:
@@ -457,6 +458,5 @@ To use the manifest:
 
 ## Next Steps
 
-- Read [CLAUDE.md](./CLAUDE.md) for development guide
 - Read [ARCHITECTURE.md](./ARCHITECTURE.md) for technical details
 - Read [README.md](./README.md) for usage instructions

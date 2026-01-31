@@ -35,10 +35,15 @@ make verify-tools
 
 ## Configuration
 
-Copy `.env.example` to `.env` and configure:
+See [SETUP.md](SETUP.md) for complete Slack app setup instructions.
+
+Quick start:
+
+1. Copy `.env.example` to `.env`
+2. Configure your Slack tokens (see [SETUP.md](SETUP.md) for how to obtain them):
 
 ```bash
-# Required - Get from https://api.slack.com/apps
+# Required
 SLACK_BOT_TOKEN=xoxb-your-bot-token
 SLACK_APP_TOKEN=xapp-your-app-token
 SLACK_SIGNING_SECRET=your-signing-secret
@@ -47,24 +52,6 @@ SLACK_SIGNING_SECRET=your-signing-secret
 DEFAULT_WORKING_DIR=/path/to/your/project
 UPDATE_RATE_MS=500
 ```
-
-### Slack App Setup
-
-1. Create a Slack App at https://api.slack.com/apps
-2. Enable Socket Mode
-3. Add Bot Token Scopes:
-   - `app_mentions:read`
-   - `chat:write`
-   - `channels:history`
-   - `files:read`
-   - `files:write`
-   - `reactions:read`
-   - `reactions:write`
-   - `users:read`
-4. Subscribe to Bot Events:
-   - `app_mention`
-   - `message.channels`
-5. Install to workspace and copy tokens to `.env`
 
 ## Usage
 
