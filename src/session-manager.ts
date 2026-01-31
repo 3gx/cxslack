@@ -42,6 +42,7 @@ export interface LastUsage {
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens?: number;
+  totalTokens?: number;
   contextWindow: number;
   model: string;
   maxOutputTokens?: number;

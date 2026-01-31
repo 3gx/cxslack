@@ -235,6 +235,16 @@ interface StreamingState {
   outputTokens: number;
   /** Cumulative total tokens (if provided) */
   totalTokens?: number;
+  /** Last-turn input tokens (if provided by server) */
+  lastInputTokens?: number;
+  /** Last-turn output tokens (if provided by server) */
+  lastOutputTokens?: number;
+  /** Last-turn total tokens (if provided by server) */
+  lastTotalTokens?: number;
+  /** Last-turn cache read input tokens (if provided) */
+  lastCacheReadInputTokens?: number;
+  /** Last-turn cache creation input tokens (if provided) */
+  lastCacheCreationInputTokens?: number;
   /** Cache read input tokens (if provided) */
   cacheReadInputTokens: number;
   /** Cache creation input tokens (if provided) */
@@ -403,6 +413,11 @@ export class StreamingManager {
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: undefined,
+      lastInputTokens: undefined,
+      lastOutputTokens: undefined,
+      lastTotalTokens: undefined,
+      lastCacheReadInputTokens: undefined,
+      lastCacheCreationInputTokens: undefined,
       cacheReadInputTokens: 0,
       cacheCreationInputTokens: 0,
       baseCacheReadInputTokens: undefined,
@@ -819,16 +834,12 @@ export class StreamingManager {
           // Save lastUsage to BOTH channel and thread sessions for /status command
           // (Channel session is needed when /status is called from main channel @bot mentions)
           if (status === 'completed') {
-            // Compute per-turn deltas to avoid cumulative totals from resumed sessions
-            const adjInput = Math.max(0, state.inputTokens - (state.baseInputTokens ?? 0));
-            const adjOutput = Math.max(0, state.outputTokens - (state.baseOutputTokens ?? 0));
-            const adjCacheRead = Math.max(0, state.cacheReadInputTokens - (state.baseCacheReadInputTokens ?? 0));
-            const adjCacheCreation = Math.max(0, state.cacheCreationInputTokens - (state.baseCacheCreationInputTokens ?? 0));
             const lastUsage: LastUsage = {
-              inputTokens: adjInput,
-              outputTokens: adjOutput,
-              cacheReadInputTokens: adjCacheRead,
-              cacheCreationInputTokens: adjCacheCreation || undefined,
+              inputTokens: state.inputTokens,
+              outputTokens: state.outputTokens,
+              cacheReadInputTokens: state.cacheReadInputTokens,
+              cacheCreationInputTokens: state.cacheCreationInputTokens || undefined,
+              totalTokens: state.totalTokens ?? (state.inputTokens + state.outputTokens),
               contextWindow: state.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
               model: found.context.model || 'unknown',
               maxOutputTokens: state.maxOutputTokens,
@@ -1673,7 +1684,7 @@ export class StreamingManager {
     });
 
     // Token usage updates
-    this.codex.on('tokens:updated', ({ inputTokens, outputTokens, totalTokens, contextWindow, maxOutputTokens, cacheReadInputTokens, cacheCreationInputTokens, costUsd, source }) => {
+    this.codex.on('tokens:updated', ({ inputTokens, outputTokens, totalTokens, contextWindow, maxOutputTokens, cacheReadInputTokens, cacheCreationInputTokens, lastInputTokens, lastOutputTokens, lastTotalTokens, lastCacheReadInputTokens, lastCacheCreationInputTokens, costUsd, source }) => {
       for (const [, state] of this.states) {
         if (state.isStreaming) {
           if (source) {
@@ -1696,6 +1707,21 @@ export class StreamingManager {
             }
             state.inputTokens = inputTokens;
             state.outputTokens = outputTokens;
+          }
+          if (lastInputTokens !== undefined) {
+            state.lastInputTokens = lastInputTokens;
+          }
+          if (lastOutputTokens !== undefined) {
+            state.lastOutputTokens = lastOutputTokens;
+          }
+          if (lastTotalTokens !== undefined) {
+            state.lastTotalTokens = lastTotalTokens;
+          }
+          if (lastCacheReadInputTokens !== undefined) {
+            state.lastCacheReadInputTokens = lastCacheReadInputTokens;
+          }
+          if (lastCacheCreationInputTokens !== undefined) {
+            state.lastCacheCreationInputTokens = lastCacheCreationInputTokens;
           }
           if (state.baseCacheCreationInputTokens === undefined && cacheCreationInputTokens !== undefined) {
             state.baseCacheCreationInputTokens = cacheCreationInputTokens;
@@ -1787,9 +1813,9 @@ export class StreamingManager {
       state.spinnerIndex = (state.spinnerIndex + 1) % STATUS_SPINNER_FRAMES.length;
       const spinner = STATUS_SPINNER_FRAMES[state.spinnerIndex];
 
-      // Compute context usage - VERIFIED from Codex API:
+      // Compute context usage from cumulative totals (matches Codex CLI).
       // total_tokens = input_tokens + output_tokens
-      // (cached_input_tokens is a SUBSET of input_tokens, not additional)
+      // cached_input_tokens is a SUBSET of input_tokens (never additive).
       const adjInputTokens =
         state.baseInputTokens !== undefined
           ? Math.max(0, state.inputTokens - state.baseInputTokens)
@@ -1798,31 +1824,17 @@ export class StreamingManager {
         state.baseOutputTokens !== undefined
           ? Math.max(0, state.outputTokens - state.baseOutputTokens)
           : undefined;
-      const adjCacheCreationTokens =
-        state.baseCacheCreationInputTokens !== undefined
-          ? Math.max(0, state.cacheCreationInputTokens - state.baseCacheCreationInputTokens)
-          : undefined;
-      const adjCacheReadTokens =
-        state.baseCacheReadInputTokens !== undefined
-          ? Math.max(0, state.cacheReadInputTokens - state.baseCacheReadInputTokens)
-          : undefined;
-      const adjTotalTokens =
-        state.baseTotalTokens !== undefined && state.totalTokens !== undefined
-          ? Math.max(0, state.totalTokens - state.baseTotalTokens)
-          : undefined;
-
-      // Prefer total token deltas when available (covers cases where input/output aren't sent)
-      // Otherwise, use per-turn input/output (+ cache creation) deltas.
-      const contextTokens = adjTotalTokens ?? (
-        (adjInputTokens ?? 0)
-        + (adjOutputTokens ?? 0)
-        + (adjCacheCreationTokens ?? 0)
-        + (adjCacheReadTokens ?? 0)
-      );
+      const totalContextTokens =
+        state.totalTokens !== undefined
+          ? state.totalTokens
+          : (state.inputTokens + state.outputTokens);
+      const contextTokens = totalContextTokens > 0 ? totalContextTokens : undefined;
+      const contextTokensValue = contextTokens ?? 0;
+      const hasContextTokens = contextTokensValue > 0;
       const contextWindow = state.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
       const contextPercent =
-        contextTokens > 0
-          ? Math.min(100, Math.max(0, Number(((contextTokens / contextWindow) * 100).toFixed(1))))
+        hasContextTokens
+          ? Math.min(100, Math.max(0, Number(((contextTokensValue / contextWindow) * 100).toFixed(1))))
           : undefined;
       const autoCompactThreshold = computeAutoCompactThreshold(
         contextWindow,
@@ -1830,19 +1842,21 @@ export class StreamingManager {
       );
       const compactBase = autoCompactThreshold > 0 ? autoCompactThreshold : undefined;
       const compactPercent =
-        compactBase && contextTokens > 0
+        compactBase && hasContextTokens
           ? Math.max(
               0,
-              Number(((compactBase - contextTokens) / compactBase * 100).toFixed(1))
+              Number(((compactBase - contextTokensValue) / compactBase * 100).toFixed(1))
             )
           : undefined;
       const tokensToCompact =
-        compactBase && contextTokens > 0 ? Math.max(0, compactBase - contextTokens) : undefined;
+        compactBase && hasContextTokens ? Math.max(0, compactBase - contextTokensValue) : undefined;
 
       const includeFinalStats = state.status !== 'running';
-      const hasTokenCounts = (adjInputTokens ?? 0) > 0 || (adjOutputTokens ?? 0) > 0;
-      const inputTokensForStats = includeFinalStats && hasTokenCounts ? adjInputTokens : undefined;
-      const outputTokensForStats = includeFinalStats && hasTokenCounts ? adjOutputTokens : undefined;
+      const displayInputTokens = state.lastInputTokens ?? adjInputTokens;
+      const displayOutputTokens = state.lastOutputTokens ?? adjOutputTokens;
+      const hasTokenCounts = (displayInputTokens ?? 0) > 0 || (displayOutputTokens ?? 0) > 0;
+      const inputTokensForStats = includeFinalStats && hasTokenCounts ? displayInputTokens : undefined;
+      const outputTokensForStats = includeFinalStats && hasTokenCounts ? displayOutputTokens : undefined;
 
       const threadTs = context.threadTs || context.originalTs;
 
@@ -1858,7 +1872,7 @@ export class StreamingManager {
         sandboxMode: context.sandboxMode,
         sessionId: context.threadId,
         contextPercent,
-        contextTokens: contextTokens > 0 ? contextTokens : undefined,
+        contextTokens: hasContextTokens ? contextTokensValue : undefined,
         contextWindow,
         // COMMENTED OUT: compactPercent and tokensToCompact use assumed values
         // that Codex does NOT provide. See blocks.ts for details.

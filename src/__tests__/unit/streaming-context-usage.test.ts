@@ -1,5 +1,5 @@
 /**
- * Regression test: activity status line should use per-turn deltas,
+ * Regression test: activity status line should use cumulative totals,
  * matching Codex CLI context usage.
  */
 
@@ -23,7 +23,7 @@ vi.mock('../../blocks.js', async () => {
 });
 
 describe('StreamingManager context usage (activity line)', () => {
-  it('uses per-turn deltas for context usage', async () => {
+  it('uses cumulative totals for context usage', async () => {
     const { StreamingManager } = await import('../../streaming.js');
 
     const slack = {
@@ -93,11 +93,11 @@ describe('StreamingManager context usage (activity line)', () => {
     const call = buildActivityBlocks.mock.calls.at(-1)?.[0];
     expect(call).toBeDefined();
 
-    expect(call.contextTokens).toBe(71_000);
-    expect(call.contextPercent).toBeCloseTo(27.5, 1);
+    expect(call.contextTokens).toBe(170_000);
+    expect(call.contextPercent).toBeCloseTo(65.9, 1);
   });
 
-  it('uses totalTokens deltas when input/output are missing', async () => {
+  it('uses totalTokens when input/output are missing', async () => {
     const { StreamingManager } = await import('../../streaming.js');
 
     const slack = {
@@ -174,8 +174,8 @@ describe('StreamingManager context usage (activity line)', () => {
     const call = buildActivityBlocks.mock.calls.at(-1)?.[0];
     expect(call).toBeDefined();
 
-    expect(call.contextTokens).toBe(10_000);
-    expect(call.contextPercent).toBeCloseTo(3.9, 1);
+    expect(call.contextTokens).toBe(150_000);
+    expect(call.contextPercent).toBeCloseTo(58.1, 1);
 
     buildActivityBlocks.mockClear();
 
@@ -190,7 +190,7 @@ describe('StreamingManager context usage (activity line)', () => {
 
     const followup = buildActivityBlocks.mock.calls.at(-1)?.[0];
     expect(followup).toBeDefined();
-    expect(followup.contextTokens).toBe(20_000);
-    expect(followup.contextPercent).toBeCloseTo(7.8, 1);
+    expect(followup.contextTokens).toBe(160_000);
+    expect(followup.contextPercent).toBeCloseTo(62.0, 1);
   });
 });

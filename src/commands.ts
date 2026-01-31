@@ -430,11 +430,9 @@ export async function handleStatusCommand(
 
   // Show context window info if available
   if (lastUsage) {
-    // Align with Codex CLI: input + output + cache creation + cache read
-    const totalTokens = lastUsage.inputTokens
-      + lastUsage.outputTokens
-      + (lastUsage.cacheCreationInputTokens ?? 0)
-      + (lastUsage.cacheReadInputTokens ?? 0);
+    // Align with Codex CLI: total tokens (input + output)
+    const totalTokens = lastUsage.totalTokens
+      ?? (lastUsage.inputTokens + lastUsage.outputTokens);
     const contextPercent = lastUsage.contextWindow > 0
       ? Math.min(100, Math.max(0, Math.round((totalTokens / lastUsage.contextWindow) * 100)))
       : 0;

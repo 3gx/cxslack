@@ -163,6 +163,11 @@ export interface CodexClientEvents {
     cacheCreationInputTokens?: number;
     costUsd?: number;
     totalTokens?: number;
+    lastInputTokens?: number;
+    lastOutputTokens?: number;
+    lastTotalTokens?: number;
+    lastCacheReadInputTokens?: number;
+    lastCacheCreationInputTokens?: number;
     source?: 'token_count' | 'thread_token_usage';
   }) => void;
 
@@ -1013,7 +1018,8 @@ export class CodexClient extends EventEmitter {
       // Token usage events - VERIFIED via test-token-event.ts capturing actual server responses:
       //
       // codex/event/token_count structure:
-      //   params.msg.info.total_token_usage.{input_tokens, cached_input_tokens, output_tokens}
+      //   params.msg.info.total_token_usage.{input_tokens, cached_input_tokens, output_tokens, total_tokens}
+      //   params.msg.info.last_token_usage.{input_tokens, cached_input_tokens, output_tokens, total_tokens}
       //   params.msg.info.model_context_window
       //
       // thread/tokenUsage/updated structure:
@@ -1026,6 +1032,7 @@ export class CodexClient extends EventEmitter {
           msg?: {
             info?: {
               total_token_usage?: { input_tokens?: number; output_tokens?: number; cached_input_tokens?: number; total_tokens?: number };
+              last_token_usage?: { input_tokens?: number; output_tokens?: number; cached_input_tokens?: number; total_tokens?: number };
               model_context_window?: number | null;
             };
           };
@@ -1039,6 +1046,7 @@ export class CodexClient extends EventEmitter {
         // Extract from codex/event/token_count (msg.info, snake_case)
         const msgInfo = p.msg?.info;
         const msgUsage = msgInfo?.total_token_usage;
+        const msgLastUsage = msgInfo?.last_token_usage;
 
         // Extract from thread/tokenUsage/updated (tokenUsage, camelCase)
         const threadUsage = p.tokenUsage?.total;
@@ -1051,6 +1059,10 @@ export class CodexClient extends EventEmitter {
         const cacheReadInputTokens = msgUsage?.cached_input_tokens ?? threadUsage?.cachedInputTokens;
         const contextWindow = msgInfo?.model_context_window ?? p.tokenUsage?.modelContextWindow;
         const source = method === 'codex/event/token_count' ? 'token_count' : 'thread_token_usage';
+        const lastInputTokens = msgLastUsage?.input_tokens;
+        const lastOutputTokens = msgLastUsage?.output_tokens;
+        const lastTotalTokens = msgLastUsage?.total_tokens;
+        const lastCacheReadInputTokens = msgLastUsage?.cached_input_tokens;
 
         this.emit('tokens:updated', {
           inputTokens: inputTokens ?? 0,
@@ -1058,6 +1070,10 @@ export class CodexClient extends EventEmitter {
           totalTokens: totalTokens ?? undefined,
           contextWindow: contextWindow ?? undefined,
           cacheReadInputTokens,
+          lastInputTokens,
+          lastOutputTokens,
+          lastTotalTokens,
+          lastCacheReadInputTokens,
           source,
         });
         break;
