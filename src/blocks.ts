@@ -1133,6 +1133,35 @@ export function buildErrorBlocks(message: string): Block[] {
   ];
 }
 
+/**
+ * Build blocks for path setup prompt (shown when pathConfigured is false).
+ */
+export function buildPathSetupBlocks(): Block[] {
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: ':warning: *Working directory not configured*',
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: 'Before I can help, you need to set the working directory for this channel.\n\nThis is a *one-time setup* and cannot be changed later.',
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '*Steps:*\n1. `/ls` - explore current directory\n2. `/cd /path/to/project` - navigate to desired directory\n3. `/set-current-path` - lock the directory',
+      },
+    },
+  ];
+}
+
 // ============================================================================
 // Progress Indicators
 // ============================================================================

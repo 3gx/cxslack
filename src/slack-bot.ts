@@ -49,6 +49,7 @@ import {
   buildSandboxStatusBlocks,
   buildActivityEntryBlocks,
   formatThreadActivityEntry,
+  buildPathSetupBlocks,
   Block,
 } from './blocks.js';
 import { withSlackRetry } from './slack-retry.js';
@@ -1176,6 +1177,33 @@ async function handleUserMessage(
       streamingManager.updateRate(conversationKey, newRate * 1000);
     }
     return;
+  }
+
+  // GUARD: Path must be configured before processing messages
+  // Check channel session (authoritative source for path config)
+  const channelSession = getSession(channelId);
+  if (!channelSession?.pathConfigured) {
+    await app.client.chat.postMessage({
+      channel: channelId,
+      thread_ts: postingThreadTs,
+      blocks: buildPathSetupBlocks(),
+      text: 'Please set working directory first using /ls, /cd, and /set-current-path',
+    });
+
+    // Remove eyes reaction
+    if (messageTs) {
+      try {
+        await app.client.reactions.remove({
+          channel: channelId,
+          timestamp: messageTs,
+          name: 'eyes',
+        });
+      } catch {
+        // Ignore - reaction may not exist
+      }
+    }
+
+    return; // Don't process the message
   }
 
   // Disallow concurrent turns (ccslack-style single-flight)

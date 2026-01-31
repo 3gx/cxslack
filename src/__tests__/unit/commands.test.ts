@@ -217,4 +217,8 @@ describe('Command Handlers', () => {
       expect(result.sandboxModeChange).toBe('danger-full-access');
     });
   });
+
+  // Note: /ls, /cd, /set-current-path commands are tested in
+  // src/__tests__/integration/path-navigation-flow.test.ts
+  // which provides comprehensive coverage with proper fs mocking.
 });

@@ -44,6 +44,7 @@ import {
   ModelInfo,
 } from './blocks.js';
 import fs from 'fs';
+import path from 'path';
 
 /**
  * Default model and reasoning when not explicitly set.
@@ -699,6 +700,265 @@ export async function handleMessageSizeCommand(
 }
 
 /**
+ * Handle /ls command - List files in directory.
+ * Accepts relative or absolute paths. Always available (before and after path lock).
+ */
+export async function handleLsCommand(
+  context: CommandContext
+): Promise<CommandResult> {
+  const { channelId, threadTs, text: args } = context;
+
+  // Read from channel session (authoritative source for workingDir and pathConfigured)
+  const channelSession = getSession(channelId);
+  const currentWorkingDir = channelSession?.workingDir || process.cwd();
+  const pathConfigured = channelSession?.pathConfigured ?? false;
+  const configuredPath = channelSession?.configuredPath;
+
+  // Determine which directory to list
+  let targetDir: string;
+  const pathArg = args.trim();
+
+  if (!pathArg) {
+    targetDir = currentWorkingDir;
+  } else if (pathArg.startsWith('/')) {
+    // Absolute path
+    targetDir = pathArg;
+  } else {
+    // Relative path
+    targetDir = path.resolve(currentWorkingDir, pathArg);
+  }
+
+  // Validate path exists
+  if (!fs.existsSync(targetDir)) {
+    return {
+      blocks: buildErrorBlocks(`Directory does not exist: \`${targetDir}\``),
+      text: `Directory does not exist: ${targetDir}`,
+    };
+  }
+
+  // Check if it's a directory
+  try {
+    const stats = fs.statSync(targetDir);
+    if (!stats.isDirectory()) {
+      return {
+        blocks: buildErrorBlocks(`Not a directory: \`${targetDir}\``),
+        text: `Not a directory: ${targetDir}`,
+      };
+    }
+  } catch (error) {
+    return {
+      blocks: buildErrorBlocks(`Cannot access: \`${targetDir}\`\n\n${error instanceof Error ? error.message : String(error)}`),
+      text: `Cannot access: ${targetDir}`,
+    };
+  }
+
+  try {
+    const files = fs.readdirSync(targetDir);
+    const totalFiles = files.length;
+
+    // Format file list with directory indicators
+    const fileList = files.map(f => {
+      try {
+        const filePath = path.join(targetDir, f);
+        const stat = fs.statSync(filePath);
+        return stat.isDirectory() ? `${f}/` : f;
+      } catch {
+        return f;
+      }
+    }).join('\n');
+
+    // Generate hint based on whether path is locked
+    let hint: string;
+    if (pathConfigured) {
+      hint = `:lock: Current locked directory: \`${configuredPath}\``;
+    } else {
+      hint = `To navigate: \`/cd <path>\`\nTo lock directory: \`/set-current-path\``;
+    }
+
+    const lines = [
+      `:file_folder: Files in \`${targetDir}\` (${totalFiles} total):`,
+      '```',
+      fileList || '(empty)',
+      '```',
+      '',
+      hint,
+    ];
+
+    return {
+      blocks: buildTextBlocks(lines.join('\n')),
+      text: `Files in ${targetDir} (${totalFiles} total)`,
+    };
+  } catch (error) {
+    return {
+      blocks: buildErrorBlocks(`Cannot read directory: ${error instanceof Error ? error.message : String(error)}`),
+      text: `Cannot read directory: ${targetDir}`,
+    };
+  }
+}
+
+/**
+ * Handle /cd command - Change working directory (only before path locked).
+ * Accepts relative or absolute paths.
+ */
+export async function handleCdCommand(
+  context: CommandContext
+): Promise<CommandResult> {
+  const { channelId, threadTs, text: args } = context;
+
+  // Read from channel session (authoritative source for workingDir and pathConfigured)
+  const channelSession = getSession(channelId);
+  const currentWorkingDir = channelSession?.workingDir || process.cwd();
+  const pathConfigured = channelSession?.pathConfigured ?? false;
+  const configuredPath = channelSession?.configuredPath;
+
+  // Check if path already configured
+  if (pathConfigured) {
+    return {
+      blocks: buildErrorBlocks(
+        `/cd is disabled after path locked.\n\nWorking directory is locked to: \`${configuredPath}\`\n\nUse \`/ls [path]\` to explore other directories.`
+      ),
+      text: '/cd is disabled after path locked',
+    };
+  }
+
+  // If no path provided, show current directory
+  const pathArg = args.trim();
+  if (!pathArg) {
+    return {
+      blocks: buildTextBlocks(
+        `:file_folder: Current directory: \`${currentWorkingDir}\`\n\n` +
+        `Usage: \`/cd <path>\` (relative or absolute)\n\n` +
+        `To lock this directory: \`/set-current-path\``
+      ),
+      text: `Current directory: ${currentWorkingDir}`,
+    };
+  }
+
+  // Resolve path (handle both relative and absolute)
+  let targetPath: string;
+  if (pathArg.startsWith('/')) {
+    // Absolute path
+    targetPath = pathArg;
+  } else {
+    // Relative path
+    targetPath = path.resolve(currentWorkingDir, pathArg);
+  }
+
+  // Validate: path exists
+  if (!fs.existsSync(targetPath)) {
+    return {
+      blocks: buildErrorBlocks(`Directory does not exist: \`${targetPath}\``),
+      text: `Directory does not exist: ${targetPath}`,
+    };
+  }
+
+  // Check if it's a directory (not a file)
+  const stats = fs.statSync(targetPath);
+  if (!stats.isDirectory()) {
+    return {
+      blocks: buildErrorBlocks(`Not a directory: \`${targetPath}\``),
+      text: `Not a directory: ${targetPath}`,
+    };
+  }
+
+  // Check read/execute permissions
+  try {
+    fs.accessSync(targetPath, fs.constants.R_OK | fs.constants.X_OK);
+  } catch {
+    return {
+      blocks: buildErrorBlocks(`Cannot access directory: \`${targetPath}\`\n\nPermission denied or directory not readable.`),
+      text: `Cannot access directory: ${targetPath}`,
+    };
+  }
+
+  // Normalize path (resolve symlinks)
+  const normalizedPath = fs.realpathSync(targetPath);
+
+  // ALWAYS save to channel session (workingDir is channel-level before lock)
+  await saveSession(channelId, { workingDir: normalizedPath });
+
+  // Also update thread session if in a thread
+  if (threadTs) {
+    await saveThreadSession(channelId, threadTs, { workingDir: normalizedPath });
+  }
+
+  return {
+    blocks: buildTextBlocks(
+      `:file_folder: Changed to \`${normalizedPath}\`\n\n` +
+      `Use \`/ls\` to see files, or \`/set-current-path\` to lock this directory.`
+    ),
+    text: `Changed to ${normalizedPath}`,
+  };
+}
+
+/**
+ * Handle /set-current-path command - Lock current working directory (one-time only).
+ */
+export async function handleSetCurrentPathCommand(
+  context: CommandContext
+): Promise<CommandResult> {
+  const { channelId, threadTs, userId } = context;
+
+  // Read from channel session (authoritative source for workingDir and pathConfigured)
+  const channelSession = getSession(channelId);
+  const currentWorkingDir = channelSession?.workingDir || process.cwd();
+  const pathConfigured = channelSession?.pathConfigured ?? false;
+  const configuredPath = channelSession?.configuredPath;
+
+  // Check if path already configured
+  if (pathConfigured) {
+    return {
+      blocks: buildErrorBlocks(
+        `Working directory already locked: \`${configuredPath}\`\n\n` +
+        `This cannot be changed. If you need a different directory, use a different channel.`
+      ),
+      text: `Working directory already locked: ${configuredPath}`,
+    };
+  }
+
+  // Normalize path (resolve symlinks, remove trailing slash)
+  let normalizedPath: string;
+  try {
+    normalizedPath = fs.realpathSync(currentWorkingDir);
+  } catch (error) {
+    return {
+      blocks: buildErrorBlocks(`Cannot resolve path: \`${currentWorkingDir}\`\n\n${error instanceof Error ? error.message : String(error)}`),
+      text: `Cannot resolve path: ${currentWorkingDir}`,
+    };
+  }
+
+  const now = Date.now();
+
+  // ALWAYS save to channel session (path config is channel-level)
+  await saveSession(channelId, {
+    pathConfigured: true,
+    configuredPath: normalizedPath,
+    workingDir: normalizedPath,
+    configuredBy: userId,
+    configuredAt: now,
+  });
+
+  // Also update thread session if in a thread
+  if (threadTs) {
+    await saveThreadSession(channelId, threadTs, {
+      pathConfigured: true,
+      configuredPath: normalizedPath,
+      workingDir: normalizedPath,
+      configuredBy: userId,
+      configuredAt: now,
+    });
+  }
+
+  return {
+    blocks: buildTextBlocks(
+      `:white_check_mark: Working directory locked to \`${normalizedPath}\`\n\n` +
+      `:warning: This cannot be changed. \`/cd\` is now disabled. All Codex operations will use this directory.`
+    ),
+    text: `Working directory locked to ${normalizedPath}`,
+  };
+}
+
+/**
  * Handle /help command.
  */
 export function handleHelpCommand(): CommandResult {
@@ -709,13 +969,18 @@ export function handleHelpCommand(): CommandResult {
 \`/clear\` - Clear session and start fresh
 \`/status\` - Show session status
 
+*Directory Navigation (fresh session):*
+\`/ls [path]\` - List files (always available)
+\`/cd [path]\` - Navigate to directory (disabled after lock)
+\`/set-current-path\` - Lock current directory (permanent)
+\`/cwd [path]\` - View/set and lock working directory
+
 *Configuration:*
 \`/policy [policy]\` - View/set approval policy
   _Policies: never (default), on-request, on-failure, untrusted_
 \`/model [model]\` - View/set model
 \`/reasoning [level]\` - View/set reasoning effort
   _Levels: minimal, low, medium, high, xhigh_
-\`/cwd [path]\` - View/set working directory
 \`/update-rate [1-10]\` - Set message update rate in seconds
 \`/message-size [n]\` - Set message size limit before truncation (100-36000, default=500)
 \`/sandbox [mode]\` - Set sandbox mode (read-only, workspace-write, danger-full-access)
@@ -723,6 +988,11 @@ export function handleHelpCommand(): CommandResult {
 
 *Help:*
 \`/help\` - Show this help message
+
+*Fresh Session Workflow:*
+1. \`/ls\` - Explore current directory
+2. \`/cd <path>\` - Navigate to target directory
+3. \`/set-current-path\` - Lock directory permanently
 
 *Approval Policies:*
 • \`never\` - Auto-approve all actions (default)
@@ -763,6 +1033,12 @@ export async function handleCommand(
       return handleReasoningCommand(contextWithArgs);
     case 'status':
       return handleStatusCommand(contextWithArgs, codex);
+    case 'ls':
+      return handleLsCommand(contextWithArgs);
+    case 'cd':
+      return handleCdCommand(contextWithArgs);
+    case 'set-current-path':
+      return handleSetCurrentPathCommand(contextWithArgs);
     case 'cwd':
     case 'path':
       return handleCwdCommand(contextWithArgs);
