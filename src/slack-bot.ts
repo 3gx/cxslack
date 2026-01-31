@@ -1048,6 +1048,19 @@ async function handleUserMessage(
     return;
   }
 
+  // Disallow concurrent turns (ccslack-style single-flight)
+  if (streamingManager.isAnyStreaming()) {
+    await app.client.chat.postMessage({
+      channel: channelId,
+      thread_ts: postingThreadTs,
+      blocks: buildErrorBlocks(
+        'Another request is already running. Please wait for it to finish or click Abort on the active status panel.'
+      ),
+      text: 'Another request is already running. Please wait or abort.',
+    });
+    return;
+  }
+
   // Regular message - send to Codex
   // Use postingThreadTs for all session lookups since that's our thread key
   const workingDir = getEffectiveWorkingDir(channelId, postingThreadTs);
