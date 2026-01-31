@@ -7,7 +7,7 @@
 
 import { App, LogLevel } from '@slack/bolt';
 import { Mutex } from 'async-mutex';
-import { CodexClient, ApprovalRequest, TurnContent, ReasoningEffort, ApprovalPolicy, SandboxMode } from './codex-client.js';
+import { CodexClient, ApprovalRequestWithId, TurnContent, ReasoningEffort, ApprovalPolicy, SandboxMode } from './codex-client.js';
 import { StreamingManager, makeConversationKey, StreamingContext } from './streaming.js';
 import { ApprovalHandler } from './approval-handler.js';
 import {
@@ -195,7 +195,7 @@ export async function startBot(): Promise<void> {
   approvalHandler = new ApprovalHandler(app.client, codex);
 
   // Set up approval callback
-  streamingManager.onApprovalRequest(async (request: ApprovalRequest, context: StreamingContext) => {
+  streamingManager.onApprovalRequest(async (request: ApprovalRequestWithId, context: StreamingContext) => {
     await approvalHandler.handleApprovalRequest(
       request,
       context.channelId,

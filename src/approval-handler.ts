@@ -11,7 +11,7 @@
 import type { WebClient } from '@slack/web-api';
 import type {
   CodexClient,
-  ApprovalRequest,
+  ApprovalRequestWithId,
   CommandApprovalRequest,
   FileChangeApprovalRequest,
 } from './codex-client.js';
@@ -36,10 +36,10 @@ export const TOOL_APPROVAL_MAX_REMINDERS = Math.floor(
  * Pending approval request.
  */
 interface PendingApproval {
-  /** JSON-RPC request ID for responding */
+  /** JSON-RPC request ID for responding (server-provided if present) */
   requestId: number;
   /** Original approval request */
-  request: ApprovalRequest;
+  request: ApprovalRequestWithId;
   /** Slack channel ID */
   channelId: string;
   /** Slack thread timestamp */
@@ -91,7 +91,7 @@ export class ApprovalHandler {
     return parts.join(' ');
   }
 
-  private getApprovalLabel(request: ApprovalRequest): string {
+  private getApprovalLabel(request: ApprovalRequestWithId): string {
     if (request.method === 'item/commandExecution/requestApproval') {
       const cmdRequest = request as CommandApprovalRequest;
       return `\`${cmdRequest.params.parsedCmd}\``;
@@ -171,12 +171,12 @@ export class ApprovalHandler {
    * Posts approval buttons to Slack and tracks the pending request.
    */
   async handleApprovalRequest(
-    request: ApprovalRequest,
+    request: ApprovalRequestWithId,
     channelId: string,
     threadTs?: string,
     userId?: string
   ): Promise<void> {
-    const requestId = this.generateRequestId();
+    const requestId = request.rpcId ?? this.generateRequestId();
 
     // Build blocks based on request type
     let blocks: Block[];
@@ -291,7 +291,7 @@ export class ApprovalHandler {
   /**
    * Get command string from approval request (for display).
    */
-  private getCommandFromRequest(request: ApprovalRequest): string | undefined {
+  private getCommandFromRequest(request: ApprovalRequestWithId): string | undefined {
     if (request.method === 'item/commandExecution/requestApproval') {
       return (request as CommandApprovalRequest).params.parsedCmd;
     }

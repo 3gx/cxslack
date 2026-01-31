@@ -236,6 +236,63 @@ describe('CodexClient item:started Event Tool Name Extraction', () => {
   });
 });
 
+describe('CodexClient approval request handling', () => {
+  it('emits approval:requested with rpcId for JSON-RPC requests', () => {
+    const client = new CodexClient({ requestTimeout: 10 });
+    const handler = vi.fn();
+    client.on('approval:requested', handler);
+
+    const requestMessage = {
+      jsonrpc: '2.0',
+      id: 99,
+      method: 'item/commandExecution/requestApproval',
+      params: {
+        itemId: 'item-1',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        parsedCmd: 'ls',
+        risk: 'low',
+        sandboxed: true,
+      },
+    };
+
+    (client as any).handleLine(JSON.stringify(requestMessage));
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith({
+      method: 'item/commandExecution/requestApproval',
+      params: requestMessage.params,
+      rpcId: 99,
+    });
+  });
+
+  it('emits approval:requested without rpcId for notifications', () => {
+    const client = new CodexClient({ requestTimeout: 10 });
+    const handler = vi.fn();
+    client.on('approval:requested', handler);
+
+    const notification: JsonRpcNotification = {
+      method: 'item/commandExecution/requestApproval',
+      params: {
+        itemId: 'item-2',
+        threadId: 'thread-2',
+        turnId: 'turn-2',
+        parsedCmd: 'pwd',
+        risk: 'low',
+        sandboxed: true,
+      },
+    };
+
+    (client as any).handleNotification(notification);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith({
+      method: 'item/commandExecution/requestApproval',
+      params: notification.params,
+    });
+  });
+});
+
 describe('context:turnId Event', () => {
   it('emits when threadId and turnId present', () => {
     const params = { threadId: 't1', turnId: 'turn1' };

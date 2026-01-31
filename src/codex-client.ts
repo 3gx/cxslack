@@ -19,6 +19,7 @@ import {
   parseMessage,
   isResponse,
   isNotification,
+  isRequest,
   createPendingRequestTracker,
   JsonRpcNotification,
   JsonRpcRequest,
@@ -110,6 +111,9 @@ export interface FileChangeApprovalRequest {
 
 export type ApprovalRequest = CommandApprovalRequest | FileChangeApprovalRequest;
 
+// Approval requests may arrive as JSON-RPC requests (with an id) or notifications (no id).
+export type ApprovalRequestWithId = ApprovalRequest & { rpcId?: number };
+
 // Client configuration
 export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 
@@ -149,7 +153,7 @@ export interface CodexClientEvents {
   }) => void;
   'item:delta': (params: { itemId: string; delta: string }) => void;
   'item:completed': (params: { itemId: string }) => void;
-  'approval:requested': (request: ApprovalRequest) => void;
+  'approval:requested': (request: ApprovalRequestWithId) => void;
   'tokens:updated': (params: {
     inputTokens: number;
     outputTokens: number;
@@ -731,6 +735,32 @@ export class CodexClient extends EventEmitter {
       }
     } else if (isNotification(message)) {
       this.handleNotification(message);
+    } else if (isRequest(message)) {
+      this.handleRequest(message);
+    }
+  }
+
+  private emitApprovalRequest(method: string, params: Record<string, unknown>, rpcId?: number): void {
+    const approvalRequest = {
+      method,
+      params: params as ApprovalRequest['params'],
+      ...(rpcId !== undefined ? { rpcId } : {}),
+    } as ApprovalRequestWithId;
+
+    this.emit('approval:requested', approvalRequest);
+  }
+
+  private handleRequest(request: JsonRpcRequest): void {
+    const params = request.params || {};
+
+    switch (request.method) {
+      case 'item/commandExecution/requestApproval':
+      case 'item/fileChange/requestApproval':
+        this.emitApprovalRequest(request.method, params, request.id);
+        break;
+      default:
+        console.warn('Received unhandled JSON-RPC request:', request.method);
+        break;
     }
   }
 
@@ -975,10 +1005,7 @@ export class CodexClient extends EventEmitter {
       // Approval requests
       case 'item/commandExecution/requestApproval':
       case 'item/fileChange/requestApproval':
-        this.emit('approval:requested', {
-          method: notification.method,
-          params: params as ApprovalRequest['params'],
-        } as ApprovalRequest);
+        this.emitApprovalRequest(notification.method, params as Record<string, unknown>);
         break;
 
       // Token usage events - VERIFIED via test-token-event.ts capturing actual server responses:

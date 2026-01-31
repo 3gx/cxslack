@@ -112,4 +112,33 @@ describe('ApprovalHandler reminders', () => {
     // No reminder should be posted after decision
     expect(slack.chat.postMessage).toHaveBeenCalledTimes(1);
   });
+
+  it('uses server rpcId when provided', async () => {
+    const request: CommandApprovalRequest & { rpcId: number } = {
+      method: 'item/commandExecution/requestApproval',
+      rpcId: 42,
+      params: {
+        itemId: 'item-1',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        parsedCmd: 'echo hello',
+        risk: 'low',
+        sandboxed: true,
+      },
+    };
+
+    await handler.handleApprovalRequest(request, 'C123', '456.789');
+
+    const postCall = slack.chat.postMessage.mock.calls[0]?.[0];
+    const blocks = postCall?.blocks as Array<{ block_id?: string; elements?: Array<{ action_id?: string }> }> | undefined;
+    const blockId = blocks?.find((block) => block.block_id)?.block_id;
+    const actionIds = blocks?.flatMap((block) => block.elements ?? []).map((el) => el.action_id);
+
+    expect(blockId).toBe('approval_42');
+    expect(actionIds).toContain('approve_42');
+    expect(actionIds).toContain('deny_42');
+
+    await handler.handleApprovalDecision(42, 'accept');
+    expect(codex.respondToApproval).toHaveBeenCalledWith(42, 'accept');
+  });
 });

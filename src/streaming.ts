@@ -20,7 +20,7 @@ import { Mutex } from 'async-mutex';
 import type {
   CodexClient,
   TurnStatus,
-  ApprovalRequest,
+  ApprovalRequestWithId,
   ApprovalPolicy,
   ReasoningEffort,
   SandboxMode,
@@ -337,7 +337,7 @@ export class StreamingManager {
   private turnIdToKey = new Map<string, string>();
   private slack: WebClient;
   private codex: CodexClient;
-  private approvalCallback?: (request: ApprovalRequest, context: StreamingContext) => void;
+  private approvalCallback?: (request: ApprovalRequestWithId, context: StreamingContext) => void;
   private activityManager = new ActivityThreadManager();
 
   constructor(slack: WebClient, codex: CodexClient) {
@@ -349,7 +349,7 @@ export class StreamingManager {
   /**
    * Set callback for approval requests.
    */
-  onApprovalRequest(callback: (request: ApprovalRequest, context: StreamingContext) => void): void {
+  onApprovalRequest(callback: (request: ApprovalRequestWithId, context: StreamingContext) => void): void {
     this.approvalCallback = callback;
   }
 
