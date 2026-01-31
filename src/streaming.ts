@@ -242,7 +242,9 @@ interface StreamingState {
   /** Baseline cumulative tokens at turn start (to compute deltas) */
   baseInputTokens?: number;
   baseOutputTokens?: number;
+  baseCacheReadInputTokens?: number;
   baseCacheCreationInputTokens?: number;
+  baseTotalTokens?: number;
   /** Context window size (if provided) */
   contextWindow?: number;
   /** Max output tokens (if provided) */
@@ -401,6 +403,8 @@ export class StreamingManager {
       totalTokens: undefined,
       cacheReadInputTokens: 0,
       cacheCreationInputTokens: 0,
+      baseCacheReadInputTokens: undefined,
+      baseTotalTokens: undefined,
       contextWindow: undefined,
       maxOutputTokens: undefined,
       costUsd: undefined,
@@ -815,11 +819,12 @@ export class StreamingManager {
             // Compute per-turn deltas to avoid cumulative totals from resumed sessions
             const adjInput = Math.max(0, state.inputTokens - (state.baseInputTokens ?? 0));
             const adjOutput = Math.max(0, state.outputTokens - (state.baseOutputTokens ?? 0));
+            const adjCacheRead = Math.max(0, state.cacheReadInputTokens - (state.baseCacheReadInputTokens ?? 0));
             const adjCacheCreation = Math.max(0, state.cacheCreationInputTokens - (state.baseCacheCreationInputTokens ?? 0));
             const lastUsage: LastUsage = {
               inputTokens: adjInput,
               outputTokens: adjOutput,
-              cacheReadInputTokens: state.cacheReadInputTokens,
+              cacheReadInputTokens: adjCacheRead,
               cacheCreationInputTokens: adjCacheCreation || undefined,
               contextWindow: state.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
               model: found.context.model || 'unknown',
@@ -1684,6 +1689,12 @@ export class StreamingManager {
           if (state.baseCacheCreationInputTokens === undefined && cacheCreationInputTokens !== undefined) {
             state.baseCacheCreationInputTokens = cacheCreationInputTokens;
           }
+          if (state.baseCacheReadInputTokens === undefined && cacheReadInputTokens !== undefined) {
+            state.baseCacheReadInputTokens = cacheReadInputTokens;
+          }
+          if (state.baseTotalTokens === undefined && totalTokens !== undefined && totalTokens > 0) {
+            state.baseTotalTokens = totalTokens;
+          }
 
           if (totalTokens !== undefined && totalTokens > 0) {
             state.totalTokens = totalTokens;
@@ -1768,7 +1779,28 @@ export class StreamingManager {
       // Compute context usage - VERIFIED from Codex API:
       // total_tokens = input_tokens + output_tokens
       // (cached_input_tokens is a SUBSET of input_tokens, not additional)
-      const contextTokens = state.totalTokens ?? (state.inputTokens + state.outputTokens);
+      const adjInputTokens =
+        state.baseInputTokens !== undefined
+          ? Math.max(0, state.inputTokens - state.baseInputTokens)
+          : undefined;
+      const adjOutputTokens =
+        state.baseOutputTokens !== undefined
+          ? Math.max(0, state.outputTokens - state.baseOutputTokens)
+          : undefined;
+      const adjCacheCreationTokens =
+        state.baseCacheCreationInputTokens !== undefined
+          ? Math.max(0, state.cacheCreationInputTokens - state.baseCacheCreationInputTokens)
+          : undefined;
+      const adjTotalTokens =
+        state.baseTotalTokens !== undefined && state.totalTokens !== undefined
+          ? Math.max(0, state.totalTokens - state.baseTotalTokens)
+          : undefined;
+
+      // Prefer total token deltas when available (covers cases where input/output aren't sent)
+      // Otherwise, use per-turn input/output (+ cache creation) deltas.
+      const contextTokens = adjTotalTokens ?? (
+        (adjInputTokens ?? 0) + (adjOutputTokens ?? 0) + (adjCacheCreationTokens ?? 0)
+      );
       const contextWindow = state.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
       const contextPercent =
         contextTokens > 0
@@ -1790,9 +1822,9 @@ export class StreamingManager {
         compactBase && contextTokens > 0 ? Math.max(0, compactBase - contextTokens) : undefined;
 
       const includeFinalStats = state.status !== 'running';
-      const hasTokenCounts = state.inputTokens > 0 || state.outputTokens > 0;
-      const inputTokensForStats = includeFinalStats && hasTokenCounts ? state.inputTokens : undefined;
-      const outputTokensForStats = includeFinalStats && hasTokenCounts ? state.outputTokens : undefined;
+      const hasTokenCounts = (adjInputTokens ?? 0) > 0 || (adjOutputTokens ?? 0) > 0;
+      const inputTokensForStats = includeFinalStats && hasTokenCounts ? adjInputTokens : undefined;
+      const outputTokensForStats = includeFinalStats && hasTokenCounts ? adjOutputTokens : undefined;
 
       const threadTs = context.threadTs || context.originalTs;
 

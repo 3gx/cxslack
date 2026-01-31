@@ -1,5 +1,5 @@
 /**
- * Regression test: activity status line should use cumulative totals,
+ * Regression test: activity status line should use per-turn deltas,
  * matching Codex CLI context usage.
  */
 
@@ -23,7 +23,7 @@ vi.mock('../../blocks.js', async () => {
 });
 
 describe('StreamingManager context usage (activity line)', () => {
-  it('uses cumulative totals for context usage', async () => {
+  it('uses per-turn deltas for context usage', async () => {
     const { StreamingManager } = await import('../../streaming.js');
 
     const slack = {
@@ -61,13 +61,15 @@ describe('StreamingManager context usage (activity line)', () => {
       lastUpdateTime: 0,
       updateTimer: null,
       status: 'completed',
-      inputTokens: 132_000,
-      outputTokens: 0,
+      inputTokens: 150_000,
+      outputTokens: 20_000,
       cacheReadInputTokens: 0,
-      cacheCreationInputTokens: 0,
-      baseInputTokens: undefined,
-      baseOutputTokens: undefined,
-      baseCacheCreationInputTokens: 0,
+      cacheCreationInputTokens: 2_000,
+      baseInputTokens: 100_000,
+      baseOutputTokens: 10_000,
+      baseCacheCreationInputTokens: 1_000,
+      baseCacheReadInputTokens: 0,
+      baseTotalTokens: undefined,
       contextWindow: 258_000,
       maxOutputTokens: undefined,
       costUsd: undefined,
@@ -91,11 +93,11 @@ describe('StreamingManager context usage (activity line)', () => {
     const call = buildActivityBlocks.mock.calls.at(-1)?.[0];
     expect(call).toBeDefined();
 
-    expect(call.contextTokens).toBe(132_000);
-    expect(call.contextPercent).toBeCloseTo(51.2, 1);
+    expect(call.contextTokens).toBe(61_000);
+    expect(call.contextPercent).toBeCloseTo(23.6, 1);
   });
 
-  it('uses totalTokens when input/output are missing', async () => {
+  it('uses totalTokens deltas when input/output are missing', async () => {
     const { StreamingManager } = await import('../../streaming.js');
 
     const slack = {
@@ -139,6 +141,8 @@ describe('StreamingManager context usage (activity line)', () => {
       baseInputTokens: undefined,
       baseOutputTokens: undefined,
       baseCacheCreationInputTokens: 0,
+      baseCacheReadInputTokens: 0,
+      baseTotalTokens: 140_000,
       contextWindow: 258_000,
       maxOutputTokens: undefined,
       costUsd: undefined,
@@ -170,8 +174,8 @@ describe('StreamingManager context usage (activity line)', () => {
     const call = buildActivityBlocks.mock.calls.at(-1)?.[0];
     expect(call).toBeDefined();
 
-    expect(call.contextTokens).toBe(150_000);
-    expect(call.contextPercent).toBeCloseTo(58.1, 1);
+    expect(call.contextTokens).toBe(10_000);
+    expect(call.contextPercent).toBeCloseTo(3.9, 1);
 
     buildActivityBlocks.mockClear();
 
@@ -186,7 +190,7 @@ describe('StreamingManager context usage (activity line)', () => {
 
     const followup = buildActivityBlocks.mock.calls.at(-1)?.[0];
     expect(followup).toBeDefined();
-    expect(followup.contextTokens).toBe(160_000);
-    expect(followup.contextPercent).toBeCloseTo(62.0, 1);
+    expect(followup.contextTokens).toBe(20_000);
+    expect(followup.contextPercent).toBeCloseTo(7.8, 1);
   });
 });
