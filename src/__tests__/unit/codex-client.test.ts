@@ -4,6 +4,9 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { CodexClient } from '../../codex-client.js';
 import type { JsonRpcNotification } from '../../json-rpc.js';
 
@@ -122,6 +125,88 @@ describe('CodexClient Delta Deduplication', () => {
     // Next word arrives
     expect(dedup.isDuplicate(' was')).toBe(false);
     expect(dedup.isDuplicate(' was')).toBe(true); // Deduplicated
+  });
+
+  it('drops repeated identical deltas even when they come from the same method (current behavior)', () => {
+    const client = new CodexClient({ requestTimeout: 10 });
+    const handler = vi.fn();
+    client.on('item:delta', handler);
+
+    const notification: JsonRpcNotification = {
+      method: 'item/agentMessage/delta',
+      params: { itemId: 'item-1', delta: '/' },
+    };
+
+    (client as any).handleNotification(notification);
+    (client as any).handleNotification(notification);
+
+    // Content-only dedupe suppresses the second identical delta, even though it's the same method
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith({ itemId: 'item-1', delta: '/' });
+  });
+});
+
+describe('CodexClient session file assistant message parsing', () => {
+  function writeTempSession(lines: string[]): { dir: string; file: string } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cxslack-session-'));
+    const file = path.join(dir, 'session.jsonl');
+    fs.writeFileSync(file, lines.join('\n'), 'utf8');
+    return { dir, file };
+  }
+
+  it('returns latest assistant response_item message when present', () => {
+    const { dir, file } = writeTempSession([
+      JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: 'old' } }),
+      JSON.stringify({
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          content: [
+            { type: 'output_text', text: 'final ' },
+            { type: 'output_text', text: 'text' },
+          ],
+        },
+      }),
+    ]);
+
+    try {
+      const client = new CodexClient({ requestTimeout: 10 });
+      const result = client.parseSessionFileLatestAssistantMessage(file);
+      expect(result?.text).toBe('final text');
+      expect(result?.source).toBe('response_item');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to agent_message when response_item is absent', () => {
+    const { dir, file } = writeTempSession([
+      JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: 'only' } }),
+    ]);
+
+    try {
+      const client = new CodexClient({ requestTimeout: 10 });
+      const result = client.parseSessionFileLatestAssistantMessage(file);
+      expect(result?.text).toBe('only');
+      expect(result?.source).toBe('agent_message');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null when no assistant messages are present', () => {
+    const { dir, file } = writeTempSession([
+      JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'hi' } }),
+    ]);
+
+    try {
+      const client = new CodexClient({ requestTimeout: 10 });
+      const result = client.parseSessionFileLatestAssistantMessage(file);
+      expect(result).toBeNull();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

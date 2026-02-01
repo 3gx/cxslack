@@ -805,6 +805,23 @@ export class StreamingManager {
             state.thinkingComplete = true;
           }
 
+          // Use authoritative response from session file when available
+          if (status === 'completed') {
+            try {
+              const authoritative = await this.codex.getThreadLatestAssistantMessage(threadId);
+              if (authoritative?.text) {
+                if (state.text !== authoritative.text) {
+                  console.log(
+                    `[streaming] Response differs from session file (${authoritative.source}); using authoritative text`
+                  );
+                }
+                state.text = authoritative.text;
+              }
+            } catch (err) {
+              console.error('[streaming] Failed to read authoritative response:', err);
+            }
+          }
+
           // Add response entry if we have response content
           if (state.text && status === 'completed') {
             this.activityManager.addEntry(found.key, {

@@ -64,6 +64,11 @@ export interface SessionTokenUsage {
   contextWindow: number;
 }
 
+export interface SessionAssistantMessage {
+  text: string;
+  source: 'response_item' | 'agent_message';
+}
+
 // Account information
 export interface AccountInfo {
   type: 'chatgpt' | 'apiKey';
@@ -609,6 +614,81 @@ export class CodexClient extends EventEmitter {
       return null;
     } catch (err) {
       console.error(`[codex] Failed to parse session file ${sessionPath}:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * Parse the latest assistant message from a Codex session file.
+   * Scans from the end and returns the first assistant message found.
+   *
+   * @param sessionPath - Path to the session .jsonl file
+   * @returns Latest assistant message or null if not found
+   */
+  parseSessionFileLatestAssistantMessage(sessionPath: string): SessionAssistantMessage | null {
+    try {
+      if (!fs.existsSync(sessionPath)) {
+        console.log(`[codex] Session file not found: ${sessionPath}`);
+        return null;
+      }
+
+      const content = fs.readFileSync(sessionPath, 'utf-8');
+      const lines = content.trim().split('\n');
+
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const entry = JSON.parse(lines[i]);
+
+          if (entry.type === 'response_item') {
+            const payload = entry.payload || {};
+            if (payload.type === 'message' && payload.role === 'assistant') {
+              const contentItems = Array.isArray(payload.content) ? payload.content : [];
+              const text = contentItems
+                .map((item: any) => (typeof item?.text === 'string' ? item.text : ''))
+                .filter((part: string) => part.length > 0)
+                .join('');
+
+              if (text) {
+                return { text, source: 'response_item' };
+              }
+            }
+          }
+
+          if (entry.type === 'event_msg' && entry.payload?.type === 'agent_message') {
+            const message = entry.payload?.message;
+            if (typeof message === 'string' && message.length > 0) {
+              return { text: message, source: 'agent_message' };
+            }
+          }
+        } catch {
+          // Skip malformed JSON lines
+        }
+      }
+
+      console.log(`[codex] No assistant message found in session file: ${sessionPath}`);
+      return null;
+    } catch (err) {
+      console.error(`[codex] Failed to parse session file ${sessionPath}:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * Read the latest assistant message for a thread from the Codex session file (source of truth).
+   *
+   * @param threadId - The thread to get the assistant message for
+   * @returns Latest assistant message or null if not available
+   */
+  async getThreadLatestAssistantMessage(threadId: string): Promise<SessionAssistantMessage | null> {
+    try {
+      const { thread } = await this.readThread(threadId);
+      if (!thread.path) {
+        console.log('[codex] No session path in thread/read response');
+        return null;
+      }
+      return this.parseSessionFileLatestAssistantMessage(thread.path);
+    } catch (err) {
+      console.error('[codex] Failed to get thread assistant message:', err);
       return null;
     }
   }
