@@ -163,12 +163,14 @@ export interface CodexClientEvents {
   'item:started': (params: {
     itemId: string;
     itemType: string;
+    threadId?: string;
+    turnId?: string;
     command?: string;
     commandActions?: Array<{ type: string; command: string }>;
     toolInput?: Record<string, unknown>;
   }) => void;
-  'item:delta': (params: { itemId: string; delta: string }) => void;
-  'item:completed': (params: { itemId: string }) => void;
+  'item:delta': (params: { itemId: string; delta: string; threadId?: string; turnId?: string }) => void;
+  'item:completed': (params: { itemId: string; threadId?: string; turnId?: string }) => void;
   'approval:requested': (request: ApprovalRequestWithId) => void;
   'tokens:updated': (params: {
     threadId?: string;  // Thread ID to match token update to correct streaming state
@@ -193,14 +195,14 @@ export interface CodexClientEvents {
   // not the actual content. The 'thinking:started' event signals reasoning began,
   // 'thinking:complete' signals it ended. Content will be empty or minimal summary.
   'thinking:started': (params: { itemId: string }) => void;
-  'thinking:delta': (params: { content: string }) => void;
+  'thinking:delta': (params: { content: string; threadId?: string; turnId?: string; itemId?: string }) => void;
   'thinking:complete': (params: { itemId: string; durationMs: number }) => void;
 
   // Command execution lifecycle (from exec_command notifications)
   'command:started': (params: { itemId: string; threadId: string; turnId: string }) => void;
-  'command:output': (params: { itemId: string; delta: string }) => void;
+  'command:output': (params: { itemId: string; delta: string; threadId?: string; turnId?: string }) => void;
   'command:completed': (params: { itemId: string; threadId: string; turnId: string; exitCode?: number }) => void;
-  'filechange:delta': (params: { itemId: string; delta: string }) => void;
+  'filechange:delta': (params: { itemId: string; delta: string; threadId?: string; turnId?: string }) => void;
 
   // Web search lifecycle (from web_search notifications)
   'websearch:started': (params: {
@@ -1088,8 +1090,8 @@ export class CodexClient extends EventEmitter {
         const toolInput = item.input as Record<string, unknown> | undefined;
 
         // Emit context:turnId for abort fix - item/started has turnId at top level
-        const threadId = (p.threadId || msg?.thread_id || '') as string;
-        const turnId = (p.turnId || msg?.turn_id || '') as string;
+        const threadId = (p.threadId || p.thread_id || p.conversationId || msg?.thread_id || msg?.threadId || '') as string;
+        const turnId = (p.turnId || p.turn_id || msg?.turn_id || msg?.turnId || '') as string;
         if (threadId && turnId) {
           this.emit('context:turnId', { threadId, turnId });
         }
@@ -1097,6 +1099,8 @@ export class CodexClient extends EventEmitter {
         this.emit('item:started', {
           itemId,
           itemType,
+          threadId: threadId || undefined,
+          turnId: turnId || undefined,
           command: command || undefined,
           commandActions: commandActions?.length ? commandActions : undefined,
           toolInput,
@@ -1125,7 +1129,14 @@ export class CodexClient extends EventEmitter {
           itemType = itemType[0].toLowerCase() + itemType.slice(1);
         }
 
-        this.emit('item:completed', { itemId });
+        const threadId = (p.threadId || p.thread_id || p.conversationId || msg?.thread_id || msg?.threadId || '') as string;
+        const turnId = (p.turnId || p.turn_id || msg?.turn_id || msg?.turnId || '') as string;
+
+        this.emit('item:completed', {
+          itemId,
+          threadId: threadId || undefined,
+          turnId: turnId || undefined,
+        });
 
         // Emit thinking:complete for Reasoning items
         if (itemType === 'reasoning' || this.reasoningItemStartTimes.has(itemId)) {
@@ -1151,6 +1162,8 @@ export class CodexClient extends EventEmitter {
                       msg?.delta || msg?.content || msg?.text || '';
 
         const itemId = p.itemId || p.item_id || msg?.item_id || '';
+        const threadId = (p.threadId || p.thread_id || p.conversationId || msg?.thread_id || msg?.threadId || '') as string;
+        const turnId = (p.turnId || p.turn_id || msg?.turn_id || msg?.turnId || '') as string;
 
         // Deduplication: prevent duplicate deltas from different event types
         // Use content-only hash since itemId differs between event types
@@ -1172,7 +1185,12 @@ export class CodexClient extends EventEmitter {
           }
           this.recentDeltaHashes.set(hash, now);
 
-          this.emit('item:delta', { itemId: itemId as string, delta: deltaStr });
+          this.emit('item:delta', {
+            itemId: itemId as string,
+            delta: deltaStr,
+            threadId: threadId || undefined,
+            turnId: turnId || undefined,
+          });
         }
         break;
       }
@@ -1258,9 +1276,19 @@ export class CodexClient extends EventEmitter {
       case 'codex/event/reasoning_content_delta':
       case 'codex/event/agent_reasoning_delta': {
         const p = params as Record<string, unknown>;
-        const content = (p.delta || p.content || p.text || '') as string;
+        const msg = p.msg as Record<string, unknown> | undefined;
+        const content = (p.delta || p.content || p.text ||
+          msg?.delta || msg?.content || msg?.text || '') as string;
+        const itemId = (p.itemId || p.item_id || msg?.item_id || msg?.itemId || '') as string;
+        const threadId = (p.threadId || p.thread_id || p.conversationId || msg?.thread_id || msg?.threadId || '') as string;
+        const turnId = (p.turnId || p.turn_id || msg?.turn_id || msg?.turnId || '') as string;
         if (content) {
-          this.emit('thinking:delta', { content });
+          this.emit('thinking:delta', {
+            content,
+            itemId: itemId || undefined,
+            threadId: threadId || undefined,
+            turnId: turnId || undefined,
+          });
         }
         break;
       }
@@ -1273,8 +1301,15 @@ export class CodexClient extends EventEmitter {
         const delta = (p.delta || p.content || p.text ||
           msg?.delta || msg?.content || msg?.text || '') as string;
         const itemId = (p.itemId || p.item_id || msg?.item_id || msg?.itemId || msg?.id || p.id || '') as string;
+        const threadId = (p.threadId || p.thread_id || p.conversationId || msg?.thread_id || msg?.threadId || '') as string;
+        const turnId = (p.turnId || p.turn_id || msg?.turn_id || msg?.turnId || '') as string;
         if (delta) {
-          this.emit('filechange:delta', { itemId, delta });
+          this.emit('filechange:delta', {
+            itemId,
+            delta,
+            threadId: threadId || undefined,
+            turnId: turnId || undefined,
+          });
         }
         break;
       }
@@ -1306,8 +1341,15 @@ export class CodexClient extends EventEmitter {
         const msg = p.msg as Record<string, unknown> | undefined;
         const delta = (p.delta || p.content || p.output ||
                        msg?.delta || msg?.content || msg?.output || '') as string;
+        const threadId = (p.threadId || p.thread_id || p.conversationId || msg?.thread_id || msg?.threadId || '') as string;
+        const turnId = (p.turnId || p.turn_id || msg?.turn_id || msg?.turnId || '') as string;
         if (delta) {
-          this.emit('command:output', { itemId, delta });
+          this.emit('command:output', {
+            itemId,
+            delta,
+            threadId: threadId || undefined,
+            turnId: turnId || undefined,
+          });
         }
         break;
       }
@@ -1415,9 +1457,18 @@ export class CodexClient extends EventEmitter {
       case 'item/reasoning/summaryTextDelta': {
         const p = params as Record<string, unknown>;
         const text = (p.text || p.delta || p.content || p.part || '') as string;
+        const msg = p.msg as Record<string, unknown> | undefined;
+        const itemId = (p.itemId || p.item_id || msg?.item_id || msg?.itemId || '') as string;
+        const threadId = (p.threadId || p.thread_id || p.conversationId || msg?.thread_id || msg?.threadId || '') as string;
+        const turnId = (p.turnId || p.turn_id || msg?.turn_id || msg?.turnId || '') as string;
         if (text) {
           console.log(`[codex-client] Reasoning summary: ${method}`, text.slice(0, 100));
-          this.emit('thinking:delta', { content: text });
+          this.emit('thinking:delta', {
+            content: text,
+            itemId: itemId || undefined,
+            threadId: threadId || undefined,
+            turnId: turnId || undefined,
+          });
         }
         break;
       }

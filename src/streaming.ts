@@ -351,6 +351,8 @@ export class StreamingManager {
   private contexts = new Map<string, StreamingContext>();
   private states = new Map<string, StreamingState>();
   private turnIdToKey = new Map<string, string>();
+  private itemIdToKey = new Map<string, string>();
+  private keyToItemIds = new Map<string, Set<string>>();
   private slack: WebClient;
   private codex: CodexClient;
   private approvalCallback?: (request: ApprovalRequestWithId, context: StreamingContext) => void;
@@ -396,6 +398,7 @@ export class StreamingManager {
         if (existingContext.turnId) {
           this.turnIdToKey.delete(existingContext.turnId);
         }
+        this.cleanupItemIdsForKey(key);
         removeProcessingEmoji(this.slack, existingContext.channelId, existingContext.originalTs)
           .catch(() => { /* ignore - may already be removed */ });
       }
@@ -525,6 +528,8 @@ export class StreamingManager {
     this.contexts.clear();
     this.states.clear();
     this.turnIdToKey.clear();
+    this.itemIdToKey.clear();
+    this.keyToItemIds.clear();
   }
 
   /**
@@ -630,8 +635,96 @@ export class StreamingManager {
     if (context.turnId) {
       this.turnIdToKey.delete(context.turnId);
     }
+    this.cleanupItemIdsForKey(conversationKey);
     this.contexts.delete(conversationKey);
     this.states.delete(conversationKey);
+  }
+
+  private registerItemId(conversationKey: string, itemId: string): void {
+    if (!itemId) return;
+    this.itemIdToKey.set(itemId, conversationKey);
+    const existing = this.keyToItemIds.get(conversationKey);
+    if (existing) {
+      existing.add(itemId);
+      return;
+    }
+    this.keyToItemIds.set(conversationKey, new Set([itemId]));
+  }
+
+  private removeItemId(itemId: string): void {
+    if (!itemId) return;
+    const key = this.itemIdToKey.get(itemId);
+    if (!key) return;
+    this.itemIdToKey.delete(itemId);
+    const set = this.keyToItemIds.get(key);
+    if (set) {
+      set.delete(itemId);
+      if (set.size === 0) {
+        this.keyToItemIds.delete(key);
+      }
+    }
+  }
+
+  private cleanupItemIdsForKey(conversationKey: string): void {
+    const set = this.keyToItemIds.get(conversationKey);
+    if (!set) return;
+    for (const itemId of set) {
+      this.itemIdToKey.delete(itemId);
+    }
+    this.keyToItemIds.delete(conversationKey);
+  }
+
+  private getSingleActiveKey(): string | null {
+    let found: string | null = null;
+    for (const [key, state] of this.states) {
+      if (!state.isStreaming) continue;
+      if (found) return null;
+      found = key;
+    }
+    return found;
+  }
+
+  private resolveContextForEvent(
+    itemId?: string,
+    threadId?: string,
+    turnId?: string
+  ): { key: string; context: StreamingContext } | undefined {
+    if (itemId) {
+      const mappedKey = this.itemIdToKey.get(itemId);
+      if (mappedKey) {
+        const context = this.contexts.get(mappedKey);
+        if (context) {
+          return { key: mappedKey, context };
+        }
+      }
+    }
+
+    if (turnId) {
+      const found = this.findContextByTurnId(turnId);
+      if (found) {
+        if (itemId) this.registerItemId(found.key, itemId);
+        return found;
+      }
+    }
+
+    if (threadId) {
+      const found = this.findLatestContextByThreadId(threadId);
+      if (found) {
+        if (itemId) this.registerItemId(found.key, itemId);
+        return found;
+      }
+    }
+
+    const singleKey = this.getSingleActiveKey();
+    if (singleKey) {
+      const context = this.contexts.get(singleKey);
+      if (context) {
+        if (itemId) this.registerItemId(singleKey, itemId);
+        return { key: singleKey, context };
+      }
+    }
+
+    return undefined;
   }
 
   /**
@@ -1098,6 +1191,7 @@ export class StreamingManager {
           if (found.context.turnId) {
             this.turnIdToKey.delete(found.context.turnId);
           }
+          this.cleanupItemIdsForKey(found.key);
           this.contexts.delete(found.key);
           this.states.delete(found.key);
           console.log(`[streaming] Cleaned up context and state for key="${found.key}"`);
@@ -1105,75 +1199,228 @@ export class StreamingManager {
     });
 
     // Item started (tool use) - FILTER non-tool items, timer handles updates
-    this.codex.on('item:started', ({ itemId, itemType, command, commandActions, toolInput: rawToolInput }) => {
+    this.codex.on('item:started', ({ itemId, itemType, command, commandActions, toolInput: rawToolInput, threadId, turnId }) => {
+      const resolved = this.resolveContextForEvent(itemId, threadId, turnId);
+      const targetKey = resolved?.key;
+
       // Skip non-tool items (userMessage, agentMessage, reasoning)
       if (!isToolItemType(itemType)) {
         console.log(`[streaming] Skipping non-tool item: ${itemType}`);
         return;
       }
 
-      for (const [key, state] of this.states) {
-        if (state.isStreaming) {
-          // Extract display command for commandExecution items
-          let displayInput: string | undefined;
-          if (itemType === 'commandExecution' || itemType === 'CommandExecution') {
-            if (commandActions && commandActions.length > 0) {
-              displayInput = commandActions[0].command; // e.g., "ls", "git status"
-            } else if (command) {
-              // Parse from "/bin/bash -lc <cmd>" format
-              const match = command.match(/-lc\s+["']?(.+?)["']?$/);
-              displayInput = match ? match[1] : command;
-            }
-          }
+      if (!targetKey) {
+        console.log('[streaming] item:started: no matching context for tool item, skipping');
+        return;
+      }
 
-          // FIX: Reset thinking segment tracking so next thinking gets NEW segment ID
-          // This ensures thinking AFTER a tool starts appears as a separate message
-          state.currentThinkingSegmentId = undefined;
-          state.thinkingSegmentCounter = (state.thinkingSegmentCounter || 0) + 1;
+      const state = this.states.get(targetKey);
+      if (!state || !state.isStreaming) {
+        return;
+      }
 
-          // For TodoWrite, store the full structured input for todo extraction
-          // For other tools, use the display input string
-          const toolInputValue = rawToolInput || displayInput;
+      const context = this.contexts.get(targetKey);
+      if (!context) {
+        return;
+      }
 
-          // If this tool was already seeded (e.g., web search begin), just update metadata
-          const existingTool = state.activeTools.get(itemId);
-          if (existingTool) {
-            existingTool.tool = existingTool.tool || itemType;
-            if (!existingTool.input && displayInput) {
-              existingTool.input = displayInput;
-            }
-            if (!existingTool.toolInput && toolInputValue) {
-              existingTool.toolInput = toolInputValue;
-            }
-            if (!existingTool.startTime) {
-              existingTool.startTime = Date.now();
-            }
-            break;
-          }
+      // Extract display command for commandExecution items
+      let displayInput: string | undefined;
+      if (itemType === 'commandExecution' || itemType === 'CommandExecution') {
+        if (commandActions && commandActions.length > 0) {
+          displayInput = commandActions[0].command; // e.g., "ls", "git status"
+        } else if (command) {
+          // Parse from "/bin/bash -lc <cmd>" format
+          const match = command.match(/-lc\s+["']?(.+?)["']?$/);
+          displayInput = match ? match[1] : command;
+        }
+      }
 
-          // Track tool start (only actual tools now)
-          // Store both display input and full toolInput for metrics extraction
-          state.activeTools.set(itemId, {
-            tool: itemType,
-            input: displayInput,
-            toolInput: toolInputValue, // Full input for metrics
-            startTime: Date.now(),
-          });
+      // FIX: Reset thinking segment tracking so next thinking gets NEW segment ID
+      // This ensures thinking AFTER a tool starts appears as a separate message
+      state.currentThinkingSegmentId = undefined;
+      state.thinkingSegmentCounter = (state.thinkingSegmentCounter || 0) + 1;
 
-          // Add activity entry for actual tools only
-          this.activityManager.addEntry(key, {
-            type: 'tool_start',
+      // For TodoWrite, store the full structured input for todo extraction
+      // For other tools, use the display input string
+      const toolInputValue = rawToolInput || displayInput;
+
+      // If this tool was already seeded (e.g., web search begin), just update metadata
+      const existingTool = state.activeTools.get(itemId);
+      if (existingTool) {
+        existingTool.tool = existingTool.tool || itemType;
+        if (!existingTool.input && displayInput) {
+          existingTool.input = displayInput;
+        }
+        if (!existingTool.toolInput && toolInputValue) {
+          existingTool.toolInput = toolInputValue;
+        }
+        if (!existingTool.startTime) {
+          existingTool.startTime = Date.now();
+        }
+        return;
+      }
+
+      // Track tool start (only actual tools now)
+      // Store both display input and full toolInput for metrics extraction
+      state.activeTools.set(itemId, {
+        tool: itemType,
+        input: displayInput,
+        toolInput: toolInputValue, // Full input for metrics
+        startTime: Date.now(),
+      });
+
+      // Add activity entry for actual tools only
+      this.activityManager.addEntry(targetKey, {
+        type: 'tool_start',
+        timestamp: Date.now(),
+        tool: itemType,
+        toolInput: toolInputValue,
+        toolUseId: itemId,
+      });
+
+      flushActivityBatchToThread(
+        this.activityManager,
+        targetKey,
+        this.slack,
+        context.channelId,
+        state.threadParentTs || context.originalTs,
+        {
+          force: false,
+          mapActivityTs: (ts, entry) => {
+            const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
+            const messageToolMap = threadSession?.messageToolMap || {};
+            const messageTurnMap = threadSession?.messageTurnMap || {};
+            messageToolMap[ts] = entry.toolUseId || itemId;
+            messageTurnMap[ts] = context.turnId;
+            saveThreadSession(context.channelId, context.threadTs || context.originalTs, {
+              messageToolMap,
+              messageTurnMap,
+            }).catch((err) => console.error('[streaming] Failed to save message maps:', err));
+          },
+          buildActions: (entry, slackTs) =>
+            // includeAttachThinking=false: full thinking content is posted by postThinkingToThread
+            buildActivityEntryActionParams(entry, targetKey, context.turnId, slackTs || context.originalTs, false),
+        }
+      ).catch((err) => console.error('[streaming] Thread batch post failed:', err));
+    });
+
+    // Item completed (tool finished)
+    this.codex.on('item:completed', ({ itemId, threadId, turnId }) => {
+      const resolved = this.resolveContextForEvent(itemId, threadId, turnId);
+      const targetKey = resolved?.key;
+      if (!targetKey) {
+        console.log('[streaming] item:completed: no matching context, skipping');
+        this.removeItemId(itemId);
+        return;
+      }
+
+      const state = this.states.get(targetKey);
+      if (state?.isStreaming) {
+        const toolInfo = state.activeTools.get(itemId);
+        if (toolInfo) {
+          const durationMs = Date.now() - toolInfo.startTime;
+
+          // Extract metrics from toolInput (ported from ccslack)
+          const entry: ActivityEntry = {
+            type: 'tool_complete',
             timestamp: Date.now(),
-            tool: itemType,
-            toolInput: toolInputValue,
+            tool: toolInfo.tool,
+            toolInput: toolInfo.toolInput || toolInfo.input,
             toolUseId: itemId,
-          });
+            durationMs,
+          };
 
-          const context = this.contexts.get(key);
+          // Extract metrics based on tool type
+          const toolLower = (toolInfo.tool || '').toLowerCase();
+          const toolInput = typeof toolInfo.toolInput === 'object' ? toolInfo.toolInput as Record<string, unknown> : undefined;
+
+          // Edit/FileChange: compute linesAdded/linesRemoved
+          if ((toolLower === 'edit' || toolLower === 'filechange') && toolInput) {
+            const oldString = (toolInput.old_string as string) || '';
+            const newString = (toolInput.new_string as string) || '';
+            if (toolLower === 'edit') {
+              entry.linesRemoved = oldString.split('\n').length;
+              entry.linesAdded = newString.split('\n').length;
+            }
+          }
+
+          // FileChange: compute linesAdded/linesRemoved from diff output (if present)
+          if (toolLower === 'filechange' && toolInfo.outputBuffer) {
+            let added = 0;
+            let removed = 0;
+            for (const line of toolInfo.outputBuffer.split('\n')) {
+              if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@')) continue;
+              if (line.startsWith('+')) added += 1;
+              if (line.startsWith('-')) removed += 1;
+            }
+            if (added || removed) {
+              entry.linesAdded = added;
+              entry.linesRemoved = removed;
+            }
+          }
+
+          // Write: compute lineCount from content
+          if (toolLower === 'write' && toolInput) {
+            const content = (toolInput.content as string) || '';
+            entry.lineCount = content.split('\n').length;
+          }
+
+          // Bash/CommandExecution: store output and exit code
+          if ((toolLower === 'bash' || toolLower === 'commandexecution') && toolInfo.outputBuffer) {
+            const output = toolInfo.outputBuffer;
+            const MAX_PREVIEW = 300;
+
+            // Check for binary content
+            const isBinary = /[\x00-\x08\x0E-\x1A\x1C-\x1F]/.test(output.slice(0, 1000));
+            if (isBinary) {
+              entry.toolOutputPreview = '[Binary content]';
+            } else {
+              entry.toolOutput = output;
+              entry.toolOutputTruncated = output.length >= 50 * 1024;
+
+              // Strip ANSI codes for clean preview
+              const cleaned = output.replace(/\x1B\[[0-9;]*m/g, '');
+              if (cleaned.length === 0) {
+                entry.toolOutputPreview = '[No output]';
+              } else {
+                entry.toolOutputPreview = cleaned.slice(0, MAX_PREVIEW);
+                if (cleaned.length > MAX_PREVIEW) {
+                  entry.toolOutputPreview += '...';
+                }
+              }
+
+              // Line count from output
+              entry.lineCount = cleaned.split('\n').filter(l => l.length > 0).length;
+            }
+
+            // Exit code indicates error
+            if (toolInfo.exitCode !== undefined && toolInfo.exitCode !== 0) {
+              entry.toolIsError = true;
+              entry.toolErrorMessage = `Exit code ${toolInfo.exitCode}`;
+            }
+          }
+
+          if (toolLower !== 'bash' && toolLower !== 'commandexecution') {
+            if (toolInfo.outputPreview) {
+              entry.toolOutputPreview = toolInfo.outputPreview;
+            }
+            if (toolInfo.outputFull) {
+              entry.toolOutput = toolInfo.outputFull;
+            }
+          }
+
+          // Add the entry with metrics
+          this.activityManager.addEntry(targetKey, entry);
+
+          state.activeTools.delete(itemId);
+
+          // Integration point 2: Flush activity batch to thread on tool completion
+          const context = this.contexts.get(targetKey);
           if (context) {
             flushActivityBatchToThread(
               this.activityManager,
-              key,
+              targetKey,
               this.slack,
               context.channelId,
               state.threadParentTs || context.originalTs,
@@ -1192,324 +1439,213 @@ export class StreamingManager {
                 },
                 buildActions: (entry, slackTs) =>
                   // includeAttachThinking=false: full thinking content is posted by postThinkingToThread
-                  buildActivityEntryActionParams(entry, key, context.turnId, slackTs || context.originalTs, false),
+                  buildActivityEntryActionParams(entry, targetKey, context.turnId, slackTs || context.originalTs, false),
               }
-            ).catch((err) => console.error('[streaming] Thread batch post failed:', err));
+            ).catch((err) => {
+              console.error('[streaming] Thread batch post failed:', err);
+            });
           }
-
-          break;
         }
       }
-    });
 
-    // Item completed (tool finished)
-    this.codex.on('item:completed', ({ itemId }) => {
-      for (const [key, state] of this.states) {
-        if (state.isStreaming) {
-          const toolInfo = state.activeTools.get(itemId);
-          if (toolInfo) {
-            const durationMs = Date.now() - toolInfo.startTime;
-
-            // Extract metrics from toolInput (ported from ccslack)
-            const entry: ActivityEntry = {
-              type: 'tool_complete',
-              timestamp: Date.now(),
-              tool: toolInfo.tool,
-              toolInput: toolInfo.toolInput || toolInfo.input,
-              toolUseId: itemId,
-              durationMs,
-            };
-
-            // Extract metrics based on tool type
-            const toolLower = (toolInfo.tool || '').toLowerCase();
-            const toolInput = typeof toolInfo.toolInput === 'object' ? toolInfo.toolInput as Record<string, unknown> : undefined;
-
-            // Edit/FileChange: compute linesAdded/linesRemoved
-            if ((toolLower === 'edit' || toolLower === 'filechange') && toolInput) {
-              const oldString = (toolInput.old_string as string) || '';
-              const newString = (toolInput.new_string as string) || '';
-              if (toolLower === 'edit') {
-                entry.linesRemoved = oldString.split('\n').length;
-                entry.linesAdded = newString.split('\n').length;
-              }
-            }
-
-            // FileChange: compute linesAdded/linesRemoved from diff output (if present)
-            if (toolLower === 'filechange' && toolInfo.outputBuffer) {
-              let added = 0;
-              let removed = 0;
-              for (const line of toolInfo.outputBuffer.split('\n')) {
-                if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@')) continue;
-                if (line.startsWith('+')) added += 1;
-                if (line.startsWith('-')) removed += 1;
-              }
-              if (added || removed) {
-                entry.linesAdded = added;
-                entry.linesRemoved = removed;
-              }
-            }
-
-            // Write: compute lineCount from content
-            if (toolLower === 'write' && toolInput) {
-              const content = (toolInput.content as string) || '';
-              entry.lineCount = content.split('\n').length;
-            }
-
-            // Bash/CommandExecution: store output and exit code
-            if ((toolLower === 'bash' || toolLower === 'commandexecution') && toolInfo.outputBuffer) {
-              const output = toolInfo.outputBuffer;
-              const MAX_PREVIEW = 300;
-
-              // Check for binary content
-              const isBinary = /[\x00-\x08\x0E-\x1A\x1C-\x1F]/.test(output.slice(0, 1000));
-              if (isBinary) {
-                entry.toolOutputPreview = '[Binary content]';
-              } else {
-                entry.toolOutput = output;
-                entry.toolOutputTruncated = output.length >= 50 * 1024;
-
-                // Strip ANSI codes for clean preview
-                const cleaned = output.replace(/\x1B\[[0-9;]*m/g, '');
-                if (cleaned.length === 0) {
-                  entry.toolOutputPreview = '[No output]';
-                } else {
-                  entry.toolOutputPreview = cleaned.slice(0, MAX_PREVIEW);
-                  if (cleaned.length > MAX_PREVIEW) {
-                    entry.toolOutputPreview += '...';
-                  }
-                }
-
-                // Line count from output
-                entry.lineCount = cleaned.split('\n').filter(l => l.length > 0).length;
-              }
-
-              // Exit code indicates error
-              if (toolInfo.exitCode !== undefined && toolInfo.exitCode !== 0) {
-                entry.toolIsError = true;
-                entry.toolErrorMessage = `Exit code ${toolInfo.exitCode}`;
-              }
-            }
-
-            if (toolLower !== 'bash' && toolLower !== 'commandexecution') {
-              if (toolInfo.outputPreview) {
-                entry.toolOutputPreview = toolInfo.outputPreview;
-              }
-              if (toolInfo.outputFull) {
-                entry.toolOutput = toolInfo.outputFull;
-              }
-            }
-
-            // Add the entry with metrics
-            this.activityManager.addEntry(key, entry);
-
-            state.activeTools.delete(itemId);
-
-            // Integration point 2: Flush activity batch to thread on tool completion
-            const context = this.contexts.get(key);
-            if (context) {
-              flushActivityBatchToThread(
-                this.activityManager,
-                key,
-                this.slack,
-                context.channelId,
-                state.threadParentTs || context.originalTs,
-                {
-                  force: false,
-                  mapActivityTs: (ts, entry) => {
-                    const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
-                    const messageToolMap = threadSession?.messageToolMap || {};
-                    const messageTurnMap = threadSession?.messageTurnMap || {};
-                    messageToolMap[ts] = entry.toolUseId || itemId;
-                    messageTurnMap[ts] = context.turnId;
-                    saveThreadSession(context.channelId, context.threadTs || context.originalTs, {
-                      messageToolMap,
-                      messageTurnMap,
-                    }).catch((err) => console.error('[streaming] Failed to save message maps:', err));
-                  },
-                  buildActions: (entry, slackTs) =>
-                    // includeAttachThinking=false: full thinking content is posted by postThinkingToThread
-                    buildActivityEntryActionParams(entry, key, context.turnId, slackTs || context.originalTs, false),
-                }
-              ).catch((err) => {
-                console.error('[streaming] Thread batch post failed:', err);
-              });
-            }
-          }
-          break;
-        }
-      }
+      this.removeItemId(itemId);
     });
 
     // Web search lifecycle (adds query + URL context)
-    this.codex.on('websearch:started', ({ itemId, query, url, threadId }) => {
+    this.codex.on('websearch:started', ({ itemId, query, url, threadId, turnId }) => {
       if (!itemId) return;
-      for (const [key, state] of this.states) {
-        if (!state.isStreaming) continue;
+      const resolved = this.resolveContextForEvent(itemId, threadId, turnId);
+      const targetKey = resolved?.key;
+      if (!targetKey) {
+        console.log('[streaming] websearch:started: no matching context, skipping');
+        return;
+      }
 
-        const context = this.contexts.get(key);
-        if (!context) continue;
-        if (threadId && context.threadId && context.threadId !== threadId) continue;
+      const state = this.states.get(targetKey);
+      const context = this.contexts.get(targetKey);
+      if (!state || !state.isStreaming || !context) return;
 
-        const toolInput: Record<string, unknown> = {};
-        if (query) toolInput.query = query;
-        if (url) toolInput.url = url;
+      const toolInput: Record<string, unknown> = {};
+      if (query) toolInput.query = query;
+      if (url) toolInput.url = url;
 
-        const displayInput = query || url;
-        let created = false;
+      const displayInput = query || url;
+      let created = false;
 
-        if (state.activeTools.has(itemId)) {
-          const existingTool = state.activeTools.get(itemId)!;
-          existingTool.tool = existingTool.tool || 'webSearch';
-          existingTool.toolInput = Object.keys(toolInput).length ? toolInput : existingTool.toolInput;
-          existingTool.input = existingTool.input ?? displayInput;
-        } else {
-          state.activeTools.set(itemId, {
-            tool: 'webSearch',
-            input: displayInput,
-            toolInput: Object.keys(toolInput).length ? toolInput : undefined,
-            startTime: Date.now(),
-          });
-          created = true;
-          this.activityManager.addEntry(key, {
-            type: 'tool_start',
-            timestamp: Date.now(),
-            tool: 'webSearch',
-            toolInput: Object.keys(toolInput).length ? toolInput : displayInput,
-            toolUseId: itemId,
-          });
-        }
+      if (state.activeTools.has(itemId)) {
+        const existingTool = state.activeTools.get(itemId)!;
+        existingTool.tool = existingTool.tool || 'webSearch';
+        existingTool.toolInput = Object.keys(toolInput).length ? toolInput : existingTool.toolInput;
+        existingTool.input = existingTool.input ?? displayInput;
+      } else {
+        state.activeTools.set(itemId, {
+          tool: 'webSearch',
+          input: displayInput,
+          toolInput: Object.keys(toolInput).length ? toolInput : undefined,
+          startTime: Date.now(),
+        });
+        created = true;
+        this.activityManager.addEntry(targetKey, {
+          type: 'tool_start',
+          timestamp: Date.now(),
+          tool: 'webSearch',
+          toolInput: Object.keys(toolInput).length ? toolInput : displayInput,
+          toolUseId: itemId,
+        });
+      }
 
-        // Update existing tool_start entry with richer input if present
-        const entries = this.activityManager.getEntries(key);
-        const startEntry = entries.find(
-          (e) => e.type === 'tool_start' && e.toolUseId === itemId
-        );
-        if (startEntry && Object.keys(toolInput).length) {
-          startEntry.toolInput = toolInput;
-        }
+      // Update existing tool_start entry with richer input if present
+      const entries = this.activityManager.getEntries(targetKey);
+      const startEntry = entries.find(
+        (e) => e.type === 'tool_start' && e.toolUseId === itemId
+      );
+      if (startEntry && Object.keys(toolInput).length) {
+        startEntry.toolInput = toolInput;
+      }
 
-        if (created) {
-          flushActivityBatchToThread(
-            this.activityManager,
-            key,
-            this.slack,
-            context.channelId,
-            state.threadParentTs || context.originalTs,
-            {
-              force: false,
-              mapActivityTs: (ts, entry) => {
-                const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
-                const messageToolMap = threadSession?.messageToolMap || {};
-                const messageTurnMap = threadSession?.messageTurnMap || {};
-                messageToolMap[ts] = entry.toolUseId || itemId;
-                messageTurnMap[ts] = context.turnId;
-                saveThreadSession(context.channelId, context.threadTs || context.originalTs, {
-                  messageToolMap,
-                  messageTurnMap,
-                }).catch((err) => console.error('[streaming] Failed to save message maps:', err));
-              },
-              buildActions: (entry, slackTs) =>
-                buildActivityEntryActionParams(entry, key, context.turnId, slackTs || context.originalTs, false),
-            }
-          ).catch((err) => console.error('[streaming] Thread batch post failed:', err));
-        }
+      if (created) {
+        flushActivityBatchToThread(
+          this.activityManager,
+          targetKey,
+          this.slack,
+          context.channelId,
+          state.threadParentTs || context.originalTs,
+          {
+            force: false,
+            mapActivityTs: (ts, entry) => {
+              const threadSession = getThreadSession(context.channelId, context.threadTs || context.originalTs);
+              const messageToolMap = threadSession?.messageToolMap || {};
+              const messageTurnMap = threadSession?.messageTurnMap || {};
+              messageToolMap[ts] = entry.toolUseId || itemId;
+              messageTurnMap[ts] = context.turnId;
+              saveThreadSession(context.channelId, context.threadTs || context.originalTs, {
+                messageToolMap,
+                messageTurnMap,
+              }).catch((err) => console.error('[streaming] Failed to save message maps:', err));
+            },
+            buildActions: (entry, slackTs) =>
+              buildActivityEntryActionParams(entry, targetKey, context.turnId, slackTs || context.originalTs, false),
+          }
+        ).catch((err) => console.error('[streaming] Thread batch post failed:', err));
       }
     });
 
-    this.codex.on('websearch:completed', ({ itemId, url, resultUrls, threadId }) => {
+    this.codex.on('websearch:completed', ({ itemId, url, resultUrls, threadId, turnId }) => {
       if (!itemId) return;
       const fullUrl = (resultUrls && resultUrls.length > 0 ? resultUrls[0] : undefined) || url;
       const shortUrl = fullUrl ? shortenUrlForActivity(fullUrl, 60) : undefined;
 
-      for (const [key, state] of this.states) {
-        if (!state.isStreaming) continue;
+      const resolved = this.resolveContextForEvent(itemId, threadId, turnId);
+      const targetKey = resolved?.key;
+      if (!targetKey) {
+        console.log('[streaming] websearch:completed: no matching context, skipping');
+        return;
+      }
 
-        const context = this.contexts.get(key);
-        if (!context) continue;
-        if (threadId && context.threadId && context.threadId !== threadId) continue;
+      const state = this.states.get(targetKey);
+      if (!state || !state.isStreaming) return;
 
-        if (fullUrl) {
-          const toolInfo = state.activeTools.get(itemId);
-          if (toolInfo) {
-            toolInfo.outputPreview = shortUrl || fullUrl;
-            toolInfo.outputFull = fullUrl;
-          }
+      if (fullUrl) {
+        const toolInfo = state.activeTools.get(itemId);
+        if (toolInfo) {
+          toolInfo.outputPreview = shortUrl || fullUrl;
+          toolInfo.outputFull = fullUrl;
+        }
 
-          const entries = this.activityManager.getEntries(key);
-          const completeEntry = entries.find(
-            (e) => e.type === 'tool_complete' && e.toolUseId === itemId
-          );
-          if (completeEntry) {
-            completeEntry.toolOutputPreview = shortUrl || fullUrl;
-            completeEntry.toolOutput = fullUrl;
-          }
+        const entries = this.activityManager.getEntries(targetKey);
+        const completeEntry = entries.find(
+          (e) => e.type === 'tool_complete' && e.toolUseId === itemId
+        );
+        if (completeEntry) {
+          completeEntry.toolOutputPreview = shortUrl || fullUrl;
+          completeEntry.toolOutput = fullUrl;
         }
       }
     });
 
     // File change output deltas (patch/diff content)
-    this.codex.on('filechange:delta', ({ itemId, delta }) => {
-      for (const [, state] of this.states) {
-        if (state.isStreaming) {
-          const toolInfo = state.activeTools.get(itemId);
-          if (toolInfo) {
-            const MAX_OUTPUT = 100 * 1024;
-            const current = toolInfo.outputBuffer || '';
-            if (current.length < MAX_OUTPUT) {
-              toolInfo.outputBuffer = current + delta;
-              if (toolInfo.outputBuffer.length > MAX_OUTPUT) {
-                toolInfo.outputBuffer = toolInfo.outputBuffer.slice(0, MAX_OUTPUT);
-              }
-            }
+    this.codex.on('filechange:delta', ({ itemId, delta, threadId, turnId }) => {
+      const resolved = this.resolveContextForEvent(itemId, threadId, turnId);
+      const targetKey = resolved?.key;
+      if (!targetKey) {
+        console.log('[streaming] filechange:delta: no matching context, skipping');
+        return;
+      }
+
+      const state = this.states.get(targetKey);
+      if (!state || !state.isStreaming) return;
+
+      const toolInfo = state.activeTools.get(itemId);
+      if (toolInfo) {
+        const MAX_OUTPUT = 100 * 1024;
+        const current = toolInfo.outputBuffer || '';
+        if (current.length < MAX_OUTPUT) {
+          toolInfo.outputBuffer = current + delta;
+          if (toolInfo.outputBuffer.length > MAX_OUTPUT) {
+            toolInfo.outputBuffer = toolInfo.outputBuffer.slice(0, MAX_OUTPUT);
           }
-          break;
         }
       }
     });
 
     // Command output (Bash execution output streaming)
-    this.codex.on('command:output', ({ itemId, delta }) => {
-      for (const [, state] of this.states) {
-        if (state.isStreaming) {
-          const toolInfo = state.activeTools.get(itemId);
-          if (toolInfo) {
-            // Accumulate output (up to 50KB)
-            const MAX_OUTPUT = 50 * 1024;
-            const current = toolInfo.outputBuffer || '';
-            if (current.length < MAX_OUTPUT) {
-              toolInfo.outputBuffer = current + delta;
-              if (toolInfo.outputBuffer.length > MAX_OUTPUT) {
-                toolInfo.outputBuffer = toolInfo.outputBuffer.slice(0, MAX_OUTPUT);
-              }
-            }
+    this.codex.on('command:output', ({ itemId, delta, threadId, turnId }) => {
+      const resolved = this.resolveContextForEvent(itemId, threadId, turnId);
+      const targetKey = resolved?.key;
+      if (!targetKey) {
+        console.log('[streaming] command:output: no matching context, skipping');
+        return;
+      }
+
+      const state = this.states.get(targetKey);
+      if (!state || !state.isStreaming) return;
+
+      const toolInfo = state.activeTools.get(itemId);
+      if (toolInfo) {
+        // Accumulate output (up to 50KB)
+        const MAX_OUTPUT = 50 * 1024;
+        const current = toolInfo.outputBuffer || '';
+        if (current.length < MAX_OUTPUT) {
+          toolInfo.outputBuffer = current + delta;
+          if (toolInfo.outputBuffer.length > MAX_OUTPUT) {
+            toolInfo.outputBuffer = toolInfo.outputBuffer.slice(0, MAX_OUTPUT);
           }
-          break;
         }
       }
     });
 
     // Command completed (Bash execution finished with exit code)
-    this.codex.on('command:completed', ({ itemId, exitCode }) => {
-      for (const [, state] of this.states) {
-        if (state.isStreaming) {
-          const toolInfo = state.activeTools.get(itemId);
-          if (toolInfo) {
-            toolInfo.exitCode = exitCode;
-          }
-          break;
-        }
+    this.codex.on('command:completed', ({ itemId, exitCode, threadId, turnId }) => {
+      const resolved = this.resolveContextForEvent(itemId, threadId, turnId);
+      const targetKey = resolved?.key;
+      if (!targetKey) {
+        console.log('[streaming] command:completed: no matching context, skipping');
+        return;
+      }
+
+      const state = this.states.get(targetKey);
+      if (!state || !state.isStreaming) return;
+
+      const toolInfo = state.activeTools.get(itemId);
+      if (toolInfo) {
+        toolInfo.exitCode = exitCode;
       }
     });
 
     // Item delta (streaming response text) - JUST ACCUMULATE, timer handles updates
-    this.codex.on('item:delta', ({ itemId, delta }) => {
-      for (const [key, state] of this.states) {
-        if (state.isStreaming) {
-          state.text += delta;
-          // Timer handles updates, no need to schedule
-          break;
-        }
+    this.codex.on('item:delta', ({ itemId, delta, threadId, turnId }) => {
+      const resolved = this.resolveContextForEvent(itemId, threadId, turnId);
+      const targetKey = resolved?.key;
+      if (!targetKey) {
+        console.log('[streaming] item:delta: no matching context, skipping');
+        return;
       }
+
+      const state = this.states.get(targetKey);
+      if (!state || !state.isStreaming) return;
+
+      state.text += delta;
+      // Timer handles updates, no need to schedule
     });
 
     // Thinking started - Codex detected a Reasoning item started
@@ -1576,49 +1712,63 @@ export class StreamingManager {
     // Only updates activity entry duration - no thread messages (postThinkingToThread handles that)
     this.codex.on('thinking:complete', ({ itemId, durationMs }) => {
       console.log(`[streaming] thinking:complete itemId=${itemId} durationMs=${durationMs}`);
-      for (const [key, state] of this.states) {
-        if (state.isStreaming && (state.thinkingItemId === itemId || state.thinkingStartTime)) {
-          // Mark thinking as complete in activity entries
-          const entries = this.activityManager.getEntries(key);
-          let thinkingEntry: ActivityEntry | undefined;
-          for (let i = entries.length - 1; i >= 0; i--) {
-            if (entries[i].type === 'thinking') {
-              entries[i].thinkingInProgress = false;
-              entries[i].durationMs = durationMs;
-              thinkingEntry = entries[i];
-              break;
-            }
-          }
+      const resolved = this.resolveContextForEvent(itemId);
+      const targetKey = resolved?.key;
+      if (!targetKey) {
+        console.log('[streaming] thinking:complete: no matching context, skipping');
+        return;
+      }
 
-          const context = this.contexts.get(key);
-          if (context && thinkingEntry) {
-            const mutex = getUpdateMutex(key);
-            mutex.runExclusive(async () => {
-              try {
-                await updateThinkingEntryInThread(
-                  this.activityManager,
-                  key,
-                  this.slack,
-                  context.channelId,
-                  thinkingEntry
-                );
-              } catch (err) {
-                console.error('[thinking:complete] Update failed:', err);
-              }
-            });
-          }
-          // Reset for next thinking block
-          state.thinkingItemId = undefined;
+      const state = this.states.get(targetKey);
+      if (!state || !state.isStreaming) return;
+
+      // Mark thinking as complete in activity entries
+      const entries = this.activityManager.getEntries(targetKey);
+      let thinkingEntry: ActivityEntry | undefined;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (entries[i].type === 'thinking') {
+          entries[i].thinkingInProgress = false;
+          entries[i].durationMs = durationMs;
+          thinkingEntry = entries[i];
           break;
         }
       }
+
+      const context = this.contexts.get(targetKey);
+      if (context && thinkingEntry) {
+        const mutex = getUpdateMutex(targetKey);
+        mutex.runExclusive(async () => {
+          try {
+            await updateThinkingEntryInThread(
+              this.activityManager,
+              targetKey,
+              this.slack,
+              context.channelId,
+              thinkingEntry
+            );
+          } catch (err) {
+            console.error('[thinking:complete] Update failed:', err);
+          }
+        });
+      }
+      // Reset for next thinking block
+      state.thinkingItemId = undefined;
     });
 
     // Thinking delta (reasoning content) - accumulate content and flush to thread
     // FIX: Now flushes to thread so thinking appears during streaming (not just on turn completion)
-    this.codex.on('thinking:delta', ({ content }) => {
-      for (const [key, state] of this.states) {
-        if (state.isStreaming) {
+    this.codex.on('thinking:delta', ({ content, itemId, threadId, turnId }) => {
+      const resolved = this.resolveContextForEvent(itemId, threadId, turnId);
+      const targetKey = resolved?.key;
+      if (!targetKey) {
+        console.log('[streaming] thinking:delta: no matching context, skipping');
+        return;
+      }
+
+      const state = this.states.get(targetKey);
+      if (!state || !state.isStreaming) return;
+
+      {
           state.thinkingContent += content;
 
           // FIX: Handle case where thinking:delta fires BEFORE thinking:started
@@ -1635,7 +1785,7 @@ export class StreamingManager {
             }
 
             // Create entry since thinking:started hasn't fired yet
-            this.activityManager.addEntry(key, {
+            this.activityManager.addEntry(targetKey, {
               type: 'thinking',
               timestamp: Date.now(),
               thinkingInProgress: true,
@@ -1651,7 +1801,7 @@ export class StreamingManager {
 
             const { display, truncated } = buildThinkingDisplay(updatedSegment, THINKING_MESSAGE_SIZE);
 
-            const entries = this.activityManager.getEntries(key);
+            const entries = this.activityManager.getEntries(targetKey);
             for (let i = entries.length - 1; i >= 0; i--) {
               if (entries[i].type === 'thinking' && entries[i].thinkingSegmentId === segmentId) {
                 entries[i].thinkingContent = display;
@@ -1664,16 +1814,16 @@ export class StreamingManager {
           }
 
           // FIX: Fire-and-forget mutex pattern (no await in sync handler)
-          const context = this.contexts.get(key);
+          const context = this.contexts.get(targetKey);
           if (context && segmentId) {
-            const mutex = getUpdateMutex(key);
+            const mutex = getUpdateMutex(targetKey);
             mutex.runExclusive(async () => {
               try {
                 // Only post the initial thinking entry once per segment.
                 if (!state.postedThinkingSegmentIds.has(segmentId)) {
                   await flushActivityBatchToThread(
                     this.activityManager,
-                    key,
+                    targetKey,
                     this.slack,
                     context.channelId,
                     state.threadParentTs || context.originalTs
@@ -1687,8 +1837,6 @@ export class StreamingManager {
               }
             });
           }
-          break;
-        }
       }
     });
 

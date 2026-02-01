@@ -103,6 +103,13 @@ function getUpdateMutex(key: string): Mutex {
   return updateMutexes.get(key)!;
 }
 
+function shouldBlockNewMessage(
+  streaming: Pick<StreamingManager, 'isStreaming'>,
+  conversationKey: string
+): boolean {
+  return streaming.isStreaming(conversationKey);
+}
+
 /**
  * Extract the bot user ID from an app mention.
  */
@@ -1207,7 +1214,7 @@ async function handleUserMessage(
   }
 
   // Disallow concurrent turns (ccslack-style single-flight)
-  if (streamingManager.isAnyStreaming()) {
+  if (shouldBlockNewMessage(streamingManager, conversationKey)) {
     await app.client.chat.postMessage({
       channel: channelId,
       thread_ts: postingThreadTs,
@@ -1825,4 +1832,12 @@ async function handleFork(
 }
 
 // Export for testing
-export { app, codex, streamingManager, approvalHandler, updateSourceMessageWithForkLink, restoreForkHereButton };
+export {
+  app,
+  codex,
+  streamingManager,
+  approvalHandler,
+  updateSourceMessageWithForkLink,
+  restoreForkHereButton,
+  shouldBlockNewMessage,
+};
