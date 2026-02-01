@@ -142,7 +142,7 @@ describe('CodexClient Delta Deduplication', () => {
 
     // Content-only dedupe suppresses the second identical delta, even though it's the same method
     expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ itemId: 'item-1', delta: '/' }));
+    expect(handler).toHaveBeenCalledWith({ itemId: 'item-1', delta: '/' });
   });
 });
 
@@ -547,12 +547,10 @@ describe('CodexClient file change notifications', () => {
 
     (client as any).handleNotification(notification);
 
-    expect(listener).toHaveBeenCalledWith(
-      expect.objectContaining({
-        itemId: 'change-1',
-        delta: '+++ b/file.ts\n+new line\n',
-      })
-    );
+    expect(listener).toHaveBeenCalledWith({
+      itemId: 'change-1',
+      delta: '+++ b/file.ts\n+new line\n',
+    });
   });
 });
 
