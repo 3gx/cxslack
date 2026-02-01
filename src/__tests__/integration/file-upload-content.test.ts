@@ -102,4 +102,29 @@ describe('File upload content handling', () => {
     expect(result.files[0].mimetype).toBe('image/jpeg');
     expect(result.files[0].base64).toBe(resizedBuffer.toString('base64'));
   });
+
+  it('treats files with text extensions as text even when MIME is octet-stream', async () => {
+    const files: SlackFile[] = [
+      { id: 'F5', name: 'readme.md', mimetype: 'application/octet-stream', size: 100, created: 5000 },
+      { id: 'F6', name: 'notes.txt', mimetype: 'application/octet-stream', size: 50, created: 6000 },
+      { id: 'F7', name: 'data.json', mimetype: 'application/octet-stream', size: 75, created: 7000 },
+    ];
+
+    const result = await processSlackFiles(files, 'token', {
+      downloadFile: async (file) => Buffer.from(`content of ${file.name}`, 'utf-8'),
+      writeTempFile: async (_buffer, filename, _extension) => `/tmp/${filename}-mock`,
+    });
+
+    // All files should be processed (not skipped as binary)
+    expect(result.files).toHaveLength(3);
+    expect(result.warnings).toHaveLength(0);
+
+    // All should be marked as text
+    expect(result.files[0].isText).toBe(true);
+    expect(result.files[1].isText).toBe(true);
+    expect(result.files[2].isText).toBe(true);
+
+    // Verify content is accessible
+    expect(result.files[0].buffer.toString('utf-8')).toBe('content of readme.md');
+  });
 });

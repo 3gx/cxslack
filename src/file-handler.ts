@@ -117,6 +117,26 @@ export function isBinaryFile(mimetype: string): boolean {
 }
 
 /**
+ * Check if filename has a known text file extension.
+ * Used as fallback when MIME type is incorrect/missing.
+ */
+function isTextExtension(filename: string): boolean {
+  const textExtensions = [
+    '.md', '.markdown', '.txt', '.text',
+    '.json', '.yaml', '.yml',
+    '.js', '.ts', '.jsx', '.tsx',
+    '.py', '.rb', '.sh', '.bash',
+    '.html', '.htm', '.css', '.scss', '.sass', '.less',
+    '.xml', '.svg', '.csv',
+    '.ini', '.cfg', '.conf', '.config',
+    '.env', '.gitignore', '.dockerignore',
+    '.sql', '.graphql', '.gql',
+  ];
+  const ext = filename.toLowerCase().slice(filename.lastIndexOf('.'));
+  return textExtensions.includes(ext);
+}
+
+/**
  * Get file extension from mimetype or filetype.
  */
 function getExtension(mimetype: string, filetype?: string): string {
@@ -283,10 +303,12 @@ export async function processSlackFiles(
     const mimetype = file.mimetype || 'application/octet-stream';
     const extension = getExtension(mimetype, file.filetype);
     const isImage = isImageFile(mimetype);
-    const isText = isTextFile(mimetype);
+    const hasTextExtension = isTextExtension(name);
+    const isText = isTextFile(mimetype) || hasTextExtension;
     const isBinary = isBinaryFile(mimetype);
 
-    if (isBinary) {
+    // Skip binary files, but allow if extension indicates text (MIME fallback)
+    if (isBinary && !hasTextExtension) {
       const typeLabel = mimetype.startsWith('audio/') ? 'audio' :
         mimetype.startsWith('video/') ? 'video' :
         mimetype === 'application/pdf' ? 'PDF' : 'binary';
