@@ -85,13 +85,6 @@ interface PendingSandboxSelection {
 
 export const pendingPolicySelections = new Map<string, PendingPolicySelection>();
 export const pendingSandboxSelections = new Map<string, PendingSandboxSelection>();
-
-export function shouldBlockNewMessage(
-  manager: StreamingManager,
-  conversationKey: string
-): boolean {
-  return manager.isStreaming(conversationKey);
-}
 import { toUserMessage } from './errors.js';
 import { markAborted } from './abort-tracker.js';
 
@@ -1214,7 +1207,7 @@ async function handleUserMessage(
   }
 
   // Disallow concurrent turns (ccslack-style single-flight)
-  if (shouldBlockNewMessage(streamingManager, conversationKey)) {
+  if (streamingManager.isAnyStreaming()) {
     await app.client.chat.postMessage({
       channel: channelId,
       thread_ts: postingThreadTs,
