@@ -840,8 +840,15 @@ export class CodexClient extends EventEmitter {
     if (options.model) {
       params.model = options.model;
     }
-    const result = await this.rpc<{ turnId: string }>('turn/start', params);
-    return result.turnId;
+    const result = await this.rpc<{ turnId?: string; turn?: { id?: string }; id?: string }>(
+      'turn/start',
+      params
+    );
+    const turnId = result.turnId ?? result.turn?.id ?? result.id;
+    if (!turnId) {
+      throw new Error('turn/start response missing turnId');
+    }
+    return turnId;
   }
 
   /**

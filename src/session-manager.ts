@@ -167,9 +167,11 @@ interface SessionStore {
   channels: {
     [channelId: string]: ChannelSession;
   };
+  locks?: Record<string, { lockedAt: number }>;
 }
 
 const SESSIONS_FILE = './sessions.json';
+const TURN_LOCK_TTL_MS = 1000 * 60 * 60; // 1 hour
 
 /**
  * Load sessions from disk. Handles corrupted files gracefully.
@@ -198,6 +200,44 @@ export function loadSessions(): SessionStore {
  */
 export function saveSessions(store: SessionStore): void {
   fs.writeFileSync(SESSIONS_FILE, JSON.stringify(store, null, 2));
+}
+
+function isLockActive(lock?: { lockedAt: number }): boolean {
+  if (!lock?.lockedAt) return false;
+  return Date.now() - lock.lockedAt < TURN_LOCK_TTL_MS;
+}
+
+/**
+ * Acquire a persistent per-conversation lock.
+ * Prevents concurrent turns even across multiple bot processes.
+ */
+export async function acquireTurnLockByKey(conversationKey: string): Promise<boolean> {
+  return await sessionsMutex.runExclusive(() => {
+    const store = loadSessions();
+    const existing = store.locks?.[conversationKey];
+    if (isLockActive(existing)) {
+      return false;
+    }
+    if (!store.locks) {
+      store.locks = {};
+    }
+    store.locks[conversationKey] = { lockedAt: Date.now() };
+    saveSessions(store);
+    return true;
+  });
+}
+
+/**
+ * Release a persistent per-conversation lock.
+ */
+export async function releaseTurnLockByKey(conversationKey: string): Promise<void> {
+  await sessionsMutex.runExclusive(() => {
+    const store = loadSessions();
+    if (store.locks?.[conversationKey]) {
+      delete store.locks[conversationKey];
+      saveSessions(store);
+    }
+  });
 }
 
 /**

@@ -178,6 +178,7 @@ export interface CommandApprovalBlockParams {
   risk: string;
   sandboxed: boolean;
   requestId: number;
+  conversationKey?: string;
 }
 
 export interface FileChangeApprovalBlockParams {
@@ -187,13 +188,14 @@ export interface FileChangeApprovalBlockParams {
   filePath: string;
   reason: string;
   requestId: number;
+  conversationKey?: string;
 }
 
 /**
  * Build blocks for command execution approval request.
  */
 export function buildCommandApprovalBlocks(params: CommandApprovalBlockParams): Block[] {
-  const { parsedCmd, risk, sandboxed, requestId } = params;
+  const { parsedCmd, risk, sandboxed, requestId, conversationKey } = params;
   const blocks: Block[] = [];
 
   // Command preview
@@ -232,14 +234,14 @@ export function buildCommandApprovalBlocks(params: CommandApprovalBlockParams): 
         text: { type: 'plain_text', text: 'Approve' },
         action_id: `approve_${requestId}`,
         style: 'primary',
-        value: JSON.stringify({ requestId, decision: 'accept' }),
+        value: JSON.stringify({ requestId, decision: 'accept', conversationKey }),
       },
       {
         type: 'button',
         text: { type: 'plain_text', text: 'Deny' },
         action_id: `deny_${requestId}`,
         style: 'danger',
-        value: JSON.stringify({ requestId, decision: 'decline' }),
+        value: JSON.stringify({ requestId, decision: 'decline', conversationKey }),
       },
     ],
   });
@@ -251,7 +253,7 @@ export function buildCommandApprovalBlocks(params: CommandApprovalBlockParams): 
  * Build blocks for file change approval request.
  */
 export function buildFileChangeApprovalBlocks(params: FileChangeApprovalBlockParams): Block[] {
-  const { filePath, reason, requestId } = params;
+  const { filePath, reason, requestId, conversationKey } = params;
   const blocks: Block[] = [];
 
   // File change preview
@@ -273,14 +275,14 @@ export function buildFileChangeApprovalBlocks(params: FileChangeApprovalBlockPar
         text: { type: 'plain_text', text: 'Approve' },
         action_id: `approve_${requestId}`,
         style: 'primary',
-        value: JSON.stringify({ requestId, decision: 'accept' }),
+        value: JSON.stringify({ requestId, decision: 'accept', conversationKey }),
       },
       {
         type: 'button',
         text: { type: 'plain_text', text: 'Deny' },
         action_id: `deny_${requestId}`,
         style: 'danger',
-        value: JSON.stringify({ requestId, decision: 'decline' }),
+        value: JSON.stringify({ requestId, decision: 'decline', conversationKey }),
       },
     ],
   });

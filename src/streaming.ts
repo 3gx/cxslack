@@ -41,7 +41,14 @@ import {
   markAborted as markAbortedEmoji,
 } from './emoji-reactions.js';
 import { isAborted, clearAborted } from './abort-tracker.js';
-import { saveSession, saveThreadSession, getThreadSession, getSession, LastUsage } from './session-manager.js';
+import {
+  saveSession,
+  saveThreadSession,
+  getThreadSession,
+  getSession,
+  LastUsage,
+  releaseTurnLockByKey,
+} from './session-manager.js';
 import {
   ActivityThreadManager,
   ActivityEntry,
@@ -351,6 +358,7 @@ export class StreamingManager {
   private contexts = new Map<string, StreamingContext>();
   private states = new Map<string, StreamingState>();
   private turnIdToKey = new Map<string, string>();
+  private pendingLocks = new Set<string>();
   private slack: WebClient;
   private codex: CodexClient;
   private approvalCallback?: (request: ApprovalRequestWithId, context: StreamingContext) => void;
@@ -493,6 +501,8 @@ export class StreamingManager {
     }
     cleanupMutex(conversationKey);
     this.activityManager.clearEntries(conversationKey);
+    this.pendingLocks.delete(conversationKey);
+    void releaseTurnLockByKey(conversationKey);
     const context = this.contexts.get(conversationKey);
     if (context?.turnId) {
       this.turnIdToKey.delete(context.turnId);
@@ -521,10 +531,12 @@ export class StreamingManager {
       cleanupMutex(key);
       // Clear activity entries
       this.activityManager.clearEntries(key);
+      void releaseTurnLockByKey(key);
     }
     this.contexts.clear();
     this.states.clear();
     this.turnIdToKey.clear();
+    this.pendingLocks.clear();
   }
 
   /**
@@ -551,6 +563,32 @@ export class StreamingManager {
    */
   isStreaming(conversationKey: string): boolean {
     return this.states.get(conversationKey)?.isStreaming ?? false;
+  }
+
+  /**
+   * Acquire a per-conversation lock before starting a turn.
+   * Prevents a second message from slipping in before streaming starts.
+   */
+  acquireTurnLock(conversationKey: string): boolean {
+    if (this.pendingLocks.has(conversationKey) || this.isStreaming(conversationKey)) {
+      return false;
+    }
+    this.pendingLocks.add(conversationKey);
+    return true;
+  }
+
+  /**
+   * Release a per-conversation lock.
+   */
+  releaseTurnLock(conversationKey: string): void {
+    this.pendingLocks.delete(conversationKey);
+  }
+
+  /**
+   * Check if a conversation is locked (pending or streaming).
+   */
+  isTurnLocked(conversationKey: string): boolean {
+    return this.pendingLocks.has(conversationKey) || this.isStreaming(conversationKey);
   }
 
   /**
@@ -599,6 +637,9 @@ export class StreamingManager {
     if (!context || !state) {
       return;
     }
+
+    this.pendingLocks.delete(conversationKey);
+    await releaseTurnLockByKey(conversationKey);
 
     if (state.updateTimer) {
       clearInterval(state.updateTimer);
@@ -1098,6 +1139,8 @@ export class StreamingManager {
           if (found.context.turnId) {
             this.turnIdToKey.delete(found.context.turnId);
           }
+          this.pendingLocks.delete(found.key);
+          await releaseTurnLockByKey(found.key);
           this.contexts.delete(found.key);
           this.states.delete(found.key);
           console.log(`[streaming] Cleaned up context and state for key="${found.key}"`);

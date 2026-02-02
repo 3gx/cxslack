@@ -7,9 +7,9 @@
 
 import { App, LogLevel } from '@slack/bolt';
 import { Mutex } from 'async-mutex';
-import { CodexClient, ApprovalRequestWithId, TurnContent, ReasoningEffort, ApprovalPolicy, SandboxMode } from './codex-client.js';
-import { StreamingManager, makeConversationKey, StreamingContext } from './streaming.js';
-import { ApprovalHandler } from './approval-handler.js';
+import { CodexClient, TurnContent, ReasoningEffort, ApprovalPolicy, SandboxMode } from './codex-client.js';
+import { makeConversationKey, type StreamingContext } from './streaming.js';
+import { CodexPool } from './codex-pool.js';
 import {
   handleCommand,
   CommandContext,
@@ -32,6 +32,8 @@ import {
   deleteChannelSession,
   saveModelSettings,
   saveApprovalPolicy,
+  acquireTurnLockByKey,
+  releaseTurnLockByKey,
 } from './session-manager.js';
 import {
   buildActivityBlocks,
@@ -90,9 +92,7 @@ import { markAborted } from './abort-tracker.js';
 
 // Global instances
 let app: App;
-let codex: CodexClient;
-let streamingManager: StreamingManager;
-let approvalHandler: ApprovalHandler;
+let codexPool: CodexPool;
 
 // Mutex management for message updates (fork link/refresh)
 const updateMutexes = new Map<string, Mutex>();
@@ -102,6 +102,15 @@ function getUpdateMutex(key: string): Mutex {
   }
   return updateMutexes.get(key)!;
 }
+
+async function getRuntime(conversationKey: string) {
+  return await codexPool.getRuntime(conversationKey);
+}
+
+function getRuntimeIfExists(conversationKey: string) {
+  return codexPool.getRuntimeIfExists(conversationKey);
+}
+
 
 /**
  * Extract the bot user ID from an app mention.
@@ -147,40 +156,22 @@ export async function startBot(): Promise<void> {
     process.exit(1);
   }
 
-  // Initialize Codex client
-  codex = new CodexClient();
-
-  codex.on('server:started', () => {
-    console.log('Codex App-Server started');
+  // Start a temporary Codex client to verify authentication
+  const authCodex = new CodexClient();
+  authCodex.on('error', (error) => {
+    console.error('Codex auth check error:', error);
   });
-
-  codex.on('server:died', (code) => {
-    console.error(`Codex App-Server died with code ${code}`);
-  });
-
-  codex.on('server:restarting', (attempt) => {
-    console.log(`Codex App-Server restarting (attempt ${attempt})...`);
-  });
-
-  codex.on('server:restart-failed', (error) => {
-    console.error('Codex App-Server restart failed:', error);
-  });
-
-  codex.on('error', (error) => {
-    console.error('Codex error:', error);
-  });
-
-  // Start Codex
-  console.log('Starting Codex App-Server...');
-  await codex.start();
+  console.log('Starting Codex App-Server (auth check)...');
+  await authCodex.start();
 
   // Verify authentication
-  const account = await codex.getAccount();
+  const account = await authCodex.getAccount();
   if (!account) {
     console.error('Codex not authenticated. Please run `codex auth login` first.');
     process.exit(1);
   }
   console.log(`Codex authenticated as ${account.type}${account.email ? ` (${account.email})` : ''}`);
+  await authCodex.stop();
 
   // Initialize Slack app
   app = new App({
@@ -191,19 +182,8 @@ export async function startBot(): Promise<void> {
     logLevel: LogLevel.INFO,
   });
 
-  // Initialize managers
-  streamingManager = new StreamingManager(app.client, codex);
-  approvalHandler = new ApprovalHandler(app.client, codex);
-
-  // Set up approval callback
-  streamingManager.onApprovalRequest(async (request: ApprovalRequestWithId, context: StreamingContext) => {
-    await approvalHandler.handleApprovalRequest(
-      request,
-      context.channelId,
-      context.threadTs,
-      context.userId
-    );
-  });
+  // Initialize per-session Codex pool
+  codexPool = new CodexPool(app.client);
 
   // Register event handlers
   setupEventHandlers();
@@ -218,9 +198,8 @@ export async function startBot(): Promise<void> {
  */
 export async function stopBot(): Promise<void> {
   console.log('Stopping Codex Slack bot...');
-  // Order matters: stop streaming first, then codex, then app
-  streamingManager?.stopAllStreaming();
-  await codex?.stop();
+  // Order matters: stop streaming/codex instances first, then app
+  await codexPool?.stopAll();
   await app?.stop();
   console.log('Codex Slack bot stopped.');
 }
@@ -325,12 +304,13 @@ function setupEventHandlers(): void {
     const metadata = JSON.parse(view.private_metadata || '{}');
     const { conversationKey } = metadata;
     if (conversationKey) {
+      const runtime = getRuntimeIfExists(conversationKey);
       // IMMEDIATELY clear the timer (don't wait for turn:completed)
-      streamingManager.clearTimer(conversationKey);
+      runtime?.streaming.clearTimer(conversationKey);
       markAborted(conversationKey);
       // Queue abort - will execute immediately if turnId available,
       // or wait for turn:started/context:turnId if not
-      streamingManager.queueAbort(conversationKey);
+      runtime?.streaming.queueAbort(conversationKey);
     }
   });
 
@@ -427,13 +407,36 @@ function setupEventHandlers(): void {
     try {
       if (actionId.startsWith('approve_') || actionId.startsWith('deny_')) {
         // Approval action
-        const requestId = parseInt(actionId.split('_')[1], 10);
         const decision = actionId.startsWith('approve_') ? 'accept' : 'decline';
-        await approvalHandler.handleApprovalDecision(requestId, decision as 'accept' | 'decline');
+        const valueStr = 'value' in action ? (action.value || '') : '';
+        let requestId = parseInt(actionId.split('_')[1], 10);
+        let conversationKey: string | undefined;
+        if (valueStr) {
+          try {
+            const parsed = JSON.parse(valueStr) as { requestId?: number; conversationKey?: string };
+            if (parsed.requestId) {
+              requestId = parsed.requestId;
+            }
+            conversationKey = parsed.conversationKey;
+          } catch {
+            // Ignore parse errors, fallback to action_id
+          }
+        }
+
+        const runtime = conversationKey
+          ? getRuntimeIfExists(conversationKey)
+          : codexPool.findRuntimeByApprovalRequestId(requestId);
+
+        if (!runtime) {
+          console.warn(`No runtime found for approval request ${requestId}`);
+          return;
+        }
+        await runtime.approval.handleApprovalDecision(requestId, decision as 'accept' | 'decline');
       } else if (actionId.startsWith('abort_')) {
         // Abort action - open confirmation modal
         const conversationKey = actionId.replace('abort_', '');
-        const context = streamingManager.getContext(conversationKey);
+        const runtime = getRuntimeIfExists(conversationKey);
+        const context = runtime?.streaming.getContext(conversationKey);
         if (context) {
           const triggerBody = body as { trigger_id?: string };
           if (triggerBody.trigger_id) {
@@ -724,7 +727,7 @@ function setupEventHandlers(): void {
 
     // Update active context for status display (applies next turn)
     const conversationKey = makeConversationKey(channelId, threadTs);
-    const context = streamingManager.getContext(conversationKey);
+    const context = getRuntimeIfExists(conversationKey)?.streaming.getContext(conversationKey);
     if (context) {
       context.approvalPolicy = newPolicy;
     }
@@ -778,14 +781,18 @@ function setupEventHandlers(): void {
       return;
     }
 
-    if (streamingManager.isAnyStreaming()) {
+    const pending = pendingSandboxSelections.get(messageTs);
+    const threadTs = pending?.threadTs ?? (body as { message?: { thread_ts?: string } }).message?.thread_ts ?? messageTs;
+    const conversationKey = makeConversationKey(channelId, threadTs);
+    const runtime = await getRuntime(conversationKey);
+
+    if (runtime.streaming.isStreaming(conversationKey)) {
       await client.chat.update({
         channel: channelId,
         ts: messageTs,
         text: 'Cannot change sandbox while processing',
         blocks: buildErrorBlocks('Cannot change sandbox while a turn is running. Please wait or abort.'),
       });
-      const pending = pendingSandboxSelections.get(messageTs);
       if (pending) {
         await removeProcessingEmoji(client, pending.channelId, pending.originalTs);
         pendingSandboxSelections.delete(messageTs);
@@ -793,10 +800,10 @@ function setupEventHandlers(): void {
       return;
     }
 
-    const currentMode = codex.getSandboxMode();
+    const currentMode = runtime.codex.getSandboxMode();
 
     try {
-      await codex.restartWithSandbox(newMode);
+      await runtime.codex.restartWithSandbox(newMode);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       await client.chat.update({
@@ -805,7 +812,6 @@ function setupEventHandlers(): void {
         text: `Failed to update sandbox: ${message}`,
         blocks: buildErrorBlocks(`Failed to update sandbox: ${message}`),
       });
-      const pending = pendingSandboxSelections.get(messageTs);
       if (pending) {
         await removeProcessingEmoji(client, pending.channelId, pending.originalTs);
         pendingSandboxSelections.delete(messageTs);
@@ -820,7 +826,6 @@ function setupEventHandlers(): void {
       blocks: buildSandboxStatusBlocks({ currentMode, newMode }),
     });
 
-    const pending = pendingSandboxSelections.get(messageTs);
     if (pending) {
       await removeProcessingEmoji(client, pending.channelId, pending.originalTs);
       pendingSandboxSelections.delete(messageTs);
@@ -870,7 +875,8 @@ function setupEventHandlers(): void {
     console.log(`[model] Model button clicked: ${modelValue} for channel: ${channelId}, thread: ${threadTs}`);
 
     const conversationKey = makeConversationKey(channelId, threadTs);
-    if (streamingManager.isStreaming(conversationKey)) {
+    const runtime = getRuntimeIfExists(conversationKey);
+    if (runtime?.streaming.isStreaming(conversationKey)) {
       await client.chat.update({
         channel: channelId,
         ts: messageTs,
@@ -941,7 +947,8 @@ function setupEventHandlers(): void {
     }
 
     const conversationKey = makeConversationKey(channelId, threadTs);
-    if (streamingManager.isStreaming(conversationKey)) {
+    const runtime = getRuntimeIfExists(conversationKey);
+    if (runtime?.streaming.isStreaming(conversationKey)) {
       await client.chat.update({
         channel: channelId,
         ts: messageTs,
@@ -1040,11 +1047,13 @@ async function handleUserMessage(
   // If user is already in a thread, continue in that thread.
   const postingThreadTs = threadTs ?? messageTs;
   const conversationKey = makeConversationKey(channelId, postingThreadTs);
+  const runtime = await getRuntime(conversationKey);
+  const { codex, streaming } = runtime;
 
   const parsedCommand = parseCommand(text);
 
   // Prevent /resume while a turn is streaming to avoid state corruption
-  if (parsedCommand?.command === 'resume' && streamingManager.isStreaming(conversationKey)) {
+  if (parsedCommand?.command === 'resume' && streaming.isStreaming(conversationKey)) {
     await app.client.chat.postMessage({
       channel: channelId,
       thread_ts: postingThreadTs,
@@ -1068,7 +1077,7 @@ async function handleUserMessage(
       const newMode = commandResult.sandboxModeChange;
       const currentMode = codex.getSandboxMode();
 
-      if (streamingManager.isAnyStreaming()) {
+      if (streaming.isStreaming(conversationKey)) {
         await app.client.chat.postMessage({
           channel: channelId,
           thread_ts: postingThreadTs,
@@ -1174,7 +1183,7 @@ async function handleUserMessage(
     if (parsedCommand?.command === 'update-rate') {
       const session = getThreadSession(channelId, postingThreadTs) ?? getSession(channelId);
       const newRate = session?.updateRateSeconds ?? 3;
-      streamingManager.updateRate(conversationKey, newRate * 1000);
+      streaming.updateRate(conversationKey, newRate * 1000);
     }
     return;
   }
@@ -1206,8 +1215,8 @@ async function handleUserMessage(
     return; // Don't process the message
   }
 
-  // Disallow concurrent turns (ccslack-style single-flight)
-  if (streamingManager.isAnyStreaming()) {
+  // Disallow concurrent turns (per-session single-flight)
+  if (!(await acquireTurnLockByKey(conversationKey))) {
     await app.client.chat.postMessage({
       channel: channelId,
       thread_ts: postingThreadTs,
@@ -1219,147 +1228,157 @@ async function handleUserMessage(
     return;
   }
 
-  // Regular message - send to Codex
-  // Use postingThreadTs for all session lookups since that's our thread key
-  const workingDir = getEffectiveWorkingDir(channelId, postingThreadTs);
-  const approvalPolicy = getEffectiveApprovalPolicy(channelId, postingThreadTs);
-  let threadId = getEffectiveThreadId(channelId, postingThreadTs);
+  let streamingStarted = false;
 
-  // Get session info - always use thread session since all conversations are in threads
-  const session = getThreadSession(channelId, postingThreadTs) ?? getSession(channelId);
-  console.log(`[message] Session lookup: channel=${channelId}, slackThread=${postingThreadTs}, codexThread=${threadId}, model=${session?.model}, reasoning=${session?.reasoningEffort}`);
+  try {
+    // Regular message - send to Codex
+    // Use postingThreadTs for all session lookups since that's our thread key
+    const workingDir = getEffectiveWorkingDir(channelId, postingThreadTs);
+    const approvalPolicy = getEffectiveApprovalPolicy(channelId, postingThreadTs);
+    let threadId = getEffectiveThreadId(channelId, postingThreadTs);
 
-  // Start or resume thread
-  if (!threadId) {
-    console.log(`[message] No existing Codex thread, will create new one`);
-    // Check if this is a Slack thread that needs forking (only for existing threads, not new anchors)
-    if (threadTs) {
-      const result = await getOrCreateThreadSession(channelId, postingThreadTs);
-      if (result.isNewFork && result.session.forkedFrom) {
-        // Fork the Codex thread at the specified turn
-        // forkThreadAtTurn now gets actual turn count from Codex (source of truth)
-        const forkTurnIndex = result.session.forkedAtTurnIndex ?? 0;
-        const forkedThread = await codex.forkThreadAtTurn(
-          result.session.forkedFrom,
-          forkTurnIndex
-        );
-        threadId = forkedThread.id;
-        await saveThreadSession(channelId, postingThreadTs, { threadId });
+    // Get session info - always use thread session since all conversations are in threads
+    const session = getThreadSession(channelId, postingThreadTs) ?? getSession(channelId);
+    console.log(`[message] Session lookup: channel=${channelId}, slackThread=${postingThreadTs}, codexThread=${threadId}, model=${session?.model}, reasoning=${session?.reasoningEffort}`);
+
+    // Start or resume thread
+    if (!threadId) {
+      console.log(`[message] No existing Codex thread, will create new one`);
+      // Check if this is a Slack thread that needs forking (only for existing threads, not new anchors)
+      if (threadTs) {
+        const result = await getOrCreateThreadSession(channelId, postingThreadTs);
+        if (result.isNewFork && result.session.forkedFrom) {
+          // Fork the Codex thread at the specified turn
+          // forkThreadAtTurn now gets actual turn count from Codex (source of truth)
+          const forkTurnIndex = result.session.forkedAtTurnIndex ?? 0;
+          const forkedThread = await codex.forkThreadAtTurn(
+            result.session.forkedFrom,
+            forkTurnIndex
+          );
+          threadId = forkedThread.id;
+          await saveThreadSession(channelId, postingThreadTs, { threadId });
+        } else {
+          // Start new thread
+          const newThread = await codex.startThread(workingDir);
+          threadId = newThread.id;
+          await saveThreadSession(channelId, postingThreadTs, { threadId });
+        }
       } else {
-        // Start new thread
+        // New conversation from main channel mention - start new Codex thread
+        // Save to BOTH channel session (for subsequent main channel mentions)
+        // and thread session (for this specific thread anchor)
         const newThread = await codex.startThread(workingDir);
         threadId = newThread.id;
+        await saveSession(channelId, { threadId });
         await saveThreadSession(channelId, postingThreadTs, { threadId });
       }
     } else {
-      // New conversation from main channel mention - start new Codex thread
-      // Save to BOTH channel session (for subsequent main channel mentions)
-      // and thread session (for this specific thread anchor)
-      const newThread = await codex.startThread(workingDir);
-      threadId = newThread.id;
-      await saveSession(channelId, { threadId });
+      // Resume existing thread
+      console.log(`[message] Resuming existing Codex thread: ${threadId}`);
+      await codex.resumeThread(threadId);
+      // Ensure this thread anchor also has the threadId saved
       await saveThreadSession(channelId, postingThreadTs, { threadId });
     }
-  } else {
-    // Resume existing thread
-    console.log(`[message] Resuming existing Codex thread: ${threadId}`);
-    await codex.resumeThread(threadId);
-    // Ensure this thread anchor also has the threadId saved
-    await saveThreadSession(channelId, postingThreadTs, { threadId });
-  }
 
-  // Use defaults when model/reasoning not explicitly set
-  const effectiveModel = session?.model || DEFAULT_MODEL;
-  const effectiveReasoning = session?.reasoningEffort || DEFAULT_REASONING;
-  const effectiveSandbox = codex.getSandboxMode();
+    // Use defaults when model/reasoning not explicitly set
+    const effectiveModel = session?.model || DEFAULT_MODEL;
+    const effectiveReasoning = session?.reasoningEffort || DEFAULT_REASONING;
+    const effectiveSandbox = codex.getSandboxMode();
 
-  // Post initial "processing" message IN THE THREAD using activity format
-  const initialResult = await app.client.chat.postMessage({
-    channel: channelId,
-    thread_ts: postingThreadTs, // Always post in thread!
-    blocks: buildActivityBlocks({
-      activityText: ':gear: Starting...',
-      status: 'running',
-      conversationKey,
-      elapsedMs: 0,
+    // Post initial "processing" message IN THE THREAD using activity format
+    const initialResult = await app.client.chat.postMessage({
+      channel: channelId,
+      thread_ts: postingThreadTs, // Always post in thread!
+      blocks: buildActivityBlocks({
+        activityText: ':gear: Starting...',
+        status: 'running',
+        conversationKey,
+        elapsedMs: 0,
+        approvalPolicy,
+        model: effectiveModel,
+        reasoningEffort: effectiveReasoning,
+        sandboxMode: effectiveSandbox,
+        sessionId: threadId,
+        spinner: '\u25D0',
+      }),
+      text: 'Starting...',
+    });
+
+    if (!initialResult.ts) {
+      throw new Error('Failed to post message');
+    }
+
+    // Start streaming context
+    const streamingContext: StreamingContext = {
+      channelId,
+      threadTs: postingThreadTs, // Track the thread we're posting to
+      messageTs: initialResult.ts,
+      originalTs: messageTs, // User's original message for emoji reactions
+      userId, // Track user for DM notifications
+      query: text,
+      threadId,
+      turnId: '', // Will be set when turn starts
       approvalPolicy,
+      updateRateMs: (session?.updateRateSeconds ?? 3) * 1000,
       model: effectiveModel,
       reasoningEffort: effectiveReasoning,
       sandboxMode: effectiveSandbox,
-      sessionId: threadId,
-      spinner: '\u25D0',
-    }),
-    text: 'Starting...',
-  });
+      startTime: Date.now(),
+    };
 
-  if (!initialResult.ts) {
-    throw new Error('Failed to post message');
-  }
+    streaming.startStreaming(streamingContext);
+    streamingStarted = true;
 
-  // Start streaming context
-  const streamingContext: StreamingContext = {
-    channelId,
-    threadTs: postingThreadTs, // Track the thread we're posting to
-    messageTs: initialResult.ts,
-    originalTs: messageTs, // User's original message for emoji reactions
-    userId, // Track user for DM notifications
-    query: text,
-    threadId,
-    turnId: '', // Will be set when turn starts
-    approvalPolicy,
-    updateRateMs: (session?.updateRateSeconds ?? 3) * 1000,
-    model: effectiveModel,
-    reasoningEffort: effectiveReasoning,
-    sandboxMode: effectiveSandbox,
-    startTime: Date.now(),
-  };
+    // Build turn input (files first, then text)
+    let input: TurnContent[] = [{ type: 'text', text }];
+    if (files && files.length > 0) {
+      try {
+        const { files: processedFiles, warnings } = await processSlackFiles(
+          files,
+          process.env.SLACK_BOT_TOKEN!
+        );
+        input = buildMessageContent(text, processedFiles, warnings);
+      } catch (error) {
+        console.error('[FileUpload] Error processing files:', error);
+        // Fallback to plain text input
+        input = [{ type: 'text', text }];
+      }
+    }
 
-  streamingManager.startStreaming(streamingContext);
-
-  // Build turn input (files first, then text)
-  let input: TurnContent[] = [{ type: 'text', text }];
-  if (files && files.length > 0) {
+    // Start the turn
+    let turnId: string;
     try {
-      const { files: processedFiles, warnings } = await processSlackFiles(
-        files,
-        process.env.SLACK_BOT_TOKEN!
+      turnId = await codex.startTurn(threadId, input, {
+        approvalPolicy,
+        reasoningEffort: effectiveReasoning,
+        model: effectiveModel,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to start turn';
+      console.error('[message] startTurn failed:', err);
+      await streaming.failTurnStart(
+        conversationKey,
+        `Start failed: ${message}`
       );
-      input = buildMessageContent(text, processedFiles, warnings);
-    } catch (error) {
-      console.error('[FileUpload] Error processing files:', error);
-      // Fallback to plain text input
-      input = [{ type: 'text', text }];
+      return;
+    }
+
+    // Update context with turn ID (and register for turnId routing)
+    streaming.registerTurnId(conversationKey, turnId);
+
+    // Record turn for fork tracking
+    const turnIndex = (session as { turns?: unknown[] })?.turns?.length ?? 0;
+    await recordTurn(channelId, postingThreadTs, {
+      turnId,
+      turnIndex,
+      slackTs: initialResult.ts,
+    });
+  } finally {
+    if (!streamingStarted) {
+      // Release persistent lock if we failed before streaming started
+      await releaseTurnLockByKey(conversationKey);
     }
   }
-
-  // Start the turn
-  let turnId: string;
-  try {
-    turnId = await codex.startTurn(threadId, input, {
-      approvalPolicy,
-      reasoningEffort: effectiveReasoning,
-      model: effectiveModel,
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Failed to start turn';
-    console.error('[message] startTurn failed:', err);
-    await streamingManager.failTurnStart(
-      conversationKey,
-      `Start failed: ${message}`
-    );
-    return;
-  }
-
-  // Update context with turn ID (and register for turnId routing)
-  streamingManager.registerTurnId(conversationKey, turnId);
-
-  // Record turn for fork tracking
-  const turnIndex = (session as { turns?: unknown[] })?.turns?.length ?? 0;
-  await recordTurn(channelId, postingThreadTs, {
-    turnId,
-    turnIndex,
-    slackTs: initialResult.ts,
-  });
 }
 
 /**
@@ -1397,7 +1416,8 @@ async function createForkChannel(params: CreateForkChannelParams): Promise<Creat
   }
 
   // Query Codex for actual turn index (source of truth)
-  const turnIndex = await codex.findTurnIndex(sourceThreadId, turnId);
+  const sourceRuntime = await getRuntime(conversationKey);
+  const turnIndex = await sourceRuntime.codex.findTurnIndex(sourceThreadId, turnId);
   if (turnIndex < 0) {
     throw new Error('Cannot fork: Turn not found in Codex thread.');
   }
@@ -1478,7 +1498,7 @@ async function createForkChannel(params: CreateForkChannelParams): Promise<Creat
 
   // 3. Fork the Codex session at the specified turn (using fork + rollback)
   // ROBUST: forkThreadAtTurn gets actual turn count from Codex (source of truth)
-  const forkedThread = await codex.forkThreadAtTurn(sourceThreadId, turnIndex);
+  const forkedThread = await sourceRuntime.codex.forkThreadAtTurn(sourceThreadId, turnIndex);
 
   // 4. Save the forked session for the new channel
   await saveSession(newChannelId, {
@@ -1805,7 +1825,8 @@ async function handleFork(
 
   // Fork the Codex thread at the specified turn (using fork + rollback)
   // ROBUST: forkThreadAtTurn gets actual turn count from Codex (source of truth)
-  const forkedThread = await codex.forkThreadAtTurn(sourceThreadId, turnIndex);
+  const sourceRuntime = await getRuntime(sourceConversationKey);
+  const forkedThread = await sourceRuntime.codex.forkThreadAtTurn(sourceThreadId, turnIndex);
 
   // Create new thread in Slack
   const forkResult = await app.client.chat.postMessage({
@@ -1825,4 +1846,4 @@ async function handleFork(
 }
 
 // Export for testing
-export { app, codex, streamingManager, approvalHandler, updateSourceMessageWithForkLink, restoreForkHereButton };
+export { app, codexPool, updateSourceMessageWithForkLink, restoreForkHereButton };

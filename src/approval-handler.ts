@@ -48,6 +48,8 @@ interface PendingApproval {
   messageTs: string;
   /** User ID who should be notified */
   userId?: string;
+  /** Conversation key for routing decisions */
+  conversationKey: string;
   /** Timestamp when approval was requested */
   createdAt: number;
 }
@@ -177,6 +179,7 @@ export class ApprovalHandler {
     userId?: string
   ): Promise<void> {
     const requestId = request.rpcId ?? this.generateRequestId();
+    const conversationKey = makeConversationKey(channelId, threadTs);
 
     // Build blocks based on request type
     let blocks: Block[];
@@ -192,6 +195,7 @@ export class ApprovalHandler {
         risk: cmdRequest.params.risk,
         sandboxed: cmdRequest.params.sandboxed,
         requestId,
+        conversationKey,
       });
       previewText = `Command: ${cmdRequest.params.parsedCmd}`;
       subtitle = 'Tool approval needed';
@@ -204,6 +208,7 @@ export class ApprovalHandler {
         filePath: fileRequest.params.filePath,
         reason: fileRequest.params.reason,
         requestId,
+        conversationKey,
       });
       previewText = `File: ${fileRequest.params.filePath}`;
       subtitle = 'Tool approval needed';
@@ -229,6 +234,7 @@ export class ApprovalHandler {
       threadTs,
       messageTs: result.ts,
       userId,
+      conversationKey,
       createdAt: Date.now(),
     });
 
@@ -236,7 +242,6 @@ export class ApprovalHandler {
 
     // Send DM notification if userId is provided
     if (userId) {
-      const conversationKey = makeConversationKey(channelId, threadTs);
       await sendDmNotification({
         client: this.slack,
         userId,
@@ -286,6 +291,10 @@ export class ApprovalHandler {
     this.pendingApprovals.delete(requestId);
     this.clearApprovalReminder(requestId);
     return true;
+  }
+
+  hasPendingApproval(requestId: number): boolean {
+    return this.pendingApprovals.has(requestId);
   }
 
   /**

@@ -17,6 +17,8 @@ import {
   getEffectiveApprovalPolicy,
   getEffectiveThreadId,
   DEFAULT_APPROVAL_POLICY,
+  acquireTurnLockByKey,
+  releaseTurnLockByKey,
 } from '../../session-manager.js';
 
 // Mock fs module
@@ -85,6 +87,36 @@ describe('Session Manager', () => {
       expect(store).toEqual({ channels: {} });
       expect(consoleSpy).toHaveBeenCalled();
       consoleSpy.mockRestore();
+    });
+  });
+
+  describe('turn locks', () => {
+    it('acquires and releases per-conversation lock', async () => {
+      let store: any = { channels: {} };
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockImplementation(() => JSON.stringify(store));
+      mockFs.writeFileSync.mockImplementation((_path, data) => {
+        store = JSON.parse(String(data));
+      });
+
+      const key = 'C1:T1';
+      expect(await acquireTurnLockByKey(key)).toBe(true);
+      expect(await acquireTurnLockByKey(key)).toBe(false);
+
+      await releaseTurnLockByKey(key);
+      expect(await acquireTurnLockByKey(key)).toBe(true);
+    });
+
+    it('allows different conversations to lock independently', async () => {
+      let store: any = { channels: {} };
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockImplementation(() => JSON.stringify(store));
+      mockFs.writeFileSync.mockImplementation((_path, data) => {
+        store = JSON.parse(String(data));
+      });
+
+      expect(await acquireTurnLockByKey('C1:T1')).toBe(true);
+      expect(await acquireTurnLockByKey('C1:T2')).toBe(true);
     });
   });
 
