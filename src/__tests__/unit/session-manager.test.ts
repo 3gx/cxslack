@@ -19,6 +19,10 @@ import {
   DEFAULT_APPROVAL_POLICY,
   acquireTurnLockByKey,
   releaseTurnLockByKey,
+  busyConversations,
+  isConversationBusy,
+  markConversationBusy,
+  markConversationIdle,
 } from '../../session-manager.js';
 
 // Mock fs module
@@ -117,6 +121,80 @@ describe('Session Manager', () => {
 
       expect(await acquireTurnLockByKey('C1:T1')).toBe(true);
       expect(await acquireTurnLockByKey('C1:T2')).toBe(true);
+    });
+  });
+
+  describe('busy conversations (in-memory)', () => {
+    beforeEach(() => {
+      // Clear busy set before each test
+      busyConversations.clear();
+    });
+
+    it('blocks concurrent queries in same session', () => {
+      const key = 'C1:T1';
+
+      // Initially not busy
+      expect(isConversationBusy(key)).toBe(false);
+
+      // Mark as busy
+      markConversationBusy(key);
+      expect(isConversationBusy(key)).toBe(true);
+
+      // Second check should still be busy (blocking concurrent)
+      expect(isConversationBusy(key)).toBe(true);
+    });
+
+    it('allows parallel sessions to run independently', () => {
+      const session1 = 'C1:T1';
+      const session2 = 'C1:T2';
+      const session3 = 'C2:T1';
+
+      // Mark session1 as busy
+      markConversationBusy(session1);
+      expect(isConversationBusy(session1)).toBe(true);
+
+      // Other sessions should NOT be busy
+      expect(isConversationBusy(session2)).toBe(false);
+      expect(isConversationBusy(session3)).toBe(false);
+
+      // Mark session2 as busy
+      markConversationBusy(session2);
+      expect(isConversationBusy(session1)).toBe(true);
+      expect(isConversationBusy(session2)).toBe(true);
+      expect(isConversationBusy(session3)).toBe(false);
+    });
+
+    it('releases lock when conversation becomes idle', async () => {
+      let store: any = { channels: {} };
+      mockFs.existsSync.mockReturnValue(true);
+      mockFs.readFileSync.mockImplementation(() => JSON.stringify(store));
+      mockFs.writeFileSync.mockImplementation((_path, data) => {
+        store = JSON.parse(String(data));
+      });
+
+      const key = 'C1:T1';
+
+      // Mark as busy
+      markConversationBusy(key);
+      expect(isConversationBusy(key)).toBe(true);
+
+      // Mark as idle
+      await markConversationIdle(key);
+      expect(isConversationBusy(key)).toBe(false);
+
+      // Can mark as busy again
+      markConversationBusy(key);
+      expect(isConversationBusy(key)).toBe(true);
+    });
+
+    it('is synchronous for immediate response', () => {
+      const key = 'C1:T1';
+
+      // These operations should be synchronous (no await needed)
+      markConversationBusy(key);
+      const isBusy = isConversationBusy(key);
+
+      expect(isBusy).toBe(true);
     });
   });
 

@@ -32,8 +32,9 @@ import {
   deleteChannelSession,
   saveModelSettings,
   saveApprovalPolicy,
-  acquireTurnLockByKey,
-  releaseTurnLockByKey,
+  isConversationBusy,
+  markConversationBusy,
+  markConversationIdle,
 } from './session-manager.js';
 import {
   buildActivityBlocks,
@@ -1047,6 +1048,22 @@ async function handleUserMessage(
   // If user is already in a thread, continue in that thread.
   const postingThreadTs = threadTs ?? messageTs;
   const conversationKey = makeConversationKey(channelId, postingThreadTs);
+
+  // CRITICAL: Check and mark busy IMMEDIATELY, BEFORE any async operations
+  // This prevents race conditions where two messages both pass the check
+  if (isConversationBusy(conversationKey)) {
+    await app.client.chat.postMessage({
+      channel: channelId,
+      thread_ts: postingThreadTs,
+      blocks: buildErrorBlocks(
+        'Another request is already running. Please wait for it to finish or click Abort on the active status panel.'
+      ),
+      text: 'Another request is already running. Please wait or abort.',
+    });
+    return;
+  }
+  markConversationBusy(conversationKey);
+
   const runtime = await getRuntime(conversationKey);
   const { codex, streaming } = runtime;
 
@@ -1215,19 +1232,6 @@ async function handleUserMessage(
     return; // Don't process the message
   }
 
-  // Disallow concurrent turns (per-session single-flight)
-  if (!(await acquireTurnLockByKey(conversationKey))) {
-    await app.client.chat.postMessage({
-      channel: channelId,
-      thread_ts: postingThreadTs,
-      blocks: buildErrorBlocks(
-        'Another request is already running. Please wait for it to finish or click Abort on the active status panel.'
-      ),
-      text: 'Another request is already running. Please wait or abort.',
-    });
-    return;
-  }
-
   let streamingStarted = false;
 
   try {
@@ -1375,8 +1379,8 @@ async function handleUserMessage(
     });
   } finally {
     if (!streamingStarted) {
-      // Release persistent lock if we failed before streaming started
-      await releaseTurnLockByKey(conversationKey);
+      // Release locks if we failed before streaming started
+      await markConversationIdle(conversationKey);
     }
   }
 }

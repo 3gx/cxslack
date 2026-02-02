@@ -20,6 +20,35 @@ import type { ApprovalPolicy, ReasoningEffort } from './codex-client.js';
 const sessionsMutex = new Mutex();
 
 /**
+ * In-memory busy tracking for immediate concurrent query blocking.
+ * Exported for testing.
+ */
+export const busyConversations = new Set<string>();
+
+/**
+ * Check if a conversation is busy (has an active query).
+ */
+export function isConversationBusy(conversationKey: string): boolean {
+  return busyConversations.has(conversationKey);
+}
+
+/**
+ * Mark a conversation as busy (starting a query).
+ */
+export function markConversationBusy(conversationKey: string): void {
+  busyConversations.add(conversationKey);
+}
+
+/**
+ * Mark a conversation as idle (query completed/failed).
+ * Also releases the persistent file lock.
+ */
+export async function markConversationIdle(conversationKey: string): Promise<void> {
+  busyConversations.delete(conversationKey);
+  await releaseTurnLockByKey(conversationKey);
+}
+
+/**
  * Default approval policy.
  */
 export const DEFAULT_APPROVAL_POLICY: ApprovalPolicy = 'never';

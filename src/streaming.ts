@@ -47,7 +47,7 @@ import {
   getThreadSession,
   getSession,
   LastUsage,
-  releaseTurnLockByKey,
+  markConversationIdle,
 } from './session-manager.js';
 import {
   ActivityThreadManager,
@@ -502,7 +502,7 @@ export class StreamingManager {
     cleanupMutex(conversationKey);
     this.activityManager.clearEntries(conversationKey);
     this.pendingLocks.delete(conversationKey);
-    void releaseTurnLockByKey(conversationKey);
+    void markConversationIdle(conversationKey);
     const context = this.contexts.get(conversationKey);
     if (context?.turnId) {
       this.turnIdToKey.delete(context.turnId);
@@ -531,7 +531,7 @@ export class StreamingManager {
       cleanupMutex(key);
       // Clear activity entries
       this.activityManager.clearEntries(key);
-      void releaseTurnLockByKey(key);
+      void markConversationIdle(key);
     }
     this.contexts.clear();
     this.states.clear();
@@ -639,7 +639,7 @@ export class StreamingManager {
     }
 
     this.pendingLocks.delete(conversationKey);
-    await releaseTurnLockByKey(conversationKey);
+    await markConversationIdle(conversationKey);
 
     if (state.updateTimer) {
       clearInterval(state.updateTimer);
@@ -1140,7 +1140,7 @@ export class StreamingManager {
             this.turnIdToKey.delete(found.context.turnId);
           }
           this.pendingLocks.delete(found.key);
-          await releaseTurnLockByKey(found.key);
+          await markConversationIdle(found.key);
           this.contexts.delete(found.key);
           this.states.delete(found.key);
           console.log(`[streaming] Cleaned up context and state for key="${found.key}"`);
