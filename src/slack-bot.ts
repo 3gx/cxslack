@@ -1049,9 +1049,17 @@ async function handleUserMessage(
   const postingThreadTs = threadTs ?? messageTs;
   const conversationKey = makeConversationKey(channelId, postingThreadTs);
 
+  // Session-scoped busy key (NOT message-scoped like conversationKey)
+  // - Main channel messages: threadTs is undefined → busyKey = channelId (all share one session)
+  // - Thread replies: threadTs is defined → busyKey = channelId:threadTs (each thread is separate)
+  const busyKey = makeConversationKey(channelId, threadTs);
+
+  // DEBUG: Log busy check
+  console.log(`[BusyCheck] busyKey="${busyKey}" conversationKey="${conversationKey}" threadTs="${threadTs}" messageTs="${messageTs}" isBusy=${isConversationBusy(busyKey)}`);
+
   // CRITICAL: Check and mark busy IMMEDIATELY, BEFORE any async operations
   // This prevents race conditions where two messages both pass the check
-  if (isConversationBusy(conversationKey)) {
+  if (isConversationBusy(busyKey)) {
     await app.client.chat.postMessage({
       channel: channelId,
       thread_ts: postingThreadTs,
@@ -1062,7 +1070,8 @@ async function handleUserMessage(
     });
     return;
   }
-  markConversationBusy(conversationKey);
+  markConversationBusy(busyKey);
+  console.log(`[BusyCheck] MARKED BUSY: busyKey="${busyKey}"`);
 
   const runtime = await getRuntime(conversationKey);
   const { codex, streaming } = runtime;
@@ -1328,6 +1337,7 @@ async function handleUserMessage(
       reasoningEffort: effectiveReasoning,
       sandboxMode: effectiveSandbox,
       startTime: Date.now(),
+      busyKey, // Session-scoped key for concurrent query blocking
     };
 
     streaming.startStreaming(streamingContext);
@@ -1380,7 +1390,7 @@ async function handleUserMessage(
   } finally {
     if (!streamingStarted) {
       // Release locks if we failed before streaming started
-      await markConversationIdle(conversationKey);
+      await markConversationIdle(busyKey);
     }
   }
 }

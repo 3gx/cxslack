@@ -44,6 +44,7 @@ export function markConversationBusy(conversationKey: string): void {
  * Also releases the persistent file lock.
  */
 export async function markConversationIdle(conversationKey: string): Promise<void> {
+  console.log(`[BusyCheck] MARKED IDLE: key="${conversationKey}"`);
   busyConversations.delete(conversationKey);
   await releaseTurnLockByKey(conversationKey);
 }

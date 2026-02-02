@@ -220,6 +220,8 @@ export interface StreamingContext {
   model?: string;
   /** Turn start time (for duration calculation) */
   startTime: number;
+  /** Key for busy conversation tracking (session-scoped, not message-scoped) */
+  busyKey: string;
 }
 
 /**
@@ -502,8 +504,10 @@ export class StreamingManager {
     cleanupMutex(conversationKey);
     this.activityManager.clearEntries(conversationKey);
     this.pendingLocks.delete(conversationKey);
-    void markConversationIdle(conversationKey);
     const context = this.contexts.get(conversationKey);
+    if (context?.busyKey) {
+      void markConversationIdle(context.busyKey);
+    }
     if (context?.turnId) {
       this.turnIdToKey.delete(context.turnId);
     }
@@ -531,7 +535,11 @@ export class StreamingManager {
       cleanupMutex(key);
       // Clear activity entries
       this.activityManager.clearEntries(key);
-      void markConversationIdle(key);
+      // Mark busy key idle (use context's busyKey for session-scoped tracking)
+      const context = this.contexts.get(key);
+      if (context?.busyKey) {
+        void markConversationIdle(context.busyKey);
+      }
     }
     this.contexts.clear();
     this.states.clear();
@@ -639,7 +647,9 @@ export class StreamingManager {
     }
 
     this.pendingLocks.delete(conversationKey);
-    await markConversationIdle(conversationKey);
+    if (context.busyKey) {
+      await markConversationIdle(context.busyKey);
+    }
 
     if (state.updateTimer) {
       clearInterval(state.updateTimer);
@@ -1140,7 +1150,9 @@ export class StreamingManager {
             this.turnIdToKey.delete(found.context.turnId);
           }
           this.pendingLocks.delete(found.key);
-          await markConversationIdle(found.key);
+          if (found.context.busyKey) {
+            await markConversationIdle(found.context.busyKey);
+          }
           this.contexts.delete(found.key);
           this.states.delete(found.key);
           console.log(`[streaming] Cleaned up context and state for key="${found.key}"`);
