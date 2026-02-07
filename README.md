@@ -1,5 +1,7 @@
 # CXSlack - OpenAI Codex Slack Bot
 
+[**DEPRECATED** in favour of [C.A.I.A. project](https://github.com/3gx/caia)]
+
 A Slack bot that integrates the OpenAI Codex App-Server with Slack, providing real-time AI-powered code generation, tool execution, and approval workflows directly within Slack channels.
 
 ## Features
